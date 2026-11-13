@@ -2,6 +2,7 @@
 Semua pemanggilan meminta output JSON agar bisa langsung dipakai tahap berikutnya."""
 import json
 import re
+import time
 
 import httpx
 
@@ -36,22 +37,48 @@ def parse_json(raw: str) -> dict:
         raise LLMError(f"Output LLM bukan JSON valid:\n{raw[:500]}")
 
 
+GEMINI_RETRY_STATUS = {429, 500, 503}  # sibuk / kuota per menit: coba lagi, lalu pindah model
+GEMINI_SKIP_STATUS = {404}             # model dipensiunkan / tidak tersedia: langsung pindah model
+GEMINI_TIMEOUT = httpx.Timeout(90.0, connect=15.0)  # lebih pendek: model yang menggantung → pindah model
+
+
 def _gemini(system: str, user: str, temperature: float) -> str:
     if not config.GEMINI_API_KEY:
         raise LLMError("GEMINI_API_KEY belum diisi di .env (gratis di aistudio.google.com)")
-    url = f"https://generativelanguage.googleapis.com/v1beta/models/{config.GEMINI_MODEL}:generateContent"
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
         "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
     }
-    r = httpx.post(url, params={"key": config.GEMINI_API_KEY}, json=body, timeout=TIMEOUT)
-    if r.status_code != 200:
-        raise LLMError(f"Gemini {r.status_code}: {r.text[:400]}")
-    try:
-        return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-    except (KeyError, IndexError):
-        raise LLMError(f"Respons Gemini tak terduga: {r.text[:400]}")
+    models = list(dict.fromkeys([config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS]))
+    errors = []
+    for model in models:
+        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+        r = None
+        for attempt in range(3):
+            try:
+                r = httpx.post(url, params={"key": config.GEMINI_API_KEY}, json=body, timeout=GEMINI_TIMEOUT)
+            except httpx.TimeoutException:
+                r = None  # model menggantung (biasanya karena overload) → langsung pindah model
+                break
+            if r.status_code == 200:
+                try:
+                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
+                except (KeyError, IndexError):
+                    raise LLMError(f"Respons Gemini ({model}) tak terduga: {r.text[:400]}")
+            if r.status_code in GEMINI_RETRY_STATUS and attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
+            break
+        if r is None:
+            errors.append(f"{model} → timeout")
+            continue
+        errors.append(f"{model} → {r.status_code}")
+        if r.status_code not in GEMINI_RETRY_STATUS | GEMINI_SKIP_STATUS:
+            raise LLMError(f"Gemini {r.status_code} ({model}): {r.text[:400]}")
+    raise LLMError("Semua model Gemini gagal (" + ", ".join(errors) + "). Server Google sedang sibuk atau "
+                   "model tidak tersedia — coba lagi beberapa menit lagi, atau ganti GEMINI_MODEL / "
+                   f"LLM_PROVIDER di .env." + (f" Detail terakhir: {r.text[:300]}" if r is not None else ""))
 
 
 def _groq(system: str, user: str, temperature: float) -> str:

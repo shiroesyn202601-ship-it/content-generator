@@ -20,7 +20,10 @@ for _d in (PROJECTS_DIR, CACHE_DIR):
 
 LLM_PROVIDER = _env("LLM_PROVIDER", "gemini").lower()
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
-GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-2.5-flash")
+GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.8-flash")
+# Dicoba berurutan bila model utama sibuk (503/429) atau sudah dipensiunkan (404).
+GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-flash-latest")
+                          .split(",") if m.strip()]
 GROQ_API_KEY = _env("GROQ_API_KEY")
 GROQ_MODEL = _env("GROQ_MODEL", "llama-3.3-70b-versatile")
 OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434")

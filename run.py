@@ -1,5 +1,6 @@
 """
-Jalankan aplikasi:            python run.py
+Jalankan aplikasi:            python run.py              (auto-reload saat kode/.env berubah)
+Tanpa auto-reload:            python run.py --no-reload
 Hubungkan Google (sekali):    python run.py --setup-google
 Pulihkan proyek dari Drive:   python run.py --restore <drive_file_id_project.json>
 """
@@ -28,7 +29,15 @@ def main():
     url = f"http://{config.HOST}:{config.PORT}"
     print(f"Shiroe Syn Content Studio -> {url}")
     webbrowser.open(url)
-    uvicorn.run("app.main:app", host=config.HOST, port=config.PORT, reload=False)
+    # Auto-reload: server restart sendiri tiap ada perubahan kode Python atau .env (matikan: --no-reload).
+    # Catatan: job yang sedang berjalan (mis. render) ikut terhenti saat reload terjadi.
+    reload = "--no-reload" not in sys.argv
+    if reload:
+        print("Auto-reload aktif: perubahan *.py / .env langsung dipakai tanpa restart manual.")
+    uvicorn.run("app.main:app", host=config.HOST, port=config.PORT, reload=reload,
+                reload_dirs=[str(config.ROOT / "app"), str(config.ROOT)] if reload else None,
+                reload_includes=["*.py", ".env"] if reload else None,
+                reload_excludes=[".venv/*", "data/*", "web/*", "credentials/*"] if reload else None)
 
 
 if __name__ == "__main__":
