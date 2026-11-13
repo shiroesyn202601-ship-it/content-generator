@@ -137,8 +137,12 @@ Aturan menambah/mengganti modul: input dan output **wajib** memakai format kanon
 ## 7. Batasan yang perlu diketahui
 - **Edge-TTS tidak lagi menerima SSML kustom**, sehingga emosi dan penekanan diterapkan per kalimat
   (rate/pitch/volume), bukan per kata. Untuk intonasi per kata, gunakan TTS lokal yang mendukung SSML.
-- **Audit YouTube API**: project Google Cloud yang belum diaudit hanya bisa mengunggah video sebagai *private*
-  (termasuk video terjadwal). Ajukan audit lewat formulir "YouTube API Services – Audit and Quota Extension".
-- **Kuota YouTube** 10.000 unit/hari, sedangkan satu upload ±1.600 unit, jadi sekitar 6 upload per hari.
-- **Free tier LLM** punya batas request per menit/hari. Jika kena limit, ganti `LLM_PROVIDER` ke provider lain atau ke Ollama.
+- **YouTube API (per Nov 2026)**: `videos.insert` punya bucket kuota sendiri (±100 upload/hari), terpisah dari
+  10.000 unit/hari untuk panggilan lain. Sejak 2 Nov 2026 video dari project yang belum diaudit tidak lagi
+  dikunci *private*; `privacyStatus` selalu diisi aplikasi karena default-nya kini public. Sumber:
+  developers.google.com/youtube/v3/revision_history. Login OAuth mode "Testing" kedaluwarsa tiap 7 hari.
+- **Free tier LLM** punya batas request per menit/hari. Aplikasi otomatis mencoba model lain lalu provider
+  cadangan (`LLM_FALLBACK_PROVIDERS`); pesan error menjelaskan bila kuota habis.
+- **yt-dlp + YouTube** butuh runtime JavaScript **Deno** (`winget install DenoLand.Deno`) dan paket
+  `yt-dlp[default]`.
 - **Hak cipta Clipper**: gunakan hanya konten yang Anda punya izinnya. Tab *Assets* mencatat sumber dan lisensi.

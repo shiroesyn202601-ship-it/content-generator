@@ -27,13 +27,26 @@ Balas JSON:
     return system, user
 
 
-def script(idea: dict, fmt: str, lang: str, preset: str) -> tuple[str, str]:
-    n = "5-8 scene, total 90-150 kata" if fmt == "short" else "12-20 scene, total 900-1400 kata"
+FACT_RULES = """ATURAN AKURASI (WAJIB):
+- Hanya tulis fakta yang kamu yakini benar & umum diketahui. JANGAN mengarang angka, tahun, nama penemu,
+  lokasi temuan, atau superlatif ("terbesar", "pertama", "satu-satunya") yang tidak kamu yakini.
+- Kalau ragu, pakai bahasa ragu yang jujur ("diperkirakan", "menurut catatan sejarah", "konon") atau
+  ganti dengan pernyataan umum yang pasti benar. Lebih baik kurang dramatis daripada salah fakta."""
+
+
+def script(idea: dict, fmt: str, lang: str, preset: str, max_words: int | None = None) -> tuple[str, str]:
+    if fmt == "short":
+        mw = max_words or 110
+        n = f"4-7 scene, TOTAL MAKSIMAL {mw} kata (lebih dari itu video melewati batas 60 detik Shorts)"
+    else:
+        mw = max_words or 1100
+        n = f"12-20 scene, total sekitar {int(mw * 0.8)}-{mw} kata"
     system = PERSONA + " Kamu ahli struktur cerita (hook - konflik - eskalasi - payoff - CTA)."
     user = f"""Ide terpilih:
 {json.dumps(idea, ensure_ascii=False, indent=2)}
 
 Tulis naskah voice over lengkap, {n}, bahasa {LANG_NAME.get(lang, lang)}, karakter suara "{preset}".
+{FACT_RULES}
 Aturan:
 - Pecah per scene. Setiap scene = 1-3 kalimat yang dibacakan narator.
 - Beri PENANDA EMOSI tiap scene di field "emotion", pilih dari: {list(EMOTION_VOICE)}.
@@ -49,6 +62,19 @@ Aturan:
 Balas JSON:
 {{"title": "...", "framework": {{"hook": "...", "konflik": "...", "eskalasi": "...", "payoff": "...", "cta": "..."}},
   "scenes": [{{"text": "...", "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "..."}}]}}"""
+    return system, user
+
+
+def shorten_script(res: dict, max_words: int) -> tuple[str, str]:
+    system = "Kamu editor naskah video pendek. Kamu memadatkan naskah tanpa mengubah maknanya."
+    user = f"""Naskah berikut terlalu panjang. Padatkan menjadi TOTAL MAKSIMAL {max_words} kata
+(hitung semua field "text"). Pertahankan hook pembuka, urutan cerita, penanda *bintang*, dan semua field lain
+(emotion, mood, visual_query, sfx). Boleh menggabung atau membuang scene yang kurang penting.
+Jangan menambah fakta baru.
+
+{json.dumps({"scenes": res.get("scenes", [])}, ensure_ascii=False)}
+
+Balas JSON: {{"scenes": [{{"text": "...", "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "..."}}]}}"""
     return system, user
 
 
@@ -109,9 +135,9 @@ Balas JSON: {{"picks": [{{"id": "s1", "index": 0, "fit": "cocok", "reason": "...
     return system, user
 
 
-def viral_clips(segments: list[dict], fmt: str, lang: str, title: str) -> tuple[str, str]:
+def viral_clips(segments: list[dict], fmt: str, lang: str, title: str, offset: int = 0) -> tuple[str, str]:
     lo, hi = (20, 59) if fmt == "short" else (90, 600)
-    lines = "\n".join(f"[{i}] {s['start']:.1f}-{s['end']:.1f}: {s['text']}" for i, s in enumerate(segments))
+    lines = "\n".join(f"[{i + offset}] {s['start']:.1f}-{s['end']:.1f}: {s['text']}" for i, s in enumerate(segments))
     system = "Kamu editor klip viral profesional. Kamu memilih momen paling menarik dari transkrip."
     user = f"""Video sumber: "{title}". Transkrip bernomor (detik):
 {lines}
@@ -121,7 +147,8 @@ Pilih 3-6 momen paling berpotensi viral. Setiap klip HARUS:
 - berdurasi {lo}-{hi} detik, punya hook di awal dan terasa selesai di akhir.
 Balas JSON:
 {{"clips": [{{"start_seg": 0, "end_seg": 5, "title": "judul klip", "hook": "teks hook di layar",
-             "reason": "kenapa menarik", "score": 1-10, "keywords": ["kata kunci untuk ditekankan"]}}]}}
+             "reason": "kenapa menarik", "score": 8, "keywords": ["kata kunci untuk ditekankan"]}}]}}
+"start_seg"/"end_seg" = nomor segmen di dalam kurung siku. "score" = angka bulat 1-10.
 Bahasa judul/hook: {LANG_NAME.get(lang, lang)}."""
     return system, user
 

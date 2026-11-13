@@ -2,8 +2,11 @@
 Pakai akun Google pribadi (bukan service account) karena service account tidak punya kuota
 Drive sendiri dan tidak bisa upload ke channel YouTube Anda."""
 import json
+import threading
 
 from .. import config
+
+_token_lock = threading.Lock()
 
 SCOPES = [
     "https://www.googleapis.com/auth/drive",
@@ -20,10 +23,20 @@ def credentials():
 
     if not config.GOOGLE_TOKEN.exists():
         raise RuntimeError("Google belum terhubung. Jalankan: python run.py --setup-google")
-    creds = Credentials.from_authorized_user_file(str(config.GOOGLE_TOKEN), SCOPES)
-    if not creds.valid and creds.expired and creds.refresh_token:
-        creds.refresh(Request())
-        config.GOOGLE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
+    from google.auth.exceptions import RefreshError
+
+    with _token_lock:  # dua job paralel tidak boleh refresh & menulis file token bersamaan
+        creds = Credentials.from_authorized_user_file(str(config.GOOGLE_TOKEN), SCOPES)
+        if not creds.valid and creds.expired and creds.refresh_token:
+            try:
+                creds.refresh(Request())
+            except RefreshError as e:
+                # Aplikasi OAuth mode "Testing": refresh token kedaluwarsa tiap 7 hari.
+                raise RuntimeError(
+                    "Login Google kedaluwarsa (token aplikasi mode Testing hanya berlaku 7 hari). "
+                    "Hubungkan ulang: hentikan server, jalankan `python run.py --setup-google`, lalu "
+                    f"jalankan `python run.py` lagi. Detail: {e}") from e
+            config.GOOGLE_TOKEN.write_text(creds.to_json(), encoding="utf-8")
     return creds
 
 

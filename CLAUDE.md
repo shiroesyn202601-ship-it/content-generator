@@ -64,9 +64,13 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
 
 ## 3. Batasan yang sudah disampaikan ke user
 - Edge-TTS tidak lagi menerima SSML kustom, jadi emosi dan penekanan diterapkan **per kalimat** (rate/pitch/volume), bukan per kata.
-- Project YouTube API yang **belum diaudit** Google hanya bisa upload sebagai **private** (termasuk yang terjadwal).
-- Kuota YouTube 10.000 unit/hari, sedangkan satu upload ±1.600 unit, jadi sekitar 6 upload per hari.
-- Free tier LLM punya rate limit.
+- YouTube API (aturan per Nov 2026, hasil riset): upload punya bucket kuota sendiri (±100 upload/hari) dan
+  sejak 2 Nov 2026 video dari project yang belum diaudit **tidak lagi dikunci private**. `privacyStatus` selalu
+  diisi karena default-nya kini public. Belum diverifikasi dengan upload nyata.
+- Free tier LLM punya rate limit. Gemini sering 429 (kuota habis), jadi Groq dijadikan provider utama
+  (`openai/gpt-oss-120b`, fallback qwen/gpt-oss-20b), Gemini sebagai cadangan.
+- Pexels sedang menghentikan pemberian API key baru; user hanya punya Pixabay.
+- yt-dlp untuk YouTube butuh **Deno** (sudah di-install lewat winget, dicari otomatis oleh `config.find_deno`).
 - Jalur clipper hanya untuk konten yang punya izin.
 - Selama OAuth app berstatus "Testing", token Google kedaluwarsa tiap 7 hari.
 
@@ -86,17 +90,27 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
    Pages belum diaktifkan. User perlu: Settings → Pages → Source = **GitHub Actions**, lalu re-run.
 5. **Folder dipindah** dari `C:\Users\msiso\shiroe-content-studio` ke **`D:\Berdikari\shiroe-content-studio`**
    (pakai robocopy; remote git tetap utuh, tidak perlu clone ulang).
+6. **13 Nov 2026 — instalasi & uji pertama:** Python 3.12, FFmpeg 9.0.2, Deno terpasang (winget). Jalur 1
+   sudah dicoba user sampai tahap aset/VO. Perbaikan: koneksi Pages↔backend (allow_private_network), Groq +
+   fallback model/provider, auto-reload (`.env` dibaca dengan override), bar status per langkah, deteksi
+   ffmpeg/deno otomatis, AI pemilih footage (kata kunci + tag terlarang + penilaian AI).
+7. **Riset 5 agent + Tahap 1** (bug & keamanan): path traversal upload, aksi ganda/upload duplikat, race
+   simpan/setujui, lock sync Sheets & token Google, Clipper (skor string, durasi, jendela transkrip, VAD),
+   unduhan yt-dlp, render (frame kumulatif, gambar sekali baca, apad musik, scene tanpa aset, font OFL
+   otomatis di `data/fonts`), zona aman subtitle Shorts, anggaran kata naskah dari kecepatan suara + aturan
+   anti-karangan fakta.
 
 ## 5. Status & langkah berikutnya
-- [ ] User mengaktifkan GitHub Pages (Source = GitHub Actions) lalu re-run "Deploy Pages".
-- [ ] Install Python 3.11+ dan FFmpeg (`winget install Gyan.FFmpeg`), `pip install -r requirements.txt`.
-- [ ] Isi `.env` (minimal `GEMINI_API_KEY`; `PEXELS_API_KEY`/`PIXABAY_API_KEY` untuk Jalur 1).
-- [ ] Uji end-to-end pertama: Jalur 1, format short, **tanpa Google** dulu.
-- [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive.
-- [ ] Ajukan audit YouTube API bila ingin upload publik/terjadwal.
+Roadmap hasil riset (lihat percakapan 13 Nov 2026):
+- **Tahap 2 (kualitas cepat):** struktur retensi Shorts (hook/loop/teks layar), subtitle pop + preset,
+  loudnorm -14 LUFS + fade musik, encoder hardware otomatis, mode blur untuk footage landscape, cache Pixabay,
+  centang konten sintetis + thumbnail Shorts, halaman "Cek Kesiapan".
+- **Tahap 3 (fitur besar):** riset fakta Wikipedia + tahap cek fakta, potongan visual per kalimat VO,
+  juri visual CLIP/vision LLM, Wikimedia Commons + atribusi, job persisten + batal, structured output Groq.
+- [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive, lalu uji satu upload.
 
-**Belum pernah diuji nyata:** TTS Edge, Whisper, yt-dlp download, render FFmpeg, integrasi Google, upload YouTube.
-Yang sudah terverifikasi baru import modul dan smoke test API (lewat CI).
+**Sudah diuji nyata:** render FFmpeg (tes sintetis), LLM Groq, pencarian Pixabay.
+**Belum diuji nyata:** TTS Edge end-to-end, Whisper, yt-dlp download YouTube, integrasi Google, upload YouTube.
 
 ## 6. Catatan untuk sesi berikutnya
 - Bahasa komunikasi dengan user: **Bahasa Indonesia**, santai tapi jelas.

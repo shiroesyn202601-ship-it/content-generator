@@ -22,8 +22,12 @@ def _whisper():
 def transcribe_file(path, language: str | None, progress, total: float = 0) -> dict:
     progress(f"Memuat model Whisper '{config.WHISPER_MODEL}' (pertama kali akan mengunduh model)...")
     model = _whisper()
+    # VAD default memakai jeda 2 dtk → segmen kepanjangan; 500 ms memberi batas kalimat lebih rapat.
+    # condition_on_previous_text=False mencegah Whisper mengulang/berhalusinasi di audio panjang.
     segments, info = model.transcribe(str(path), language=language or None,
-                                      word_timestamps=True, vad_filter=True)
+                                      word_timestamps=True, vad_filter=True,
+                                      vad_parameters={"min_silence_duration_ms": 500},
+                                      condition_on_previous_text=False)
     out = []
     for seg in segments:
         words = [{"text": w.word.strip(), "start": round(w.start, 3), "end": round(w.end, 3)}
@@ -70,21 +74,76 @@ def snap(segments: list[dict], start: float, end: float) -> tuple[float, float]:
     return round(st, 3), round(en, 3)
 
 
+CLIP_LIMITS = {"short": (20, 59), "long": (90, 600)}
+WINDOW_CHARS = 9000  # transkrip panjang dipecah per jendela agar tidak melewati batas token LLM gratis
+
+
+def _num(v, default: float = 0.0) -> float:
+    """LLM kadang mengirim angka sebagai string ("8", "8/10", "1-10") atau null."""
+    if isinstance(v, (int, float)):
+        return float(v)
+    try:
+        return float(str(v).strip().split("/")[0].split("-")[0])
+    except (ValueError, TypeError):
+        return default
+
+
+def _fit_range(segs: list[dict], a: int, b: int, lo: float, hi: float) -> tuple[int, int]:
+    """Perlebar/persempit rentang segmen supaya durasi klip masuk batas format."""
+    while segs[b]["end"] - segs[a]["start"] < lo and b + 1 < len(segs) \
+            and segs[b + 1]["end"] - segs[a]["start"] <= hi:
+        b += 1
+    while segs[b]["end"] - segs[a]["start"] > hi and b > a:
+        b -= 1
+    return a, b
+
+
+def _windows(segs: list[dict]) -> list[tuple[int, int]]:
+    out, start, size = [], 0, 0
+    for i, s in enumerate(segs):
+        size += len(s["text"]) + 20
+        if size > WINDOW_CHARS and i > start:
+            out.append((start, i))
+            start, size = i, len(s["text"]) + 20
+    out.append((start, len(segs)))
+    return out
+
+
 def find_clips(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     segs = p["script"]["transcript"]["segments"]
-    progress("AI mencari momen viral...")
-    sys_, usr = prompts.viral_clips(segs, p["format"], p["language"], p["research"]["source"].get("title", ""))
-    res = llm.chat_json(sys_, usr, params.get("provider"), temperature=0.5)
-    clips = []
-    for i, c in enumerate(res.get("clips", [])):
-        a = max(0, min(int(c.get("start_seg", 0)), len(segs) - 1))
-        b = max(a, min(int(c.get("end_seg", a)), len(segs) - 1))
+    if not segs:
+        raise RuntimeError("Transkrip kosong — jalankan Transkrip dulu.")
+    lo, hi = CLIP_LIMITS[p["format"]]
+    title = p["research"]["source"].get("title", "")
+    wins = _windows(segs)
+    raw = []
+    for k, (ws, we) in enumerate(wins):
+        progress("AI mencari momen viral…" if len(wins) == 1 else f"AI mencari momen viral (bagian {k + 1}/{len(wins)})…")
+        sys_, usr = prompts.viral_clips(segs[ws:we], p["format"], p["language"], title, offset=ws)
+        raw += llm.chat_json(sys_, usr, params.get("provider"), temperature=0.5).get("clips", [])
+
+    progress("Merapikan kandidat klip (durasi & tumpang-tindih)…")
+    cands = []
+    for c in raw:
+        a = int(max(0, min(_num(c.get("start_seg")), len(segs) - 1)))
+        b = int(max(a, min(_num(c.get("end_seg"), a), len(segs) - 1)))
+        a, b = _fit_range(segs, a, b, lo, hi)
         st, en = snap(segs, segs[a]["start"], segs[b]["end"])
-        clips.append({"id": f"c{i + 1}", "start": st, "end": en, "title": c.get("title", ""),
-                      "hook": c.get("hook", ""), "reason": c.get("reason", ""),
-                      "score": c.get("score", 0), "keywords": c.get("keywords", [])})
-    clips.sort(key=lambda c: -(c.get("score") or 0))
+        if not (lo * 0.75 <= en - st <= hi + 1):
+            continue  # tetap terlalu pendek/panjang (mis. sisa video tidak cukup)
+        cands.append({"start": st, "end": en, "title": str(c.get("title") or ""),
+                      "hook": str(c.get("hook") or ""), "reason": str(c.get("reason") or ""),
+                      "score": int(round(max(0.0, min(10.0, _num(c.get("score")))))),
+                      "keywords": [str(x) for x in c.get("keywords") or [] if x]})
+    cands.sort(key=lambda c: -c["score"])
+    clips = []
+    for c in cands:  # buang klip yang >50% tumpang-tindih dengan klip berskor lebih tinggi
+        if all(min(c["end"], o["end"]) - max(c["start"], o["start"]) <= 0.5 * (c["end"] - c["start"]) for o in clips):
+            clips.append(c)
+    clips = [{"id": f"c{i + 1}", **c} for i, c in enumerate(clips[:8])]
+    if not clips:
+        raise RuntimeError(f"AI tidak menemukan klip berdurasi {lo}-{hi} dtk. Coba lagi, atau pilih manual.")
 
     def apply(p):
         p["script"]["clips"] = clips

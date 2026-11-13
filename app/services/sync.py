@@ -1,6 +1,7 @@
 """Sinkronisasi ke Google setiap kali sebuah tahap disetujui.
 Gagal sinkron TIDAK memblokir pekerjaan (dicatat di log proyek, bisa diulang)."""
 import json
+import threading
 
 from .. import config, store
 from . import gdrive, gsheets
@@ -86,9 +87,18 @@ def sync_project(pid: str, stage: str, progress=lambda m: None) -> dict:
     return {"ok": True}
 
 
+_sync_lock = threading.Lock()  # replace_rows = clear + tulis ulang tab → tidak boleh paralel
+
+
 def safe_sync(pid: str, stage: str, progress=lambda m: None) -> dict:
     try:
-        return sync_project(pid, stage, progress)
+        if not _sync_lock.acquire(blocking=False):
+            progress("Menunggu sinkron Google lain selesai…")
+            _sync_lock.acquire()
+        try:
+            return sync_project(pid, stage, progress)
+        finally:
+            _sync_lock.release()
     except Exception as e:
         store.update(pid, lambda p: store.log(p, f"Sinkron Google gagal ({stage}): {e}"))
         return {"error": str(e)}

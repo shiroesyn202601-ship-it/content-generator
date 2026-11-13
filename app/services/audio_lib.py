@@ -6,6 +6,7 @@ Struktur yang diharapkan (di Google Drive ATAU lokal di data/library/):
   sfx/*.mp3 (atau sfx/<kategori>/*.mp3)   contoh: sfx/whoosh-1.mp3, sfx/boom.mp3
 Sumber gratis: YouTube Audio Library, Pixabay Music/SFX, freesound (CC0).
 """
+import re
 import time
 from pathlib import Path
 
@@ -63,7 +64,14 @@ def local_path(item: dict) -> Path:
     """Pastikan file tersedia lokal (download dari Drive ke cache bila perlu)."""
     if item["source"] == "local":
         return config.DATA_DIR / item["ref"]
-    dest = config.CACHE_DIR / f"{item['ref']}_{item['name']}"
+    # Keamanan: ref & name berasal dari request → buang pemisah folder SEBELUM file ditulis.
+    ref = re.sub(r"[^A-Za-z0-9_-]", "", str(item["ref"]))
+    name = re.sub(r'[\\/:*?"<>|]', "_", str(item.get("name") or "")).lstrip(".")[:120]
+    if not ref:
+        raise ValueError("ref tidak valid")
+    dest = config.CACHE_DIR / f"{ref}_{name}"
+    if not dest.resolve().is_relative_to(config.CACHE_DIR.resolve()):
+        raise ValueError("nama file tidak valid")
     if not dest.exists():
         from . import gdrive
         gdrive.download(item["ref"], dest)

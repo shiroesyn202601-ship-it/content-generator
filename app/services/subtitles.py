@@ -136,7 +136,14 @@ def _esc(s: str) -> str:
 def to_ass(words: list[dict], lines: list[dict], style: dict, fmt: str) -> str:
     W, H = config.RESOLUTIONS[fmt]
     pos = style.get("position", "bottom")
-    align, mv = {"middle": (5, 0), "lower": (2, int(H * 0.22))}.get(pos, (2, int(H * 0.08)))
+    if fmt == "short":
+        # Zona aman Shorts (1080x1920): ±670 px bawah tertutup judul/caption/tombol, ±190 px kanan
+        # tertutup tombol like/komentar. Posisi bawah dinaikkan ke atas area UI tersebut.
+        align, mv = {"middle": (5, 0), "lower": (2, 900)}.get(pos, (2, 700))
+        ml, mr = 60, 190
+    else:
+        align, mv = {"middle": (5, 0), "lower": (2, int(H * 0.22))}.get(pos, (2, int(H * 0.08)))
+        ml, mr = 60, 60
     prim, hi, em = _ass_color(style["primary"]), _ass_color(style["highlight"]), _ass_color(style["emphasis"])
     sc = int(style.get("emphasis_scale", 125))
     up = style.get("uppercase", False)
@@ -149,7 +156,7 @@ ScaledBorderAndShadow: yes
 
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
-Style: Main,{style['font']},{style['size']},{prim},{prim},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{style.get('outline', 4)},2,{align},60,60,{mv},1
+Style: Main,{style['font']},{style['size']},{prim},{prim},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{style.get('outline', 4)},2,{align},{ml},{mr},{mv},1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text

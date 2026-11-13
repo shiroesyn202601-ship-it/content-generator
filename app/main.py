@@ -125,22 +125,23 @@ def save_stage(pid: str, stage: str, data: dict = Body(...)):
     p = _load(pid)
     if stage == "script" and p["mode"] == "scratch" and "scenes" in data:
         data["scenes"] = scriptgen.normalize_scenes(data["scenes"])
+    # Lewat store.update (di bawah lock) supaya tidak menimpa hasil job yang sedang menulis proyek.
     try:
-        store.save_stage(p, stage, data)
+        return store.update(pid, lambda p: store.save_stage(p, stage, data))
     except PermissionError as e:
         raise HTTPException(409, str(e))
-    return store.save(p)
 
 
 @app.post("/api/projects/{pid}/stage/{stage}/approve")
 def approve(pid: str, stage: str):
     """Tombol 'Setujui & Lanjut'. Sinkron Google berjalan di background."""
-    p = _load(pid)
+    _load(pid)
+    if stage not in store.STAGES:
+        raise HTTPException(404)
     try:
-        store.approve(p, stage)
+        p = store.update(pid, lambda p: store.approve(p, stage))
     except (PermissionError, ValueError) as e:
         raise HTTPException(409, str(e))
-    store.save(p)
     jid = jobs.submit(pid, f"sync.{stage}", lambda progress: sync.safe_sync(pid, stage, progress))
     return {"project": p, "sync_job": jid}
 
@@ -164,6 +165,11 @@ def action(pid: str, name: str, params: dict = Body(default={})):
     p = _load(pid)
     if store.STAGES.index(stage) > p["current_stage"]:
         raise HTTPException(409, "Tahap ini belum terbuka. Setujui tahap sebelumnya dulu.")
+    # Cegah klik ganda / dua tab: aksi yang sama (atau render vs upload) tidak boleh jalan bersamaan.
+    busy = {j["kind"] for j in jobs.active_for(pid)}
+    clash = busy & ({name} | ({"render.run", "publish.upload"} if name in ("render.run", "publish.upload") else set()))
+    if clash:
+        raise HTTPException(409, f"Proses '{next(iter(clash))}' masih berjalan untuk proyek ini. Tunggu sampai selesai.")
     if as_job:
         return {"job": jobs.submit(pid, name, fn, pid, params)}
     try:
@@ -176,7 +182,8 @@ def action(pid: str, name: str, params: dict = Body(default={})):
 def job(jid: str):
     j = jobs.get(jid)
     if not j:
-        raise HTTPException(404)
+        raise HTTPException(404, "Proses ini tidak ditemukan — kemungkinan server di-restart/reload saat proses "
+                                 "berjalan. Jalankan ulang aksinya.")
     return j
 
 
@@ -184,9 +191,15 @@ def job(jid: str):
 @app.post("/api/projects/{pid}/upload-source")
 def upload_source(pid: str, file: UploadFile = File(...)):
     _load(pid)
+    # Keamanan: ekstensi masuk ke nama file → whitelist (nama seperti "x.mp4\..\..\evil" ditolak).
+    name = (file.filename or "video.mp4").replace("\\", "/").rsplit("/", 1)[-1]
+    ext = name.rsplit(".", 1)[-1].lower() if "." in name else ""
+    if ext not in ("mp4", "mov", "mkv", "webm", "m4v"):
+        raise HTTPException(400, "Format video tidak didukung (pakai mp4, mov, mkv, webm, m4v).")
     d = store.project_dir(pid) / "source"
+    if d.exists():
+        shutil.rmtree(d, ignore_errors=True)  # buang sumber lama supaya tidak tertukar
     d.mkdir(exist_ok=True)
-    ext = (file.filename or "video.mp4").rsplit(".", 1)[-1].lower()
     dest = d / f"source.{ext}"
     with open(dest, "wb") as f:
         shutil.copyfileobj(file.file, f)
@@ -206,7 +219,10 @@ def upload_source(pid: str, file: UploadFile = File(...)):
 @app.post("/api/projects/{pid}/assets/{sid}/upload")
 def upload_asset(pid: str, sid: str, file: UploadFile = File(...)):
     _load(pid)
-    return assets.save_upload(pid, sid, file.filename or "asset.mp4", file.file)
+    try:
+        return assets.save_upload(pid, sid, file.filename or "asset.mp4", file.file)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
 
 
 @app.get("/api/projects/{pid}/snap")
@@ -257,9 +273,18 @@ def library(kind: str, refresh: bool = False):
 @app.get("/api/library-file")
 def library_file(source: str, ref: str, name: str = ""):
     """Stream file musik/SFX untuk pratinjau di browser."""
-    path = audio_lib.local_path({"source": source, "ref": ref, "name": name})
-    if not path.resolve().is_relative_to(config.DATA_DIR.resolve()):
+    if source not in ("local", "drive"):
+        raise HTTPException(400)
+    if source == "local" and not (config.DATA_DIR / ref).resolve().is_relative_to(config.DATA_DIR.resolve()):
         raise HTTPException(403)
+    try:
+        path = audio_lib.local_path({"source": source, "ref": ref, "name": name})
+    except ValueError:
+        raise HTTPException(400, "Nama file tidak valid")
+    except Exception as e:  # noqa: BLE001 — mis. Google belum terhubung / file Drive tidak ada
+        raise HTTPException(502, f"Gagal mengambil file library: {e}")
+    if not path.resolve().is_relative_to(config.DATA_DIR.resolve()) or not path.is_file():
+        raise HTTPException(404)
     return FileResponse(path)
 
 

@@ -102,6 +102,20 @@ async function loadProject(pid, keepView = false) {
   S.dirty = false; S.voiceDirty = false;
   localStorage.setItem('lastProject', pid);
   render(); refreshList();
+  resumeJobs();
+}
+
+/* Proyek dibuka ulang (refresh halaman / pindah proyek) saat proses masih berjalan → lanjutkan bar status. */
+async function resumeJobs() {
+  const running = (S.p._jobs || []).filter((j) => !j.kind.startsWith('sync.'));
+  if (!running.length || S.busy) return;
+  const j = running[0], pid = S.p.id;
+  S.busy = true;
+  try {
+    await pollJob(j.id, actionLabel(j.kind));
+    if (S.p && S.p.id === pid) await loadProject(pid, true);
+  } catch (e) { toast(`${actionLabel(j.kind)} gagal:\n${e.message}`, true); }
+  finally { S.busy = false; status(''); }
 }
 
 function markDirty() {
@@ -706,9 +720,13 @@ function rPublish() {
     field('Kategori', d, 'category_id', { type: 'select', options: [['22', 'People & Blogs'], ['24', 'Entertainment'], ['27', 'Education'],
       ['28', 'Science & Tech'], ['20', 'Gaming'], ['10', 'Music'], ['17', 'Sports'], ['25', 'News & Politics'], ['19', 'Travel']] }),
     field('Konten untuk anak-anak', d, 'made_for_kids', { type: 'checkbox' })));
-  box.append(hint('Jadwal memakai fitur publishAt bawaan YouTube: video diunggah private lalu YouTube menayangkannya otomatis — komputer tidak perlu menyala saat jam tayang. Catatan: project API yang belum diaudit Google hanya bisa upload sebagai private. Kuota gratis ±6 upload/hari.'));
+  box.append(hint('Jadwal memakai fitur publishAt bawaan YouTube: video diunggah private lalu YouTube menayangkannya otomatis — komputer tidak perlu menyala saat jam tayang. Kuota upload API ±100 video/hari. Login Google (mode Testing) perlu dihubungkan ulang tiap 7 hari.'));
   box.append(h('div', { class: 'row' }, btn('🚀 Upload & Jadwalkan ke YouTube', () => {
     if (!d.title) return toast('Judul masih kosong', true);
+    if (S.p.publish.video_id) {
+      if (confirm(`Proyek ini SUDAH diunggah (${S.p.publish.url}).\nUpload ulang akan membuat video DUPLIKAT di channel. Tetap upload ulang?`)) runAction('publish.upload', { force: true });
+      return;
+    }
     if (confirm(`Upload "${d.title}" ke channel YouTube Anda${d.publish_at ? `, tayang ${d.publish_at}` : ` sebagai ${d.privacy}`}?`)) runAction('publish.upload');
   }, 'success')));
   if (d.video_id) box.append(h('div', { class: 'card' }, '✅ Terunggah: ', h('a', { href: d.url, target: '_blank' }, d.url), ` · status: ${d.status}`));

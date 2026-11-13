@@ -71,6 +71,19 @@ def _find_bin(name: str, configured: str) -> str:
 
 FFMPEG = _find_bin("ffmpeg", _env("FFMPEG_BIN", "ffmpeg"))
 FFPROBE = _find_bin("ffprobe", _env("FFPROBE_BIN", "ffprobe"))
+
+
+def find_deno() -> str | None:
+    """yt-dlp butuh runtime JavaScript (Deno) untuk YouTube sejak Nov 2025.
+    Install: winget install DenoLand.Deno. Dicari juga di lokasi winget bila PATH terminal belum diperbarui."""
+    found = shutil.which("deno")
+    if found:
+        return found
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    exe = "deno.exe" if os.name == "nt" else "deno"
+    cands = [local / "Microsoft/WinGet/Links" / exe, Path.home() / ".deno/bin" / exe]
+    cands += sorted((local / "Microsoft/WinGet/Packages").glob(f"DenoLand.Deno*/{exe}"))
+    return next((str(c) for c in cands if c.is_file()), None)
 DEFAULT_LANGUAGE = _env("DEFAULT_LANGUAGE", "id")
 HOST = _env("HOST", "127.0.0.1")
 PORT = int(_env("PORT", "8000"))

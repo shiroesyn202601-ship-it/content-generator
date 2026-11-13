@@ -30,6 +30,9 @@ def submit(project_id: str, kind: str, fn, *args, **kwargs) -> str:
            "progress": "", "result": None, "error": None,
            "started_at": now, "step_started_at": now, "steps": []}
     with _lock:
+        # Bersihkan job selesai yang sudah > 1 jam supaya memori tidak terus membesar.
+        for old in [k for k, j in _jobs.items() if j.get("finished_at") and now - j["finished_at"] > 3600]:
+            del _jobs[old]
         _jobs[jid] = job
 
     def progress(msg: str):
@@ -84,4 +87,7 @@ def get(jid: str) -> dict | None:
 
 
 def active_for(project_id: str) -> list[dict]:
-    return [j for j in _jobs.values() if j["project_id"] == project_id and j["status"] == "running"]
+    """Job yang masih berjalan untuk proyek ini (ringkas; dipakai UI untuk menyambung ulang polling)."""
+    with _lock:
+        running = [j for j in _jobs.values() if j["project_id"] == project_id and j["status"] == "running"]
+    return [{"id": j["id"], "kind": j["kind"], "progress": j["progress"]} for j in running]

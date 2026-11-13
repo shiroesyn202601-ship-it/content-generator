@@ -1,4 +1,5 @@
 """Tahap 1: Ide & riset (scratch) / ambil video sumber (clipper)."""
+import shutil
 from pathlib import Path
 
 from .. import config, store
@@ -49,6 +50,9 @@ def download_source(pid: str, params: dict, progress) -> dict:
 
     url = params["url"].strip()
     out_dir = store.project_dir(pid) / "source"
+    # Kosongkan dulu: kalau tidak, yt-dlp melihat source.mp4 lama & melewati unduhan (video tertukar).
+    if out_dir.exists():
+        shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(exist_ok=True)
 
     def hook(d):
@@ -58,7 +62,9 @@ def download_source(pid: str, params: dict, progress) -> dict:
             progress("Menggabungkan audio+video...")
 
     opts = {
-        "format": "bv*[height<=1080][ext=mp4]+ba[ext=m4a]/b[height<=1080][ext=mp4]/b",
+        # Utamakan H.264 (avc1): AV1/VP9 sangat berat di-decode CPU laptop saat potong & render.
+        "format": ("bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
+                   "b[height<=1080][ext=mp4]/b"),
         "merge_output_format": "mp4",
         "outtmpl": str(out_dir / "source.%(ext)s"),
         "progress_hooks": [hook],
@@ -67,13 +73,26 @@ def download_source(pid: str, params: dict, progress) -> dict:
     }
     if config.FFMPEG != "ffmpeg":
         opts["ffmpeg_location"] = str(Path(config.FFMPEG).parent)
-    with yt_dlp.YoutubeDL(opts) as ydl:
-        info = ydl.extract_info(url, download=True)
-    files = sorted(out_dir.glob("source.*"))
-    if not files:
-        raise RuntimeError("Download gagal: file tidak ditemukan.")
+    deno = config.find_deno()
+    if deno:
+        opts["js_runtimes"] = {"deno": {"path": deno}}
+    try:
+        with yt_dlp.YoutubeDL(opts) as ydl:
+            info = ydl.extract_info(url, download=True)
+    except yt_dlp.utils.DownloadError as e:
+        hint = ("" if deno else " — Deno belum terpasang (wajib untuk YouTube sejak Nov 2025): jalankan "
+                "`winget install DenoLand.Deno`, lalu restart aplikasi.")
+        raise RuntimeError(f"Unduh gagal: {e}{hint} Coba juga perbarui: pip install -U \"yt-dlp[default]\"") from e
+    # Ambil path final dari yt-dlp (bukan glob, yang bisa menangkap sisa .part / .f137.mp4).
+    req = (info.get("requested_downloads") or [{}])[0]
+    final = Path(req.get("filepath") or "")
+    if not final.is_file():
+        files = [f for f in out_dir.glob("source.*") if f.suffix in (".mp4", ".mkv", ".webm")]
+        if not files:
+            raise RuntimeError("Download gagal: file tidak ditemukan.")
+        final = files[0]
     src = {"url": url, "title": info.get("title"), "channel": info.get("channel"),
-           "duration": info.get("duration"), "path": f"source/{files[0].name}",
+           "duration": info.get("duration"), "path": f"source/{final.name}",
            "license": info.get("license")}
 
     def apply(p):

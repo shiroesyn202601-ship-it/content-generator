@@ -26,8 +26,15 @@ def main():
     if not shutil.which(config.FFMPEG):
         print("PERINGATAN: ffmpeg tidak ditemukan di PATH — render/potong video akan gagal.")
     import uvicorn
-    url = f"http://{config.HOST}:{config.PORT}"
+    host = "127.0.0.1" if config.HOST in ("0.0.0.0", "::") else config.HOST
+    url = f"http://{host}:{config.PORT}"
     print(f"Shiroe Syn Content Studio -> {url}")
+    if config.HOST in ("0.0.0.0", "::"):
+        print("PERINGATAN: HOST=0.0.0.0 — aplikasi bisa diakses semua perangkat di Wi-Fi ini TANPA login. "
+              "Pakai hanya di jaringan rumah.")
+    if not config.find_deno():
+        print("Info: Deno belum terpasang — unduh video YouTube (Clipper) akan gagal. "
+              "Install: winget install DenoLand.Deno")
     webbrowser.open(url)
     # Auto-reload: server restart sendiri tiap ada perubahan kode Python atau .env (matikan: --no-reload).
     # Catatan: job yang sedang berjalan (mis. render) ikut terhenti saat reload terjadi.

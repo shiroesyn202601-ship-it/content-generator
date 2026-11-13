@@ -63,11 +63,14 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def project_dir(pid: str) -> Path:
+def project_dir(pid: str, create: bool = False) -> Path:
+    """Folder proyek. Hanya dibuat saat create=True (menyimpan), supaya GET ke id
+    sembarang tidak menghasilkan folder kosong."""
     if not re.fullmatch(r"[a-z0-9-]+", pid):
         raise ValueError("project id tidak valid")
     d = config.PROJECTS_DIR / pid
-    d.mkdir(parents=True, exist_ok=True)
+    if create:
+        d.mkdir(parents=True, exist_ok=True)
     return d
 
 
@@ -135,7 +138,7 @@ def load(pid: str) -> dict:
 
 def save(p: dict) -> dict:
     p["updated_at"] = now_iso()
-    f = project_dir(p["id"]) / "project.json"
+    f = project_dir(p["id"], create=True) / "project.json"
     with _lock:
         tmp = f.with_suffix(".tmp")
         tmp.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")

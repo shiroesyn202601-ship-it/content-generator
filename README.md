@@ -43,7 +43,8 @@ Aplikasi sudah bisa dipakai tanpa Google; file tersimpan di `data/projects/`.
    `DRIVE_MUSIC_FOLDER_ID` / `DRIVE_SFX_FOLDER_ID`. Library juga bisa disimpan lokal di `data/library/music/<mood>/` dan `data/library/sfx/`.
 
 > ⚠ Selama project masih berstatus "Testing", token kedaluwarsa setiap 7 hari, jadi jalankan ulang `--setup-google`.
-> Video yang diunggah lewat API yang belum diaudit Google selalu *private*. Lihat ARCHITECTURE.md §7.
+> Sejak 2 Nov 2026 video dari project API yang belum diaudit tidak lagi dikunci *private* (lihat ARCHITECTURE.md §7).
+> Login Google untuk aplikasi mode "Testing" perlu dihubungkan ulang tiap 7 hari.
 
 ## 2b. Versi web di GitHub Pages
 

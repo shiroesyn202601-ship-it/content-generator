@@ -264,8 +264,16 @@ def auto_all(pid: str, params: dict, progress) -> dict:
     return {"filled": done, "weak": weak}
 
 
+UPLOAD_EXT = {".mp4", ".mov", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"}
+
+
 def save_upload(pid: str, sid: str, filename: str, fileobj) -> dict:
-    ext = Path(filename).suffix.lower() or ".mp4"
+    # Keamanan: sid & ekstensi masuk ke path file → wajib divalidasi (cegah path traversal).
+    if sid not in {s["id"] for s in store.load(pid)["script"]["scenes"]}:
+        raise ValueError(f"Scene tidak dikenal: {sid}")
+    ext = Path(filename.replace("\\", "/").rsplit("/", 1)[-1]).suffix.lower() or ".mp4"
+    if ext not in UPLOAD_EXT:
+        raise ValueError(f"Format file tidak didukung: {ext} (pakai {', '.join(sorted(UPLOAD_EXT))})")
     rel = f"assets/{sid}_manual{ext}"
     dest = store.project_dir(pid) / rel
     dest.parent.mkdir(exist_ok=True)
