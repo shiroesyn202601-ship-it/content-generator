@@ -71,6 +71,12 @@ textarea { resize: vertical; }
 .hint { font-size: 12px; color: var(--muted); background: var(--bg); border-left: 3px solid var(--accent);
   padding: 6px 10px; border-radius: 4px; margin: 8px 0; }
 .warn { border-left-color: var(--warn); }
+.warn-text { color: var(--warn); font-weight: 600; }
+table.health { width: 100%; border-collapse: collapse; font-size: 13px; }
+table.health th { text-align: left; padding: 10px 6px 4px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); }
+table.health td { padding: 6px; vertical-align: top; border-bottom: 1px solid var(--line); }
+table.health td:first-child { width: 28px; }
+.card .tag { font-size: 11px; background: var(--panel2); border: 1px solid var(--line); padding: 1px 8px; border-radius: 999px; font-weight: 500; }
 .thumb { position: relative; cursor: pointer; border-radius: 8px; overflow: hidden; border: 2px solid transparent; background: #000; }
 .thumb:hover { border-color: var(--accent); }
 .thumb img { width: 100%; height: 120px; object-fit: cover; display: block; }

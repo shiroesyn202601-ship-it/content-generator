@@ -189,7 +189,7 @@ def render_vo(pid: str, params: dict, progress) -> dict:
             for w in aligned:
                 words.append({"text": w["text"], "start": round(offset + w["start"], 3),
                               "end": round(offset + w["end"], 3), "emphasis": w["emphasis"],
-                              "scene_id": s["id"]})
+                              "scene_id": s["id"], "sent": n})
             sentences.append({"scene_id": s["id"], "text": sent, "start": round(offset, 3),
                               "end": round(offset + dur, 3), "rate": rate, "pitch": pitch})
             pcm += frames

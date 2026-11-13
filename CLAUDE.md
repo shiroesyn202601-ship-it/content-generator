@@ -100,11 +100,16 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
    otomatis di `data/fonts`), zona aman subtitle Shorts, anggaran kata naskah dari kecepatan suara + aturan
    anti-karangan fakta.
 
+8. **Tahap 2** (kualitas): struktur retensi Shorts (role scene, hook ≤12 kata, `on_screen_text` → teks hook
+   2.5 dtk di layar), rentang kata naskah + kembangkan/padatkan otomatis, subtitle "pop" + preset
+   (`store.SUB_PRESETS`) + baris tidak melintasi kalimat, loudnorm -14 LUFS + fade musik, encoder GPU otomatis
+   (`ff.video_encoder`, laptop user: h264_qsv Intel Iris Xe) + fallback libx264, mode bingkai blur per scene,
+   cache Pixabay 24 jam, musik acak per mood, `containsSyntheticMedia`, prompt metadata SEO Shorts,
+   halaman 🩺 Cek Kesiapan (`/api/health`).
+
 ## 5. Status & langkah berikutnya
 Roadmap hasil riset (lihat percakapan 13 Nov 2026):
-- **Tahap 2 (kualitas cepat):** struktur retensi Shorts (hook/loop/teks layar), subtitle pop + preset,
-  loudnorm -14 LUFS + fade musik, encoder hardware otomatis, mode blur untuk footage landscape, cache Pixabay,
-  centang konten sintetis + thumbnail Shorts, halaman "Cek Kesiapan".
+- Tahap 1 & 2 selesai. Belum: thumbnail Shorts (`thumbnails.set`) — butuh UI pilih gambar.
 - **Tahap 3 (fitur besar):** riset fakta Wikipedia + tahap cek fakta, potongan visual per kalimat VO,
   juri visual CLIP/vision LLM, Wikimedia Commons + atribusi, job persisten + batal, structured output Groq.
 - [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive, lalu uji satu upload.

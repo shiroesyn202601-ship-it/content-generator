@@ -6,6 +6,7 @@ Struktur yang diharapkan (di Google Drive ATAU lokal di data/library/):
   sfx/*.mp3 (atau sfx/<kategori>/*.mp3)   contoh: sfx/whoosh-1.mp3, sfx/boom.mp3
 Sumber gratis: YouTube Audio Library, Pixabay Music/SFX, freesound (CC0).
 """
+import random
 import re
 import time
 from pathlib import Path
@@ -78,10 +79,20 @@ def local_path(item: dict) -> Path:
     return dest
 
 
+_recent_music: list[str] = []
+
+
 def pick_music(mood: str) -> dict | None:
+    """Acak di antara trek dengan mood yang sama, hindari trek yang baru saja dipakai (tidak monoton)."""
     items = list_library("music")
-    same = [i for i in items if i["mood"] == mood]
-    return (same or items or [None])[0]
+    pool = [i for i in items if i["mood"] == mood] or items
+    if not pool:
+        return None
+    fresh = [i for i in pool if i["ref"] not in _recent_music] or pool
+    choice = random.choice(fresh)
+    _recent_music.append(choice["ref"])
+    del _recent_music[:-5]
+    return choice
 
 
 def pick_sfx(name: str) -> dict | None:

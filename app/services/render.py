@@ -14,22 +14,40 @@ from . import ffmpeg_utils as ff
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
 
 
-def _scene_segment(d: Path, asset_rel: str | None, frames: int, out_rel: str, W: int, H: int) -> None:
+def _resolve_fit(d: Path, asset_rel: str, fit: str, W: int, H: int) -> str:
+    """auto: gambar yang orientasinya beda dengan video (mis. foto landscape di Shorts) → 'blur' supaya
+    objeknya utuh; video → 'center' (isi penuh layar)."""
+    if fit in ("center", "blur"):
+        return fit
+    if asset_rel.lower().endswith(IMG_EXT):
+        try:
+            s = next(x for x in ff.probe(d / asset_rel)["streams"] if x.get("codec_type") == "video")
+            img_portrait = int(s["height"]) >= int(s["width"])
+            return "center" if img_portrait == (H >= W) else "blur"
+        except (StopIteration, KeyError, ValueError, ff.FFmpegError):
+            return "center"
+    return "center"
+
+
+def _scene_segment(d: Path, asset_rel: str | None, frames: int, out_rel: str, W: int, H: int,
+                   fit: str = "auto") -> None:
     """Satu segmen scene dengan jumlah frame PERSIS (bukan -t detik) supaya visual tidak bergeser dari VO."""
     enc = ["-frames:v", str(frames), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_rel]
     if not asset_rel:
         # Scene tanpa visual: latar gelap polos supaya render tidak gagal.
         ff.run(["-f", "lavfi", "-i", f"color=c=0x111318:s={W}x{H}:r={config.FPS}",
                 "-vf", "format=yuv420p", *enc], cwd=d)
-    elif asset_rel.lower().endswith(IMG_EXT):
+        return
+    fit = _resolve_fit(d, asset_rel, fit, W, H)
+    if asset_rel.lower().endswith(IMG_EXT):
         # Ken Burns pelan. Gambar dibaca SEKALI (tanpa -loop) lalu zoompan menghasilkan semua frame:
         # jauh lebih cepat daripada men-scale ulang gambar 4K di setiap frame. Skala 2x mengurangi jitter.
-        vf = (f"scale={W * 2}:{H * 2}:force_original_aspect_ratio=increase,crop={W * 2}:{H * 2},"
-              f"zoompan=z='1+0.12*on/{max(frames, 1)}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
-              f":s={W}x{H}:fps={config.FPS},format=yuv420p")
-        ff.run(["-i", asset_rel, "-vf", vf, *enc], cwd=d)
+        zoom = (f"zoompan=z='1+0.12*on/{max(frames, 1)}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+                f":s={W}x{H}:fps={config.FPS},format=yuv420p")
+        ff.run(["-i", asset_rel, "-filter_complex", f"[0:v]{ff.fit_filter(W * 2, H * 2, fit)},{zoom}[v]",
+                "-map", "[v]", *enc], cwd=d)
     else:
-        vf = f"{ff.fit_filter(W, H, 'center')},fps={config.FPS},format=yuv420p"
+        vf = f"{ff.fit_filter(W, H, fit)},fps={config.FPS},format=yuv420p"
         ff.run(["-stream_loop", "-1", "-i", asset_rel, "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", *enc],
                cwd=d)
 
@@ -55,7 +73,10 @@ def _audio_graph(base: str, n_inputs_before: int, music: tuple | None, sfx: list
     if music:
         idx, vol = music
         parts.append(f"{base}{fmt},apad,asplit=2[main][sc]")
-        parts.append(f"[{idx}:a]{fmt},volume={vol},atrim=0:{total:.3f}[mus]")
+        # Musik: fade-in 1 dtk & fade-out 1.5 dtk di akhir video (tidak terpotong mendadak).
+        fo = max(0.0, total - 1.5)
+        parts.append(f"[{idx}:a]{fmt},volume={vol},atrim=0:{total:.3f},afade=t=in:d=1,"
+                     f"afade=t=out:st={fo:.3f}:d=1.5[mus]")
         parts.append("[mus][sc]sidechaincompress=threshold=0.03:ratio=8:attack=20:release=400[duck]")
         mix += ["[main]", "[duck]"]
     else:
@@ -65,10 +86,13 @@ def _audio_graph(base: str, n_inputs_before: int, music: tuple | None, sfx: list
         ms = int(at * 1000)
         parts.append(f"[{idx}:a]{fmt},volume={vol},adelay={ms}|{ms}[sfx{k}]")
         mix.append(f"[sfx{k}]")
+    # Loudness standar platform: -14 LUFS integrated, true peak -1.5 dB (loudnorm bekerja di 192 kHz,
+    # jadi dikembalikan ke 48 kHz).
+    norm = "loudnorm=I=-14:TP=-1.5:LRA=11,aresample=48000"
     if len(mix) == 1:
-        parts.append(f"{mix[0]}anull[aout]")
+        parts.append(f"{mix[0]}{norm}[aout]")
     else:
-        parts.append(f"{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0,alimiter=limit=0.95[aout]")
+        parts.append(f"{''.join(mix)}amix=inputs={len(mix)}:duration=first:normalize=0,{norm}[aout]")
     return parts
 
 
@@ -114,24 +138,23 @@ def run(pid: str, params: dict, progress) -> dict:
             raise RuntimeError(f"Timing VO tidak ada untuk scene {', '.join(missing)} — render ulang voice over.")
         frames = _scene_frames(scenes, timings, total)
         for i, s in enumerate(scenes):
-            sel = (p["assets"]["scenes"].get(s["id"]) or {}).get("selected") or {}
+            slot = p["assets"]["scenes"].get(s["id"]) or {}
+            sel = slot.get("selected") or {}
             asset = sel.get("path") if sel.get("path") and (d / sel["path"]).is_file() else None
             out = f"render/seg_{i:03d}.mp4"
             progress(f"Scene {i + 1}/{len(scenes)} ({frames[i] / config.FPS:.1f}s)"
                      + ("" if asset else " — tanpa visual, memakai latar polos"))
-            _scene_segment(d, asset, frames[i], out, W, H)
+            _scene_segment(d, asset, frames[i], out, W, H, slot.get("fit") or "auto")
             concat.append(f"file 'seg_{i:03d}.mp4'")
         (d / "render" / "concat.txt").write_text("\n".join(concat), encoding="utf-8")
         progress("Menggabungkan scene...")
         ff.run(["-f", "concat", "-safe", "0", "-i", "render/concat.txt", "-c", "copy", "render/visual.mp4"], cwd=d)
         extra, music, sfx = _extra_audio_inputs(p, 2)
         graph = [f"[0:v]{sub_filter}[vout]"] + _audio_graph("[1:a]", 2, music, sfx, total)
-        progress("Mixing audio + burn-in subtitle...")
-        ff.run(["-i", "render/visual.mp4", "-i", p["audio"]["vo_path"], *extra,
-                "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}", "-movflags", "+faststart",
-                "render/final.mp4"], cwd=d)
+        progress(f"Mixing audio + burn-in subtitle ({ff.video_encoder()})…")
+        enc = ff.run_encode(["-i", "render/visual.mp4", "-i", p["audio"]["vo_path"], *extra,
+                             "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]"],
+                            [*ff.AUDIO_ARGS, "-t", f"{total:.3f}", "-movflags", "+faststart", "render/final.mp4"], cwd=d)
     else:
         clip = p["assets"]["clip_path"]
         total = ff.duration(d / clip)
@@ -141,11 +164,9 @@ def run(pid: str, params: dict, progress) -> dict:
         else:
             base_graph, base = [f"anullsrc=r=48000:cl=stereo,atrim=0:{total:.3f}[silent]"], "[silent]"
         graph = [f"[0:v]{sub_filter}[vout]"] + base_graph + _audio_graph(base, 1, music, sfx, total)
-        progress("Mixing audio + burn-in subtitle...")
-        ff.run(["-i", clip, *extra, "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]",
-                "-c:v", "libx264", "-preset", "medium", "-crf", "20", "-pix_fmt", "yuv420p",
-                "-c:a", "aac", "-b:a", "192k", "-t", f"{total:.3f}", "-movflags", "+faststart",
-                "render/final.mp4"], cwd=d)
+        progress(f"Mixing audio + burn-in subtitle ({ff.video_encoder()})…")
+        enc = ff.run_encode(["-i", clip, *extra, "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]"],
+                            [*ff.AUDIO_ARGS, "-t", f"{total:.3f}", "-movflags", "+faststart", "render/final.mp4"], cwd=d)
 
     drive_id = None
     if config.google_enabled():
@@ -157,6 +178,6 @@ def run(pid: str, params: dict, progress) -> dict:
         p["render"].update({"output_path": "render/final.mp4", "duration": round(total, 2),
                             "drive_file_id": drive_id})
         store.touch_stage(p, "render")
-        store.log(p, f"Render selesai ({total:.1f}s)")
+        store.log(p, f"Render selesai ({total:.1f}s, encoder {enc})")
     store.update(pid, apply)
     return {"path": "render/final.mp4"}

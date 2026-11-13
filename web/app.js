@@ -353,10 +353,14 @@ function rScript() { return S.p.mode === 'scratch' ? rScriptScratch() : rScriptC
 function rScriptScratch() {
   const d = S.draft, box = h('div'), m = S.meta;
   d.scenes = d.scenes || [];
-  const words = d.scenes.reduce((a, s) => a + (s.text.trim() ? s.text.trim().split(/\s+/).length : 0), 0);
+  const words = d.scenes.reduce((a, s) => a + (s.text.trim() ? s.text.replace(/\*/g, '').trim().split(/\s+/).length : 0), 0);
+  // Perkiraan durasi VO dari kecepatan suara (kata/dtk diukur dari edge-tts) + jeda antar-kalimat.
+  const v = S.p.voice || {}, wps = ({ 'id-ID-ArdiNeural': 2.5, 'id-ID-GadisNeural': 2.0 }[v.voice] || 2.2) * (v.speed || 1);
+  const secs = Math.round(words / wps + (words / 9) * ((v.pause_ms || 350) / 1000));
+  const over = S.p.format === 'short' && secs > 58;
   box.append(h('div', { class: 'row' },
     btn('✍ Generate Kerangka & Naskah (AI)', () => runAction('script.generate'), 'primary'),
-    h('span', { class: 'muted' }, `${d.scenes.length} scene · ${words} kata · ±${Math.round(words / 2.4)} detik`)));
+    h('span', { class: over ? 'warn-text' : 'muted' }, `${d.scenes.length} scene · ${words} kata · ±${secs} detik${over ? ' — terlalu panjang untuk Shorts (maks 60 dtk)!' : ''}`)));
   box.append(hint('Tandai kata kunci dengan *bintang* → ditekankan di subtitle (warna/ukuran) dan intonasi TTS. "Emosi" mengatur nada suara; "Mood" memilih musik latar; "Visual" = kata kunci stock footage (Inggris).'));
   if (d.framework) {
     box.append(h('details', { open: true }, h('summary', {}, 'Kerangka cerita'),
@@ -365,12 +369,14 @@ function rScriptScratch() {
   d.scenes.forEach((s, i) => {
     const move = (dir) => { const j = i + dir; if (j < 0 || j >= d.scenes.length) return; [d.scenes[i], d.scenes[j]] = [d.scenes[j], d.scenes[i]]; markDirty(); render(); };
     box.append(h('div', { class: 'card' },
-      h('div', { class: 'row between' }, h('b', {}, `Scene ${i + 1} `, h('span', { class: 'muted small' }, s.id)),
+      h('div', { class: 'row between' }, h('b', {}, `Scene ${i + 1} `, h('span', { class: 'muted small' }, s.id),
+        s.role ? h('span', { class: 'tag', style: 'margin-left:6px' }, s.role) : null),
         h('div', { class: 'row' },
           btn('🔊 Preview', () => playTTS(s.text.split(/(?<=[.!?…])\s+/)[0], s.emotion), 'small'),
           btn('▲', () => move(-1), 'small ghost'), btn('▼', () => move(1), 'small ghost'),
           btn('✕', () => { d.scenes.splice(i, 1); markDirty(); render(); }, 'small ghost danger'))),
       field('', s, 'text', { type: 'textarea', rows: 3 }),
+      i === 0 ? field('Teks hook di layar (2.5 dtk pertama, maks 5 kata)', s, 'on_screen_text', { placeholder: 'mis. KOTA KUNO LEBIH MAJU DARI ROMA?' }) : null,
       h('div', { class: 'grid' },
         field('Emosi', s, 'emotion', { type: 'select', options: m.emotions }),
         field('Mood musik', s, 'mood', { type: 'select', options: m.moods }),
@@ -452,7 +458,7 @@ function rAssets() {
     h('span', { class: 'muted' }, 'AI memilih footage sesuai narasi. Ganti yang kurang pas per scene.')));
   d.scenes = d.scenes || {};
   S.p.script.scenes.forEach((s, i) => {
-    const slot = d.scenes[s.id] || {};
+    const slot = d.scenes[s.id] = d.scenes[s.id] || {};
     const q = { query: slot.query || s.visual_query, provider: 'all' };
     const sel = slot.selected;
     const preview = sel && sel.path ? (sel.type === 'image'
@@ -467,6 +473,8 @@ function rAssets() {
             `${{ cocok: '✅ Cocok', lumayan: '🟡 Lumayan', lemah: '⚠ Kurang cocok — mohon dicek/ganti' }[slot.pick.fit] || slot.pick.fit}`,
             slot.pick.reason ? ` · ${slot.pick.reason}` : '') : null,
           sel && sel.tags ? h('div', { class: 'small muted' }, `Isi video: ${sel.tags}`) : null,
+          sel ? h('div', { style: 'max-width:280px' }, field('Bingkai di layar', slot, 'fit', { type: 'select', options: [
+            ['auto', 'Otomatis'], ['center', 'Isi penuh (crop tengah)'], ['blur', 'Utuh + latar blur']] })) : null,
           h('div', { class: 'row' },
             h('div', { class: 'grow' }, field('', q, 'query', { dirty: () => {} })),
             field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pexels', 'Pexels'], ['pixabay', 'Pixabay'], ['photos', 'Foto']], dirty: () => {} }),
@@ -626,8 +634,20 @@ function rSubtitles() {
     h('span', { class: 'muted' }, `${(d.lines || []).length} baris · ${(d.words || []).length} kata`)));
   box.append(hint('Edit teks langsung per baris. Bungkus kata dengan *bintang* untuk penekanan (warna kata kunci + membesar saat diucapkan). Klik "Simpan Edit Manual" untuk menerapkan — timing kata dipertahankan bila jumlah kata sama.'));
 
-  box.append(h('details', {}, h('summary', {}, 'Gaya subtitle'), h('div', { class: 'grid' },
+  const presets = S.meta.sub_presets || {};
+  const presetSel = h('select', { onchange: () => {
+    const pr = presets[presetSel.value]; if (!pr) return;
+    Object.assign(st, pr, { preset: presetSel.value }); markDirty(); render();
+    toast('Preset diterapkan. Klik "↻ Kelompokkan ulang baris" bila jumlah kata per baris berubah.');
+  } }, h('option', { value: '' }, '— pilih preset —'),
+    Object.keys(presets).map((k) => h('option', { value: k, selected: st.preset === k },
+      { pop: 'Pop (kata meletup, 3 kata)', tebal2: 'Tebal 2 kata (gaya viral)', elegan: 'Elegan (4 kata, tanpa animasi)', klasik: 'Klasik (1 baris panjang)' }[k] || k)));
+  box.append(h('div', { class: 'row' }, h('b', {}, 'Preset gaya:'), presetSel));
+  box.append(h('details', {}, h('summary', {}, 'Gaya subtitle (detail)'), h('div', { class: 'grid' },
     field('Font', st, 'font'), field('Ukuran', st, 'size', { type: 'number' }),
+    field('Animasi kata aktif', st, 'animation', { type: 'select', options: [['pop', 'Pop (meletup)'], ['none', 'Tanpa animasi']] }),
+    field('Skala kata aktif (%)', st, 'active_scale', { type: 'number' }),
+    field('Teks hook di 2.5 dtk awal', st, 'hook_text', { type: 'checkbox' }),
     field('Warna teks', st, 'primary', { type: 'color' }), field('Warna kata aktif', st, 'highlight', { type: 'color' }),
     field('Warna kata kunci', st, 'emphasis', { type: 'color' }), field('Skala kata kunci (%)', st, 'emphasis_scale', { type: 'number' }),
     field('Outline', st, 'outline', { type: 'number' }),
@@ -651,7 +671,9 @@ function rSubtitles() {
     overlay.style.fontSize = `${(st.size || 60) * scale}px`;
     overlay.style.fontFamily = `"${st.font}", Arial, sans-serif`;
     overlay.style.top = st.position === 'middle' ? '45%' : '';
-    overlay.style.bottom = st.position === 'middle' ? '' : st.position === 'lower' ? '22%' : '8%';
+    // Shorts: posisi bawah dinaikkan di atas UI YouTube (sama seperti subs.ass: 700 / 900 px dari bawah).
+    const short = S.p.format === 'short';
+    overlay.style.bottom = st.position === 'middle' ? '' : st.position === 'lower' ? (short ? '47%' : '22%') : (short ? '36%' : '8%');
     const idx = (d.lines || []).findIndex((l) => t >= l.start && t <= l.end + 0.05);
     lineEls.forEach((el, i) => el.classList.toggle('active', i === idx));
     overlay.innerHTML = '';
@@ -719,7 +741,10 @@ function rPublish() {
     field('Jadwal tayang (kosong = sesuai privasi)', d, 'publish_at', { type: 'datetime-local' }),
     field('Kategori', d, 'category_id', { type: 'select', options: [['22', 'People & Blogs'], ['24', 'Entertainment'], ['27', 'Education'],
       ['28', 'Science & Tech'], ['20', 'Gaming'], ['10', 'Music'], ['17', 'Sports'], ['25', 'News & Politics'], ['19', 'Travel']] }),
-    field('Konten untuk anak-anak', d, 'made_for_kids', { type: 'checkbox' })));
+    field('Konten untuk anak-anak', d, 'made_for_kids', { type: 'checkbox' }),
+    field('Berisi konten AI/sintetis yang tampak nyata', d, 'synthetic_media', { type: 'checkbox' })));
+  box.append(hint('Centang "konten AI/sintetis" bila video memuat gambar/video buatan AI yang tampak nyata (orang, tempat, atau peristiwa yang tidak pernah terjadi). Suara AI + stok footage biasa umumnya tidak wajib — lihat kebijakan YouTube "altered or synthetic content".'));
+  if (d.pinned_comment) box.append(field('Komentar untuk di-pin (salin manual setelah tayang)', d, 'pinned_comment', { type: 'textarea', rows: 2 }));
   box.append(hint('Jadwal memakai fitur publishAt bawaan YouTube: video diunggah private lalu YouTube menayangkannya otomatis — komputer tidak perlu menyala saat jam tayang. Kuota upload API ±100 video/hari. Login Google (mode Testing) perlu dihubungkan ulang tiap 7 hari.'));
   box.append(h('div', { class: 'row' }, btn('🚀 Upload & Jadwalkan ke YouTube', () => {
     if (!d.title) return toast('Judul masih kosong', true);
@@ -783,6 +808,29 @@ async function probeBackend(base) {
   } finally { clearTimeout(t); }
 }
 
+async function showHealth(ping = false) {
+  const body = $('#modal-body'); body.innerHTML = '';
+  body.append(h('h2', {}, '🩺 Cek Kesiapan'), h('p', { class: 'muted' }, ping ? 'Menguji AI…' : 'Memeriksa…'));
+  if (!$('#modal').open) $('#modal').showModal();
+  let rows;
+  try { rows = await api('GET', `/api/health${ping ? '?ping=1' : ''}`); }
+  catch (e) { body.lastChild.textContent = `Gagal: ${e.message}`; return; }
+  body.innerHTML = '';
+  const icon = { ok: '✅', warn: '⚠️', fail: '❌' };
+  const bad = rows.filter((r) => r.status === 'fail').length, warn = rows.filter((r) => r.status === 'warn').length;
+  body.append(h('h2', {}, '🩺 Cek Kesiapan'),
+    h('p', { class: bad ? 'warn-text' : 'muted' }, bad ? `${bad} hal wajib dibereskan, ${warn} peringatan.` : warn ? `Siap dipakai · ${warn} peringatan (opsional).` : 'Semua siap ✓'));
+  let group = '';
+  const table = h('table', { class: 'health' });
+  rows.forEach((r) => {
+    if (r.group !== group) { group = r.group; table.append(h('tr', {}, h('th', { colspan: 3 }, group))); }
+    table.append(h('tr', {}, h('td', {}, icon[r.status] || ''), h('td', {}, h('b', {}, r.name)),
+      h('td', {}, r.detail, r.fix ? h('div', { class: 'small muted' }, '→ ', r.fix) : null)));
+  });
+  body.append(table, h('div', { class: 'row', style: 'margin-top:10px' },
+    btn('🤖 Tes jawaban AI', () => showHealth(true), 'small'), btn('↻ Cek ulang', () => showHealth(false), 'small ghost')));
+}
+
 function backendBox(errMsg) {
   const box = $('#backend');
   box.hidden = SERVED_BY_BACKEND && !errMsg;
@@ -827,6 +875,7 @@ async function init() {
     } catch (e) { toast(e.message, true); }
   };
   $('#btn-schedule').onclick = () => showSchedule().catch((e) => toast(e.message, true));
+  $('#btn-health').onclick = () => showHealth().catch((e) => toast(e.message, true));
   window.addEventListener('beforeunload', (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ''; } });
   await refreshList();
   const last = localStorage.getItem('lastProject');

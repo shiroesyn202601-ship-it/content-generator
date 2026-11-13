@@ -8,7 +8,9 @@ project.json di-backup ke Google Drive (lihat services/sync.py).
 FORMAT DATA KANONIK (dipakai lintas modul — jangan diubah sembarangan):
   Word      = {"text": str, "start": float detik, "end": float detik, "emphasis": bool}
   Scene     = {"id": "s1", "text": str (boleh berisi *penekanan*), "emotion": str,
-               "mood": str, "visual_query": str, "sfx": str}
+               "mood": str, "visual_query": str, "sfx": str,
+               "role": str opsional (hook|setup|eskalasi|twist|payoff|loop),
+               "on_screen_text": str opsional (teks hook di layar, scene pertama)}
   Clip      = {"id": "c1", "start": float, "end": float, "title": str, "hook": str,
                "reason": str, "score": int}
   Semua path file di JSON = RELATIF terhadap folder proyek (portabel ke Drive).
@@ -114,18 +116,37 @@ def new_project(mode: str, fmt: str, title: str, keyword: str = "", language: st
 def default_sub_style(fmt: str) -> dict:
     short = fmt == "short"
     return {
+        "preset": "pop" if short else "klasik",
         "font": "Montserrat ExtraBold" if short else "Arial",
         "size": 78 if short else 54,
         "primary": "#FFFFFF",
         "highlight": "#FFE600",      # warna kata yang sedang diucapkan (karaoke)
         "emphasis": "#FF3B6B",       # warna kata kunci (ditandai *...*)
         "emphasis_scale": 125,       # % ukuran saat kata kunci diucapkan
+        "active_scale": 108 if short else 100,  # % ukuran kata aktif biasa
+        "animation": "pop" if short else "none",  # pop = kata aktif "meletup" saat diucapkan
         "outline": 5 if short else 3,
         "position": "middle" if short else "bottom",
         "words_per_line": 3 if short else 7,
         "karaoke": True,
         "uppercase": short,
+        "hook_text": True,           # teks hook besar di 2.5 dtk pertama
     }
+
+
+# Preset gaya subtitle (ditimpa ke style saat dipilih di UI). Semua font OFL, diunduh otomatis saat render.
+SUB_PRESETS = {
+    "pop":     {"font": "Montserrat ExtraBold", "size": 78, "words_per_line": 3, "animation": "pop",
+                "active_scale": 108, "highlight": "#FFE600", "emphasis": "#FF3B6B", "uppercase": True,
+                "karaoke": True, "outline": 5},
+    "tebal2":  {"font": "Anton", "size": 110, "words_per_line": 2, "animation": "pop", "active_scale": 112,
+                "highlight": "#39FF14", "emphasis": "#FFE600", "uppercase": True, "karaoke": True, "outline": 6},
+    "elegan":  {"font": "Poppins ExtraBold", "size": 70, "words_per_line": 4, "animation": "none",
+                "active_scale": 100, "highlight": "#7CC6FF", "emphasis": "#FFB020", "uppercase": False,
+                "karaoke": True, "outline": 4},
+    "klasik":  {"font": "Arial", "size": 58, "words_per_line": 7, "animation": "none", "active_scale": 100,
+                "highlight": "#FFFFFF", "emphasis": "#FFE600", "uppercase": False, "karaoke": False, "outline": 3},
+}
 
 
 def load(pid: str) -> dict:

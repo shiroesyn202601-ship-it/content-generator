@@ -66,8 +66,15 @@ def _load(pid: str) -> dict:
 def meta():
     return {"stages": store.STAGES, "labels": store.STAGE_LABELS, "voice_presets": store.VOICE_PRESETS,
             "emotions": list(store.EMOTION_VOICE), "moods": store.MOODS, "google": config.google_enabled(),
+            "sub_presets": store.SUB_PRESETS,
             "llm": config.LLM_PROVIDER,
             "keys": {"pexels": bool(config.PEXELS_API_KEY), "pixabay": bool(config.PIXABAY_API_KEY)}}
+
+
+@app.get("/api/health")
+def health(ping: bool = False):
+    from .services import health as hc
+    return hc.check(ping_llm=ping)
 
 
 # ---------- proyek ----------

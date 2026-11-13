@@ -37,7 +37,8 @@ FACT_RULES = """ATURAN AKURASI (WAJIB):
 def script(idea: dict, fmt: str, lang: str, preset: str, max_words: int | None = None) -> tuple[str, str]:
     if fmt == "short":
         mw = max_words or 110
-        n = f"4-7 scene, TOTAL MAKSIMAL {mw} kata (lebih dari itu video melewati batas 60 detik Shorts)"
+        n = (f"5-8 scene, TOTAL {int(mw * 0.8)}-{mw} kata (±45-55 detik). Lebih dari {mw} kata melewati batas "
+             f"60 detik Shorts; kurang dari {int(mw * 0.8)} kata terlalu pendek & tipis isinya")
     else:
         mw = max_words or 1100
         n = f"12-20 scene, total sekitar {int(mw * 0.8)}-{mw} kata"
@@ -59,22 +60,56 @@ Aturan:
   Contoh baik: "ancient stone temple", "old bronze cannon", "rice field aerial". Contoh buruk: "majapahit capital".
 - "sfx": nama efek suara singkat bahasa Inggris (whoosh, boom, ding, riser, click, heartbeat) atau "" jika tidak perlu.
 - Tulis angka & singkatan sebagaimana diucapkan bila rawan salah baca.
+{SHORTS_RETENTION if fmt == "short" else LONG_RETENTION}
+- "role" tiap scene, pilih dari: hook, setup, eskalasi, twist, payoff, loop.
 Balas JSON:
 {{"title": "...", "framework": {{"hook": "...", "konflik": "...", "eskalasi": "...", "payoff": "...", "cta": "..."}},
-  "scenes": [{{"text": "...", "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "..."}}]}}"""
+  "scenes": [{{"role": "hook", "text": "...", "on_screen_text": "MAKS 5 KATA (hanya scene 1, lainnya \\"\\")",
+              "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "..."}}]}}"""
     return system, user
+
+
+SHORTS_RETENTION = """Struktur retensi Shorts (penonton memutuskan swipe dalam 1-3 detik pertama):
+- Scene 1 = HOOK: maks 12 kata, LANGSUNG ke klaim/pertanyaan paling mengejutkan. DILARANG salam/perkenalan
+  ("halo guys", "di video ini", "tahukah kamu" yang hambar). Isi "on_screen_text" scene 1 dengan maks 5 kata
+  yang memperkuat hook (bukan menyalin kalimatnya).
+- Tiap ±2 scene beri pola interupsi: pertanyaan retoris, angka konkret, kontras ("tapi…", "ternyata…").
+- Kalimat pendek-pendek (≤ 15 kata), ritme cepat, satu ide per kalimat.
+- JANGAN akhiri dengan ajakan subscribe panjang. Scene terakhir = payoff singkat yang menyambung ke kalimat
+  pertama supaya video terasa looping saat diputar ulang (role "loop"). Ajakan subscribe, bila ada, cukup
+  2-4 kata di scene payoff."""
+
+LONG_RETENTION = """Struktur retensi video panjang:
+- Scene 1 = hook kuat tanpa salam panjang; janjikan apa yang akan didapat penonton. Isi "on_screen_text" scene 1.
+- Buka "loop rasa penasaran" di awal yang baru dijawab menjelang akhir; beri pola interupsi berkala.
+- CTA singkat menjelang akhir."""
 
 
 def shorten_script(res: dict, max_words: int) -> tuple[str, str]:
     system = "Kamu editor naskah video pendek. Kamu memadatkan naskah tanpa mengubah maknanya."
     user = f"""Naskah berikut terlalu panjang. Padatkan menjadi TOTAL MAKSIMAL {max_words} kata
 (hitung semua field "text"). Pertahankan hook pembuka, urutan cerita, penanda *bintang*, dan semua field lain
-(emotion, mood, visual_query, sfx). Boleh menggabung atau membuang scene yang kurang penting.
+(role, on_screen_text, emotion, mood, visual_query, sfx). Boleh menggabung atau membuang scene yang kurang penting.
 Jangan menambah fakta baru.
 
 {json.dumps({"scenes": res.get("scenes", [])}, ensure_ascii=False)}
 
-Balas JSON: {{"scenes": [{{"text": "...", "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "..."}}]}}"""
+Balas JSON: {{"scenes": [{{"role": "...", "text": "...", "on_screen_text": "...", "emotion": "...", "mood": "...",
+"visual_query": "...", "sfx": "..."}}]}}"""
+    return system, user
+
+
+def expand_script(res: dict, min_words: int, max_words: int) -> tuple[str, str]:
+    system = "Kamu editor naskah video pendek. Kamu mengembangkan naskah supaya lebih berisi tanpa mengarang."
+    user = f"""Naskah berikut terlalu pendek. Kembangkan menjadi TOTAL {min_words}-{max_words} kata (hitung semua
+field "text"): tambah penjelasan, contoh, atau konteks yang membuat penonton paham & penasaran. Boleh menambah
+1-3 scene. Pertahankan hook, struktur (role), penanda *bintang*, dan semua field lain.
+{FACT_RULES}
+
+{json.dumps({"scenes": res.get("scenes", [])}, ensure_ascii=False)}
+
+Balas JSON: {{"scenes": [{{"role": "...", "text": "...", "on_screen_text": "...", "emotion": "...", "mood": "...",
+"visual_query": "...", "sfx": "..."}}]}}"""
     return system, user
 
 
@@ -160,11 +195,19 @@ def metadata(p: dict) -> tuple[str, str]:
         clip = p["script"]["clips"][p["script"]["selected_clip"]]
         body = clip.get("title", "") + " — " + " ".join(
             w["text"] for w in p["subtitles"].get("words", [])[:400])
+    short = p["format"] == "short"
     system = "Kamu spesialis YouTube SEO."
-    user = f"""Buat metadata YouTube untuk video {'Shorts' if p['format'] == 'short' else 'panjang'} berikut.
+    user = f"""Buat metadata YouTube untuk video {'Shorts' if short else 'panjang'} berikut.
 Judul kerja: {p['title']}
 Isi: {body[:6000]}
 Bahasa: {LANG_NAME.get(p['language'], p['language'])}.
-Balas JSON: {{"title": "maks 90 karakter, bikin penasaran", "description": "3-5 paragraf pendek + hashtag",
-"tags": ["maks 15 tag"]}}"""
+Aturan:
+- Judul {'maks 60 karakter' if short else 'maks 70 karakter'}, kata kunci utama di DEPAN, bikin penasaran tapi
+  JUJUR sesuai isi (bukan clickbait menyesatkan). Jangan pakai karakter < atau >.
+- Baris pertama deskripsi = hook + kata kunci utama (yang tampil sebelum "lainnya").
+- Deskripsi {'2-3 paragraf pendek' if short else '3-5 paragraf'}; akhiri dengan 3-5 hashtag relevan
+  (3 pertama tampil di atas judul). JANGAN lebih dari 15 hashtag.
+- "tags": 8-15 tag, campuran kata kunci umum & spesifik, total < 450 karakter.
+- "pinned_comment": 1 kalimat pertanyaan untuk memancing komentar.
+Balas JSON: {{"title": "...", "description": "...", "tags": ["..."], "pinned_comment": "..."}}"""
     return system, user

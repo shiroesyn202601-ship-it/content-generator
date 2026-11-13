@@ -68,7 +68,8 @@ def gen_metadata(pid: str, params: dict, progress) -> dict:
         pub = p["publish"]
         pub["title"] = (res.get("title") or p["title"])[:100]
         pub["description"] = res.get("description", "")
-        pub["tags"] = res.get("tags", [])[:15]
+        pub["tags"] = _fit_tags(res.get("tags", [])[:15])
+        pub["pinned_comment"] = res.get("pinned_comment", "")
         if p["format"] == "short" and "#shorts" not in pub["description"].lower():
             pub["description"] += "\n\n#Shorts"
         store.touch_stage(p, "publish")
@@ -91,7 +92,9 @@ def upload(pid: str, params: dict, progress) -> dict:
     if not (pub.get("title") or "").strip():
         raise RuntimeError("Judul video masih kosong.")
     status = {"privacyStatus": pub.get("privacy") or "private",
-              "selfDeclaredMadeForKids": bool(pub.get("made_for_kids"))}
+              "selfDeclaredMadeForKids": bool(pub.get("made_for_kids")),
+              # Pengungkapan konten "diubah/sintetis" yang tampak realistis (kebijakan YouTube).
+              "containsSyntheticMedia": bool(pub.get("synthetic_media"))}
     if pub.get("publish_at"):
         status["privacyStatus"] = "private"            # wajib private untuk jadwal
         status["publishAt"] = to_rfc3339_utc(pub["publish_at"])

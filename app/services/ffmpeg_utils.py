@@ -41,6 +41,74 @@ def to_wav(src: Path, dst: Path, sr: int = 24000) -> None:
     run(["-i", src, "-ac", "1", "-ar", sr, "-sample_fmt", "s16", dst])
 
 
+_encoder: str | None = None
+HW_ENCODERS = ("h264_nvenc", "h264_qsv", "h264_amf")  # NVIDIA, Intel, AMD
+
+
+def _encoder_works(enc: str) -> bool:
+    """Encoder yang terdaftar belum tentu jalan (driver/GPU) → uji encode 3 frame."""
+    pix = "nv12" if enc == "h264_qsv" else "yuv420p"
+    r = subprocess.run([config.FFMPEG, "-hide_banner", "-loglevel", "error", "-f", "lavfi",
+                        "-i", "color=s=320x240:r=30:d=0.2", "-frames:v", "3", "-pix_fmt", pix,
+                        "-c:v", enc, "-f", "null", "-"], capture_output=True, timeout=30)
+    return r.returncode == 0
+
+
+def video_encoder() -> str:
+    """VIDEO_ENCODER di .env: auto (default) | libx264 | h264_nvenc | h264_qsv | h264_amf."""
+    global _encoder
+    if _encoder is None:
+        want = (config.VIDEO_ENCODER or "auto").lower()
+        if want != "auto":
+            _encoder = want
+        else:
+            _encoder = "libx264"
+            for enc in HW_ENCODERS:
+                try:
+                    if _encoder_works(enc):
+                        _encoder = enc
+                        break
+                except (OSError, subprocess.TimeoutExpired):
+                    continue
+    return _encoder
+
+
+def video_codec_args(enc: str | None = None) -> list[str]:
+    """Pengaturan encode final sesuai rekomendasi upload YouTube: H.264 High, GOP = setengah frame rate,
+    2 B-frame, 4:2:0, frame rate konstan."""
+    enc = enc or video_encoder()
+    gop = ["-g", str(config.FPS // 2), "-bf", "2", "-r", str(config.FPS)]
+    if enc == "h264_nvenc":
+        return ["-c:v", enc, "-preset", "p5", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-profile:v", "high",
+                "-pix_fmt", "yuv420p", *gop]
+    if enc == "h264_qsv":
+        return ["-c:v", enc, "-global_quality", "21", "-preset", "medium", "-profile:v", "high",
+                "-pix_fmt", "nv12", *gop]
+    if enc == "h264_amf":
+        return ["-c:v", enc, "-quality", "quality", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22",
+                "-profile:v", "high", "-pix_fmt", "yuv420p", *gop]
+    return ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "high", "-pix_fmt", "yuv420p", *gop]
+
+
+def run_encode(pre: list, post: list, cwd: Path | None = None) -> str:
+    """Jalankan encode final dengan encoder terbaik; bila encoder hardware gagal, ulangi dengan libx264.
+    pre = argumen input+filter, post = argumen audio+output. Mengembalikan nama encoder yang dipakai."""
+    global _encoder
+    enc = video_encoder()
+    try:
+        run([*pre, *video_codec_args(enc), *post], cwd=cwd)
+        return enc
+    except FFmpegError:
+        if enc == "libx264":
+            raise
+        _encoder = "libx264"  # jangan coba hardware lagi di sesi ini
+        run([*pre, *video_codec_args("libx264"), *post], cwd=cwd)
+        return "libx264"
+
+
+AUDIO_ARGS = ["-c:a", "aac", "-b:a", "192k", "-ar", "48000"]
+
+
 def fit_filter(w: int, h: int, mode: str = "center") -> str:
     """Filter video agar sumber apa pun pas di resolusi target.
     center = crop penuh (isi layar) | blur = latar blur + video utuh di tengah | none = letterbox hitam."""

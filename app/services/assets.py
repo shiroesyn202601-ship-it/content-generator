@@ -1,5 +1,8 @@
 """Tahap 3 (scratch): cari & unduh stock footage gratis dari Pexels / Pixabay."""
+import hashlib
+import json
 import shutil
+import time
 from pathlib import Path
 
 import httpx
@@ -55,27 +58,49 @@ def search_pexels_photos(query: str, orientation: str, n: int) -> list[dict]:
             for ph in r.json().get("photos", [])]
 
 
+CACHE_TTL = 24 * 3600  # aturan API Pixabay: hasil pencarian wajib di-cache 24 jam
+
+
+def _cached_get(url: str, params: dict, key_param: str = "key") -> dict:
+    """GET JSON dengan cache disk 24 jam (kunci cache tanpa API key)."""
+    ident = json.dumps({"u": url, **{k: v for k, v in params.items() if k != key_param}}, sort_keys=True)
+    f = config.CACHE_DIR / "search" / (hashlib.sha1(ident.encode()).hexdigest() + ".json")
+    if f.exists() and time.time() - f.stat().st_mtime < CACHE_TTL:
+        try:
+            return json.loads(f.read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            pass
+    r = HTTP.get(url, params=params)
+    if r.status_code == 429:
+        raise RuntimeError("Batas Pixabay tercapai (100 permintaan/menit). Tunggu 1 menit lalu coba lagi.")
+    r.raise_for_status()
+    data = r.json()
+    f.parent.mkdir(parents=True, exist_ok=True)
+    f.write_text(json.dumps(data), encoding="utf-8")
+    return data
+
+
 def search_pixabay(query: str, orientation: str, n: int) -> list[dict]:
     if not config.PIXABAY_API_KEY:
         return []
-    r = HTTP.get("https://pixabay.com/api/videos/",
-                 params={"key": config.PIXABAY_API_KEY, "q": query, "per_page": max(3, n), "safesearch": "true"})
-    r.raise_for_status()
+    # Pixabay video tidak punya filter orientasi → ambil lebih banyak, lalu urutkan yang cocok di depan.
+    data = _cached_get("https://pixabay.com/api/videos/",
+                       {"key": config.PIXABAY_API_KEY, "q": query[:100], "per_page": 20, "safesearch": "true"})
     out = []
-    for h in r.json().get("hits", []):
+    for h in data.get("hits", []):
         vids = h.get("videos") or {}
         f = vids.get("large") if (vids.get("large") or {}).get("url") else vids.get("medium") or {}
         if not f.get("url"):
             continue
-        portrait = (f.get("height") or 0) > (f.get("width") or 0)
-        if orientation == "portrait" and not portrait and len(out) >= 3:
-            continue  # Pixabay tak punya filter orientasi; prioritaskan yang cocok
         thumb = (vids.get("medium") or {}).get("thumbnail") or (vids.get("tiny") or {}).get("thumbnail")
         out.append({"provider": "pixabay", "type": "video", "id": h["id"], "thumb": thumb, "url": f["url"],
                     "duration": h.get("duration"), "width": f.get("width"), "height": f.get("height"),
                     "page_url": h.get("pageURL"), "author": h.get("user"), "tags": h.get("tags") or "",
                     "license": "Pixabay Content License"})
-    return out
+    want_portrait = orientation == "portrait"
+    # sort stabil: orientasi cocok dulu, urutan relevansi Pixabay tetap terjaga di dalam tiap kelompok
+    out.sort(key=lambda c: ((c.get("height") or 0) > (c.get("width") or 0)) != want_portrait)
+    return out[:max(3, n)]
 
 
 def search(p: dict, query: str, provider: str = "all", n: int = 8) -> list[dict]:

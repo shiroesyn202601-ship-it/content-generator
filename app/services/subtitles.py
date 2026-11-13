@@ -28,10 +28,25 @@ def _clip_words(p: dict) -> list[dict]:
     return out
 
 
+def _boundary(a: dict, b: dict) -> bool:
+    """Kata a dan b berasal dari kalimat/scene berbeda → jangan satu baris."""
+    for k in ("sent", "scene_id"):
+        if a.get(k) is not None and b.get(k) is not None and a[k] != b[k]:
+            return True
+    return False
+
+
+def _last_of_sentence(words: list[dict], i: int) -> bool:
+    return bool(SENT_END.search(words[i]["text"])) or i + 1 >= len(words) or _boundary(words[i], words[i + 1])
+
+
 def group_lines(words: list[dict], per_line: int, max_gap: float = 0.6) -> list[dict]:
     lines, cur = [], []
     for i, w in enumerate(words):
-        if cur and (len(cur) >= per_line or w["start"] - words[cur[-1]]["end"] > max_gap):
+        # Baris penuh → pindah baris, KECUALI kata ini penutup kalimat (hindari 1 kata "yatim" sendirian).
+        full = len(cur) >= per_line and not (len(cur) == per_line and _last_of_sentence(words, i))
+        if cur and (full or w["start"] - words[cur[-1]]["end"] > max_gap
+                    or _boundary(words[cur[-1]], w)):
             lines.append(cur)
             cur = []
         cur.append(i)
@@ -133,7 +148,18 @@ def _esc(s: str) -> str:
     return s.replace("\\", "\\\\").replace("{", "(").replace("}", ")")
 
 
-def to_ass(words: list[dict], lines: list[dict], style: dict, fmt: str) -> str:
+def _hook_events(hook: str, style: dict, fmt: str) -> str:
+    """Teks hook besar di bagian atas selama 0–2.5 dtk pertama (alasan penonton tidak swipe)."""
+    if not hook or not style.get("hook_text", True):
+        return ""
+    W, H = config.RESOLUTIONS[fmt]
+    y = int(H * 0.2) if fmt == "short" else int(H * 0.12)  # Shorts: di bawah zona atas (±290 px)
+    txt = _esc(hook.replace("*", "").strip().upper())
+    return (f"Dialogue: 1,{_t(0.05)},{_t(2.5)},Hook,,0,0,0,,"
+            f"{{\\an8\\pos({W // 2},{y})\\fad(120,250)\\fscx80\\fscy80\\t(0,160,\\fscx100\\fscy100)}}{txt}\n")
+
+
+def to_ass(words: list[dict], lines: list[dict], style: dict, fmt: str, hook: str = "") -> str:
     W, H = config.RESOLUTIONS[fmt]
     pos = style.get("position", "bottom")
     if fmt == "short":
@@ -146,6 +172,8 @@ def to_ass(words: list[dict], lines: list[dict], style: dict, fmt: str) -> str:
         ml, mr = 60, 60
     prim, hi, em = _ass_color(style["primary"]), _ass_color(style["highlight"]), _ass_color(style["emphasis"])
     sc = int(style.get("emphasis_scale", 125))
+    act = int(style.get("active_scale", 100))  # ukuran kata aktif biasa (%)
+    pop = style.get("animation", "none") == "pop"
     up = style.get("uppercase", False)
     head = f"""[Script Info]
 ScriptType: v4.00+
@@ -157,6 +185,7 @@ ScaledBorderAndShadow: yes
 [V4+ Styles]
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 Style: Main,{style['font']},{style['size']},{prim},{prim},&H00000000,&H80000000,-1,0,0,0,100,100,0,0,1,{style.get('outline', 4)},2,{align},{ml},{mr},{mv},1
+Style: Hook,{style['font']},{int(int(style['size']) * 0.95)},{prim},{prim},&H30000000,&H00000000,-1,0,0,0,100,100,0,0,3,16,0,8,{ml},{mr},0,1
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -173,10 +202,15 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
             for j, (w, t) in enumerate(zip(ws, texts)):
                 c, s = (em if w.get("emphasis") else prim), 100
                 if j == active:
-                    c, s = (em, sc) if w.get("emphasis") else (hi, 100)
+                    c, s = (em, sc) if w.get("emphasis") else (hi, act)
                 elif w.get("emphasis") and active is None:
                     s = sc
-                parts.append(f"{{\\c{c}&\\fscx{s}\\fscy{s}}}{t}")
+                if j == active and pop:
+                    # "Pop": kata aktif muncul dari 80% → membesar sedikit → kembali ke ukurannya (±0.15 dtk).
+                    a, b = int(s * 0.8), int(s * 1.12)
+                    parts.append(f"{{\\c{c}&\\fscx{a}\\fscy{a}\\t(0,80,\\fscx{b}\\fscy{b})\\t(80,150,\\fscx{s}\\fscy{s})}}{t}")
+                else:
+                    parts.append(f"{{\\c{c}&\\fscx{s}\\fscy{s}}}{t}")
             return " ".join(parts)
 
         if style.get("karaoke", True):
@@ -187,7 +221,16 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                     ev.append(f"Dialogue: 0,{_t(st)},{_t(en)},Main,,0,0,0,,{render(j)}")
         else:
             ev.append(f"Dialogue: 0,{_t(ln['start'])},{_t(ln['end'])},Main,,0,0,0,,{render(None)}")
-    return head + "\n".join(ev) + "\n"
+    return head + _hook_events(hook, style, fmt) + "\n".join(ev) + "\n"
+
+
+def hook_text(p: dict) -> str:
+    """Teks hook di layar: scratch → on_screen_text scene pertama; clipper → hook klip terpilih."""
+    if p["mode"] == "scratch":
+        sc = (p["script"].get("scenes") or [{}])[0]
+        return sc.get("on_screen_text") or ""
+    clips, sel = p["script"].get("clips") or [], p["script"].get("selected_clip")
+    return clips[sel].get("hook", "") if sel is not None and sel < len(clips) else ""
 
 
 def to_srt(lines: list[dict]) -> str:
@@ -201,5 +244,6 @@ def to_srt(lines: list[dict]) -> str:
 def export(p: dict) -> None:
     d = store.project_dir(p["id"])
     s = p["subtitles"]
-    (d / "subs.ass").write_text(to_ass(s["words"], s["lines"], s["style"], p["format"]), encoding="utf-8")
+    (d / "subs.ass").write_text(to_ass(s["words"], s["lines"], s["style"], p["format"], hook_text(p)),
+                                encoding="utf-8")
     (d / "subs.srt").write_text(to_srt(s["lines"]), encoding="utf-8")

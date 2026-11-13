@@ -4,6 +4,9 @@ from ..store import EMOTION_VOICE, MOODS
 from . import llm, prompts
 
 
+ROLES = ("hook", "setup", "eskalasi", "twist", "payoff", "loop")
+
+
 def normalize_scenes(scenes: list[dict]) -> list[dict]:
     """Pastikan setiap scene punya field kanonik & id unik (dipakai juga saat edit manual)."""
     out = []
@@ -17,6 +20,9 @@ def normalize_scenes(scenes: list[dict]) -> list[dict]:
             "mood": mood if mood in MOODS else "santai",
             "visual_query": (s.get("visual_query") or "").strip(),
             "sfx": (s.get("sfx") or "").strip(),
+            # opsional (struktur retensi): peran scene & teks hook di layar (scene pertama)
+            "role": role if (role := (s.get("role") or "").strip().lower()) in ROLES else "",
+            "on_screen_text": (s.get("on_screen_text") or "").strip() if i == 0 else "",
         })
     seen = set()
     for i, s in enumerate(out):
@@ -52,6 +58,16 @@ def generate(pid: str, params: dict, progress) -> dict:
     # Temperature rendah: naskah edukasi butuh akurasi, bukan kreativitas liar (mengurangi fakta karangan).
     res = llm.chat_json(sys_, usr, params.get("provider"), temperature=0.4)
     n = _count_words(res.get("scenes", []))
+    if n < budget * 0.65:
+        progress(f"Naskah hanya {n} kata (target {int(budget * 0.8)}-{budget}) — AI mengembangkan isinya…")
+        sys2, usr2 = prompts.expand_script(res, int(budget * 0.8), budget)
+        try:
+            longer = llm.chat_json(sys2, usr2, params.get("provider"), temperature=0.4)
+            if longer.get("scenes") and n < _count_words(longer["scenes"]) <= budget * 1.1:
+                res = {**res, **longer}
+                n = _count_words(res["scenes"])
+        except llm.LLMError as e:
+            progress(f"Gagal mengembangkan naskah ({e}) — dipakai apa adanya.")
     if n > budget * 1.1:
         progress(f"Naskah {n} kata (> {budget}) — AI memadatkan supaya durasi pas…")
         sys2, usr2 = prompts.shorten_script(res, budget)

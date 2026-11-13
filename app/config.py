@@ -69,6 +69,7 @@ def _find_bin(name: str, configured: str) -> str:
     return configured or name
 
 
+VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")  # auto | libx264 | h264_nvenc | h264_qsv | h264_amf
 FFMPEG = _find_bin("ffmpeg", _env("FFMPEG_BIN", "ffmpeg"))
 FFPROBE = _find_bin("ffprobe", _env("FFPROBE_BIN", "ffprobe"))
 
