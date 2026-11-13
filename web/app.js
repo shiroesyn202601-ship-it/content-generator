@@ -695,21 +695,61 @@ async function showSchedule() {
   $('#modal').showModal();
 }
 
+/* Cek koneksi ke backend dan jelaskan penyebab gagalnya dalam bahasa manusia. */
+async function probeBackend(base) {
+  const ctl = new AbortController();
+  const t = setTimeout(() => ctl.abort(), 6000);
+  try {
+    const r = await fetch(base + '/api/meta', { signal: ctl.signal });
+    if (!r.ok) return { ok: false, why: `Backend menjawab tetapi error (HTTP ${r.status}).` };
+    return { ok: true, meta: await r.json() };
+  } catch (e) {
+    if (e.name === 'AbortError') return { ok: false, why: 'Waktu habis (6 dtk): backend tidak menjawab.' };
+    // Fetch biasa gagal. Coba mode no-cors: kalau ini lolos, server hidup tapi browser memblokir.
+    try {
+      await fetch(base + '/api/meta', { mode: 'no-cors', signal: ctl.signal });
+      return { ok: false, why: 'Backend hidup, tetapi browser memblokir aksesnya (CORS / izin jaringan lokal). ' +
+        'Pastikan CORS_ORIGINS di .env berisi ' + location.origin + ', restart "python run.py", ' +
+        'dan jika Chrome menanyakan izin akses jaringan lokal, pilih Izinkan (ikon gembok di kiri alamat).' };
+    } catch (_) {
+      return { ok: false, why: `Tidak ada backend di ${base}. Jalankan "python run.py" di laptop lalu klik Hubungkan lagi.` };
+    } finally { clearTimeout(t); }
+  } finally { clearTimeout(t); }
+}
+
 function backendBox(errMsg) {
   const box = $('#backend');
   box.hidden = SERVED_BY_BACKEND && !errMsg;
   box.innerHTML = '';
   const inp = h('input', { value: API_BASE || location.origin });
-  box.append(
-    h('h3', {}, 'Backend'),
-    errMsg ? h('div', { class: 'hint warn' }, `Tidak terhubung ke ${API_BASE || location.origin}. Jalankan "python run.py" di laptop Anda, lalu klik Hubungkan.`) : h('div', { class: 'muted small' }, 'Terhubung ✓'),
-    h('div', { class: 'row' }, h('div', { class: 'grow' }, inp),
-      h('button', { class: 'small', onclick: () => { API_BASE = inp.value.trim().replace(/\/+$/, ''); lsSet('apiBase', API_BASE); location.reload(); } }, 'Hubungkan')));
+  const msg = errMsg
+    ? h('div', { class: 'hint warn' }, `Tidak terhubung ke ${API_BASE || location.origin}. ${errMsg}`)
+    : h('div', { class: 'muted small' }, `Terhubung ✓ ${API_BASE || location.origin}`);
+  const btn = h('button', { class: 'small', onclick: async () => {
+    const base = inp.value.trim().replace(/\/+$/, '');
+    btn.disabled = true; btn.textContent = 'Menghubungkan…';
+    msg.className = 'muted small'; msg.textContent = `Mencoba ${base}…`;
+    const r = await probeBackend(base);
+    if (r.ok) {
+      API_BASE = base; lsSet('apiBase', base);
+      msg.className = 'muted small'; msg.textContent = `Terhubung ✓ ${base} — memuat ulang…`;
+      toast('Terhubung ke backend ✓');
+      setTimeout(() => location.reload(), 600);
+    } else {
+      msg.className = 'hint warn'; msg.textContent = `Gagal terhubung ke ${base}. ${r.why}`;
+      toast('Gagal terhubung ke backend', true);
+      btn.disabled = false; btn.textContent = 'Hubungkan';
+    }
+  } }, 'Hubungkan');
+  box.append(h('h3', {}, 'Backend'), msg, h('div', { class: 'row' }, h('div', { class: 'grow' }, inp), btn));
 }
 
 async function init() {
   try { S.meta = await api('GET', '/api/meta'); }
-  catch (e) { backendBox(e.message); return; }
+  catch (e) {
+    const r = SERVED_BY_BACKEND ? { why: e.message } : await probeBackend(API_BASE);
+    backendBox(r.ok ? e.message : r.why); return;
+  }
   backendBox(null);
   $('#sysinfo').textContent = `LLM: ${S.meta.llm} · Google: ${S.meta.google ? 'terhubung ✓' : 'belum terhubung'}`;
   $('#np-create').onclick = async () => {

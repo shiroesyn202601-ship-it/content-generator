@@ -13,10 +13,15 @@ app = FastAPI(title="Shiroe Syn Content Studio")
 WEB = config.ROOT / "web"
 
 # UI di GitHub Pages (https://<user>.github.io) memanggil backend di laptop (http://127.0.0.1:8000)
+import inspect  # noqa: E402
+
 from fastapi.middleware.cors import CORSMiddleware  # noqa: E402
 
-app.add_middleware(CORSMiddleware, allow_origins=config.CORS_ORIGINS, allow_methods=["*"],
-                   allow_headers=["*"])
+_cors = dict(allow_origins=config.CORS_ORIGINS, allow_methods=["*"], allow_headers=["*"])
+# Starlette baru menolak preflight Private Network Access (400) kecuali opsi ini aktif.
+if "allow_private_network" in inspect.signature(CORSMiddleware.__init__).parameters:
+    _cors["allow_private_network"] = True
+app.add_middleware(CORSMiddleware, **_cors)
 
 
 @app.middleware("http")
