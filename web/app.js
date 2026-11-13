@@ -50,7 +50,41 @@ function toast(msg, err = false) {
   t.textContent = msg; t.className = err ? 'err' : ''; t.hidden = false;
   clearTimeout(toast._t); toast._t = setTimeout(() => (t.hidden = true), err ? 9000 : 3000);
 }
-function status(msg) { const s = $('#statusbar'); s.hidden = !msg; s.textContent = msg || ''; }
+function status(msg) {
+  const s = $('#statusbar'); s.hidden = !msg; s.innerHTML = '';
+  if (!msg) return;
+  if (msg instanceof Node) s.append(msg);
+  else s.append(h('div', { class: 'sb-head' }, h('span', { class: 'spin' }), h('b', {}, msg)));
+}
+
+/* Nama aksi yang mudah dipahami untuk bar status & notifikasi. */
+const ACTION_LABEL = {
+  'research.ideas': '💡 Membuat ide konten', 'research.download': '⬇ Mengunduh video sumber',
+  'script.generate': '✍ Menulis naskah', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
+  'script.find_clips': '🔥 Mencari momen viral', 'assets.search': '🔎 Mencari stock footage',
+  'assets.select': '🖼 Memasang aset', 'assets.auto_all': '⚡ Mengisi aset semua scene',
+  'assets.cut_clip': '✂ Memotong klip', 'audio.render_vo': '🎙 Membuat voice over',
+  'audio.auto_plan': '🎵 Memilih musik & SFX', 'subtitles.build': '🔤 Membuat subtitle',
+  'subtitles.apply': '🔤 Menyimpan subtitle', 'subtitles.regroup': '↻ Mengelompokkan subtitle',
+  'render.run': '🎬 Render video final', 'publish.metadata': '✨ Membuat judul, deskripsi & tag',
+  'publish.upload': '⬆ Upload ke YouTube',
+};
+const actionLabel = (name) => ACTION_LABEL[name] || name;
+const fmtDur = (s) => { s = Math.max(0, Math.floor(s)); return s < 60 ? `${s} dtk` : `${Math.floor(s / 60)} mnt ${String(s % 60).padStart(2, '0')} dtk`; };
+
+/* Bar status job: nama proses + total waktu, langkah yang sedang berjalan + lamanya, dan langkah sebelumnya. */
+function jobStatusView(label, j, extra) {
+  const steps = j.steps || [];
+  const cur = steps[steps.length - 1];
+  const done = steps.slice(0, -1).slice(-3);
+  return h('div', {},
+    h('div', { class: 'sb-head' }, h('span', { class: 'spin' }), h('b', {}, label),
+      h('span', { class: 'sb-time' }, `· total ${fmtDur(j.elapsed + extra)}`)),
+    h('div', { class: 'sb-now' }, '▶ ', cur ? cur.msg : 'Memulai…',
+      cur ? h('span', { class: 'sb-time' }, ` (${fmtDur(j.step_elapsed + extra)})`) : null),
+    done.length ? h('div', { class: 'sb-done' }, done.map((s) =>
+      h('div', {}, `✓ ${s.msg}`, s.took != null ? h('span', { class: 'sb-time' }, ` ${fmtDur(s.took)}`) : null))) : null);
+}
 
 const S = {
   meta: null, p: null, view: 0, draft: null, dirty: false, raw: false, busy: false,
@@ -90,24 +124,31 @@ async function runAction(name, params = {}, skipSave = false) {
   if (S.busy) return toast('Masih ada proses berjalan…', true);
   try {
     if (S.dirty && !skipSave) await saveDraft(true);
-    S.busy = true; status(`${name}…`);
+    S.busy = true; status(`${actionLabel(name)}…`);
     const res = await api('POST', `/api/projects/${S.p.id}/action/${name}`, params);
-    if (res.job) await pollJob(res.job, name);
+    if (res.job) await pollJob(res.job, actionLabel(name));
+    status('Memuat hasil…');
     await loadProject(S.p.id, true);
     return res.result;
   } catch (e) {
-    toast(`${name} gagal:\n${e.message}`, true);
+    toast(`${actionLabel(name)} gagal:\n${e.message}`, true);
   } finally { S.busy = false; status(''); }
 }
 
 async function pollJob(jid, label) {
-  for (;;) {
-    await sleep(1200);
-    const j = await api('GET', `/api/jobs/${jid}`);
-    status(`${label}: ${j.progress || 'berjalan…'}`);
-    if (j.status === 'done') { toast(`${label} selesai ✓`); return j.result; }
-    if (j.status === 'error') throw new Error(j.error);
-  }
+  // Poll server tiap detik; di antaranya hitung detik secara lokal supaya timer terlihat berjalan.
+  let last = null, at = 0;
+  const tick = setInterval(() => { if (last) status(jobStatusView(label, last, (Date.now() - at) / 1000)); }, 250);
+  try {
+    for (;;) {
+      await sleep(1000);
+      const j = await api('GET', `/api/jobs/${jid}`);
+      last = j; at = Date.now();
+      status(jobStatusView(label, j, 0));
+      if (j.status === 'done') { toast(`${label} selesai ✓ (${fmtDur(j.elapsed)})`); return j.result; }
+      if (j.status === 'error') throw new Error(j.error);
+    }
+  } finally { clearInterval(tick); }
 }
 
 async function approve() {

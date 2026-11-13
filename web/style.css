@@ -98,7 +98,14 @@ video.preview-v { max-height: 360px; background: #000; }
 .sub-overlay span { display: inline-block; margin: 0 .12em; transition: transform .08s; }
 
 #statusbar { position: fixed; bottom: 0; left: 290px; right: 0; background: var(--accent); color: #fff;
-  padding: 8px 20px; font-size: 13px; z-index: 20; }
+  padding: 8px 20px; font-size: 13px; z-index: 20; box-shadow: 0 -6px 20px #0006; }
+#statusbar .sb-head { display: flex; align-items: center; gap: 8px; }
+#statusbar .sb-now { margin-top: 2px; }
+#statusbar .sb-done { margin-top: 4px; font-size: 12px; opacity: .75; }
+#statusbar .sb-time { opacity: .75; font-variant-numeric: tabular-nums; }
+#statusbar .spin { width: 12px; height: 12px; border: 2px solid #fff6; border-top-color: #fff; border-radius: 50%;
+  animation: sb-spin .8s linear infinite; flex: none; }
+@keyframes sb-spin { to { transform: rotate(360deg); } }
 #toast { position: fixed; top: 16px; right: 16px; max-width: 460px; background: var(--panel2); border: 1px solid var(--line);
   border-radius: 10px; padding: 10px 14px; z-index: 30; white-space: pre-wrap; box-shadow: 0 8px 30px #0008; }
 #toast.err { border-color: var(--danger); }

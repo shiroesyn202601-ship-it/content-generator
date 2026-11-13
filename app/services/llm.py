@@ -7,8 +7,12 @@ import time
 import httpx
 
 from .. import config
+from ..jobs import report
 
 TIMEOUT = httpx.Timeout(180.0, connect=15.0)
+PROVIDER_LABEL = {"gemini": "Gemini", "groq": "Groq", "ollama": "Ollama (lokal)"}
+STATUS_REASON = {429: "kuota per menit habis", 500: "error di server Google", 503: "server Google sedang sibuk",
+                 404: "model sudah tidak tersedia"}
 
 
 class LLMError(RuntimeError):
@@ -29,7 +33,9 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
     chain = [primary] + [p for p in config.LLM_FALLBACK_PROVIDERS
                          if p != primary and p in providers and _configured(p)]
     errors = []
-    for name in chain:
+    for i, name in enumerate(chain):
+        if errors:
+            report(f"{PROVIDER_LABEL[chain[i - 1]]} gagal → beralih ke cadangan {PROVIDER_LABEL[name]}…")
         try:
             raw = providers[name](system, user, temperature)
         except (LLMError, httpx.HTTPError) as e:
@@ -37,6 +43,7 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
             continue
         if errors:
             print(f"LLM: {primary} gagal, memakai cadangan '{name}'.")
+        report(f"Jawaban AI ({PROVIDER_LABEL[name]}) diterima, membaca hasilnya…")
         return parse_json(raw)
     hint = "" if len(chain) > 1 else " Tip: isi GROQ_API_KEY di .env (gratis) sebagai cadangan otomatis."
     raise LLMError("\n\n".join(errors) + hint)
@@ -70,10 +77,12 @@ def _gemini(system: str, user: str, temperature: float) -> str:
     }
     models = list(dict.fromkeys([config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS]))
     errors = []
-    for model in models:
+    for idx, model in enumerate(models):
         url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
         r = None
         for attempt in range(3):
+            tag = "" if attempt == 0 else f" (percobaan {attempt + 1}/3)"
+            report(f"Menunggu jawaban AI dari Gemini {model}{tag} — biasanya 10–30 dtk, maks 90 dtk…")
             try:
                 r = httpx.post(url, params={"key": config.GEMINI_API_KEY}, json=body, timeout=GEMINI_TIMEOUT)
             except httpx.TimeoutException:
@@ -85,12 +94,19 @@ def _gemini(system: str, user: str, temperature: float) -> str:
                 except (KeyError, IndexError):
                     raise LLMError(f"Respons Gemini ({model}) tak terduga: {r.text[:400]}")
             if r.status_code in GEMINI_RETRY_STATUS and attempt < 2:
-                time.sleep(2 * (attempt + 1))
+                wait = 2 * (attempt + 1)
+                report(f"Gemini {model}: {STATUS_REASON.get(r.status_code, f'error {r.status_code}')} "
+                       f"— mencoba lagi dalam {wait} dtk…")
+                time.sleep(wait)
                 continue
             break
+        nxt = f" → mencoba {models[idx + 1]}…" if idx + 1 < len(models) else ""
         if r is None:
             errors.append(f"{model} → timeout")
+            report(f"Gemini {model} tidak menjawab dalam 90 dtk{nxt}")
             continue
+        if r.status_code in GEMINI_RETRY_STATUS | GEMINI_SKIP_STATUS:
+            report(f"Gemini {model}: {STATUS_REASON.get(r.status_code, f'error {r.status_code}')}{nxt}")
         errors.append(f"{model} → {r.status_code}")
         if r.status_code not in GEMINI_RETRY_STATUS | GEMINI_SKIP_STATUS:
             raise LLMError(f"Gemini {r.status_code} ({model}): {r.text[:400]}")
@@ -102,6 +118,7 @@ def _gemini(system: str, user: str, temperature: float) -> str:
 def _groq(system: str, user: str, temperature: float) -> str:
     if not config.GROQ_API_KEY:
         raise LLMError("GROQ_API_KEY belum diisi di .env (gratis di console.groq.com)")
+    report(f"Menunggu jawaban AI dari Groq {config.GROQ_MODEL} — biasanya 2–10 dtk…")
     r = httpx.post(
         "https://api.groq.com/openai/v1/chat/completions",
         headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"},
@@ -119,6 +136,7 @@ def _groq(system: str, user: str, temperature: float) -> str:
 
 
 def _ollama(system: str, user: str, temperature: float) -> str:
+    report(f"Menunggu jawaban AI lokal Ollama {config.OLLAMA_MODEL} — bisa 1–5 menit di CPU…")
     try:
         r = httpx.post(
             f"{config.OLLAMA_URL}/api/chat",

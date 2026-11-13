@@ -25,11 +25,13 @@ def youtube_search(keyword: str, n: int = 12) -> list[dict]:
 def generate_ideas(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     keyword = (params.get("keyword") or p["research"].get("keyword") or p["title"]).strip()
-    progress("Riset judul populer di YouTube...")
+    progress(f"Riset: mencari video populer di YouTube untuk '{keyword}'…")
     competitors = youtube_search(keyword)
-    progress("AI menyusun ide...")
+    progress(f"Riset selesai: {len(competitors)} video pembanding. Menyiapkan bahan untuk AI…"
+             if competitors else "Riset YouTube tidak menemukan hasil — AI menyusun ide tanpa pembanding…")
     sys_, usr = prompts.ideas(keyword, p["format"], p["language"], competitors)
     res = llm.chat_json(sys_, usr, params.get("provider"))
+    progress(f"Menyimpan {len(res.get('ideas', []))} ide ke proyek…")
 
     def apply(p):
         p["research"].update({"keyword": keyword, "competitors": competitors,

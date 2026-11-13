@@ -29,9 +29,10 @@ def normalize_scenes(scenes: list[dict]) -> list[dict]:
 def generate(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     idea = p["research"]["ideas"][p["research"]["selected"]]
-    progress("AI menulis kerangka & naskah...")
+    progress(f"Menyiapkan bahan naskah dari ide '{idea.get('title', '')}'…")
     sys_, usr = prompts.script(idea, p["format"], p["language"], p["voice"]["preset"])
     res = llm.chat_json(sys_, usr, params.get("provider"))
+    progress("Merapikan naskah menjadi scene…")
     scenes = normalize_scenes([{**s, "id": f"s{i + 1}"} for i, s in enumerate(res.get("scenes", []))])
 
     def apply(p):
