@@ -126,21 +126,31 @@ def _gemini(system: str, user: str, temperature: float) -> str:
 def _groq(system: str, user: str, temperature: float) -> str:
     if not config.GROQ_API_KEY:
         raise LLMError("GROQ_API_KEY belum diisi di .env (gratis di console.groq.com)")
-    report(f"Menunggu jawaban AI dari Groq {config.GROQ_MODEL} — biasanya 2–10 dtk…")
-    r = httpx.post(
-        "https://api.groq.com/openai/v1/chat/completions",
-        headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"},
-        json={
-            "model": config.GROQ_MODEL,
-            "temperature": temperature,
-            "response_format": {"type": "json_object"},
-            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-        },
-        timeout=TIMEOUT,
-    )
-    if r.status_code != 200:
-        raise LLMError(f"Groq {r.status_code}: {r.text[:400]}")
-    return r.json()["choices"][0]["message"]["content"]
+    models = list(dict.fromkeys([config.GROQ_MODEL, *config.GROQ_FALLBACK_MODELS]))
+    errors = []
+    for idx, model in enumerate(models):
+        report(f"Menunggu jawaban AI dari Groq {model} — biasanya 1–10 dtk…")
+        r = httpx.post(
+            "https://api.groq.com/openai/v1/chat/completions",
+            headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"},
+            json={
+                "model": model,
+                "temperature": temperature,
+                "response_format": {"type": "json_object"},
+                "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            },
+            timeout=TIMEOUT,
+        )
+        if r.status_code == 200:
+            return r.json()["choices"][0]["message"]["content"]
+        errors.append(f"{model} → {r.status_code}")
+        # Model dipensiunkan (404), kuota habis (429), atau server error → coba model Groq berikutnya.
+        if r.status_code not in (404, 429, 500, 502, 503):
+            raise LLMError(f"Groq {r.status_code} ({model}): {r.text[:400]}")
+        if idx + 1 < len(models):
+            reason = {404: "model sudah tidak tersedia", 429: "kuota habis"}.get(r.status_code, "server sibuk")
+            report(f"Groq {model}: {reason} → mencoba {models[idx + 1]}…")
+    raise LLMError(f"Semua model Groq gagal ({', '.join(errors)}). Detail terakhir: {r.text[:300]}")
 
 
 def _ollama(system: str, user: str, temperature: float) -> str:

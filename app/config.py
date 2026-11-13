@@ -27,7 +27,9 @@ GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.8-flash")
 GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-flash-latest")
                           .split(",") if m.strip()]
 GROQ_API_KEY = _env("GROQ_API_KEY")
-GROQ_MODEL = _env("GROQ_MODEL", "llama-3.3-70b-versatile")
+GROQ_MODEL = _env("GROQ_MODEL", "openai/gpt-oss-120b")
+GROQ_FALLBACK_MODELS = [m.strip() for m in _env("GROQ_FALLBACK_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b")
+                        .split(",") if m.strip()]
 OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b")
 
