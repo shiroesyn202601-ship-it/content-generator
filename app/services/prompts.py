@@ -10,8 +10,17 @@ PERSONA = ("Kamu adalah penulis konten YouTube untuk kreator bernama Shiroe Syn.
 LANG_NAME = {"id": "Bahasa Indonesia", "en": "English"}
 
 
-def ideas(keyword: str, fmt: str, lang: str, yt_context: list[dict]) -> tuple[str, str]:
-    ctx = "\n".join(f"- {v['title']} ({v.get('views') or '?'} views)" for v in yt_context[:15])
+def ideas(keyword: str, fmt: str, lang: str, yt_context: list[dict], suggestions: list[str] | None = None) -> tuple[str, str]:
+    def line(v):
+        s = f"- {v['title']} ({v.get('views') or '?'} views"
+        if v.get("views_per_day") is not None:
+            s += f", umur {v['age_days']} hari, ±{v['views_per_day']:,.0f} views/hari"
+        return s + ")"
+    ctx = "\n".join(line(v) for v in yt_context[:15])
+    if suggestions:
+        ctx += "\n\nYang sedang dicari orang di YouTube (autocomplete):\n" + "\n".join(f"- {s}" for s in suggestions)
+        ctx += ("\n\nCatatan: views/hari tinggi + umur muda = topik sedang NAIK (prioritaskan angle di sekitarnya). "
+                "Saran pencarian = kata kunci yang dicari penonton.")
     durasi = "video pendek 30-60 detik (Shorts)" if fmt == "short" else "video panjang 6-10 menit"
     system = PERSONA + " Kamu juga riset tren dan menganalisis celah konten."
     user = f"""Topik/kata kunci: "{keyword}"

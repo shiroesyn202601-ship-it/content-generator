@@ -150,6 +150,27 @@ def search_commons(query: str, n: int = 6) -> list[dict]:
     return out
 
 
+AI_STYLE = ("photorealistic, cinematic lighting, highly detailed, historically and culturally accurate, "
+            "no text, no watermark, no logo")
+
+
+def search_ai(prompt: str, orientation: str, n: int = 2) -> list[dict]:
+    """Gambar AI gratis (Pollinations, model FLUX, tanpa API key). URL-nya sendiri memicu pembuatan gambar
+    (±5-10 dtk). Dipakai bila stok & Commons tidak punya visual yang cocok. Ditandai sintetis."""
+    from urllib.parse import quote
+    w, h = (720, 1280) if orientation == "portrait" else (1280, 720)
+    full = f"{prompt}, {AI_STYLE}"
+    out = []
+    for seed in range(1, n + 1):
+        url = (f"https://image.pollinations.ai/prompt/{quote(full)}?width={w}&height={h}"
+               f"&nologo=true&seed={seed}&model=flux")
+        out.append({"provider": "ai", "type": "image", "id": f"ai{abs(hash(full)) % 10 ** 8}_{seed}", "thumb": url,
+                    "url": url, "width": w, "height": h, "page_url": "https://pollinations.ai",
+                    "author": "AI (Pollinations/FLUX)", "license": "Gambar buatan AI", "synthetic": True,
+                    "tags": f"ai generated, {prompt}".lower()})
+    return out
+
+
 def credits(p: dict) -> str:
     """Blok 'Kredit visual' untuk deskripsi YouTube (wajib bagi CC BY / CC BY-SA)."""
     lines = []
@@ -179,6 +200,8 @@ def search(p: dict, query: str, provider: str = "all", n: int = 8) -> list[dict]
             res += search_commons(query, 4 if provider == "all" else n)
         except (httpx.HTTPError, RuntimeError):
             pass
+    if provider == "ai":
+        return search_ai(query, orientation, 3)
     if not res and provider != "commons" and not (config.PEXELS_API_KEY or config.PIXABAY_API_KEY):
         raise RuntimeError("Isi PEXELS_API_KEY / PIXABAY_API_KEY di .env (gratis).")
     return res
@@ -208,6 +231,16 @@ def _download(url: str, dest: Path) -> None:
                 f.write(chunk)
 
 
+def _crop_watermark(path: Path) -> None:
+    """Pollinations versi gratis tanpa akun menaruh watermark kecil di pojok kanan bawah → buang 6% bawah."""
+    try:
+        from PIL import Image
+        im = Image.open(path).convert("RGB")
+        im.crop((0, 0, im.width, int(im.height * 0.94))).save(path, "JPEG", quality=92)
+    except Exception:  # noqa: BLE001 — gagal crop bukan masalah fatal
+        pass
+
+
 def select_candidate(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     sid, idx = params["scene_id"], int(params["index"])
@@ -217,8 +250,10 @@ def select_candidate(pid: str, params: dict, progress) -> dict:
     dest = store.project_dir(pid) / rel
     dest.parent.mkdir(exist_ok=True)
     if not dest.exists():
-        progress("Mengunduh aset...")
+        progress("Mengunduh aset…" if cand["provider"] != "ai" else "Membuat gambar AI (±5-10 dtk)…")
         _download(cand["url"], dest)
+        if cand["provider"] == "ai":
+            _crop_watermark(dest)
 
     def apply(p):
         slot = p["assets"]["scenes"][sid]
@@ -360,8 +395,17 @@ def auto_all(pid: str, params: dict, progress) -> dict:
 
     # 4) simpan & unduh
     done, weak = 0, 0
+    orient = "portrait" if p["format"] == "short" else "landscape"
     for i, s in enumerate(scenes):
         found = cands[s["id"]]
+        ai_prompt = (used_q[s["id"]] or [s.get("visual_query") or topic])[0]
+        if params.get("ai_fallback", True):
+            if not found:  # stok & Commons kosong → gambar AI supaya scene tidak polos
+                found = search_ai(ai_prompt, orient, 2)
+                picks[s["id"]] = {"index": 0, "fit": "lumayan",
+                                  "reason": "🎨 Tidak ada stok/foto yang cocok — memakai gambar AI (cek akurasinya)"}
+            elif (picks.get(s["id"]) or {}).get("fit") == "lemah":
+                found = found + search_ai(ai_prompt, orient, 2)  # opsi tambahan untuk dipilih manual
 
         def save(p, s=s, found=found):
             slot = p["assets"]["scenes"].setdefault(s["id"], {})

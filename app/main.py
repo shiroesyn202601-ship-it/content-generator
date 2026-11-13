@@ -1,13 +1,14 @@
 """Shiroe Syn Content Studio — backend API (FastAPI)."""
+import secrets
 import shutil
 
 from fastapi import Body, FastAPI, File, HTTPException, UploadFile
-from fastapi.responses import FileResponse, Response
+from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, clipper, render, research, scriptgen, subtitles, sync, tts,
-                       youtube)
+from .services import (assets, audio_lib, batch, clipper, render, research, scriptgen, subtitles, sync, thumbs,
+                       tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
 WEB = config.ROOT / "web"
@@ -24,6 +25,32 @@ if "allow_private_network" in inspect.signature(CORSMiddleware.__init__).paramet
 app.add_middleware(CORSMiddleware, **_cors)
 
 
+LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
+
+
+@app.middleware("http")
+async def lan_pin_guard(request, call_next):
+    """Mode tablet/LAN: perangkat lain di Wi-Fi wajib memasukkan PIN. Laptop sendiri (loopback, termasuk
+    UI GitHub Pages yang memanggil 127.0.0.1) tidak perlu PIN."""
+    client = request.client.host if request.client else ""
+    if config.APP_PIN and client not in LOOPBACK and request.method != "OPTIONS":
+        pin = (request.headers.get("x-app-pin") or request.cookies.get("app_pin")
+               or request.query_params.get("pin") or "")
+        path = request.url.path
+        public = path == "/" or path.startswith("/static/") or path == "/api/pin-check"
+        if not public and not secrets.compare_digest(pin, config.APP_PIN):
+            return JSONResponse({"detail": "PIN"}, status_code=401)
+    return await call_next(request)
+
+
+@app.get("/api/pin-check")
+def pin_check(pin: str = ""):
+    ok = not config.APP_PIN or secrets.compare_digest(pin, config.APP_PIN)
+    if not ok:
+        raise HTTPException(401, "PIN salah")
+    return {"ok": True}
+
+
 @app.middleware("http")
 async def private_network_access(request, call_next):
     """Chrome 'Private Network Access': halaman publik yang memanggil localhost butuh header ini."""
@@ -37,6 +64,7 @@ async def private_network_access(request, call_next):
 ACTIONS = {
     "research.ideas":      (research.generate_ideas, "research", True),
     "research.download":   (research.download_source, "research", True),
+    "research.batch":      (batch.produce, "research", True),
     "script.generate":     (scriptgen.generate, "script", True),
     "script.factcheck":    (scriptgen.factcheck, "script", True),
     "script.transcribe":   (clipper.transcribe, "script", True),
@@ -53,6 +81,8 @@ ACTIONS = {
     "render.run":          (render.run, "render", True),
     "publish.metadata":    (youtube.gen_metadata, "publish", True),
     "publish.upload":      (youtube.upload, "publish", True),
+    "publish.thumbs":      (thumbs.make, "publish", True),
+    "publish.thumbnail":   (thumbs.upload, "publish", True),
 }
 
 

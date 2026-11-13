@@ -23,19 +23,76 @@ def youtube_search(keyword: str, n: int = 12) -> list[dict]:
     return out
 
 
+def _video_meta(url: str) -> dict:
+    """Detail satu video (tanggal unggah, like) — ±10 dtk karena butuh pemecah JS YouTube (Deno)."""
+    import yt_dlp
+
+    opts = {"quiet": True, "skip_download": True, "noplaylist": True, "noprogress": True}
+    deno = config.find_deno()
+    if deno:
+        opts["js_runtimes"] = {"deno": {"path": deno}}
+    with yt_dlp.YoutubeDL(opts) as ydl:
+        i = ydl.extract_info(url, download=False)
+    return {"upload_date": i.get("upload_date"), "views": i.get("view_count"), "likes": i.get("like_count"),
+            "duration": i.get("duration")}
+
+
+def enrich_trends(videos: list[dict], top: int = 6, progress=lambda m: None) -> list[dict]:
+    """Tambahkan umur video & views/hari untuk video teratas (paralel). Views/hari menunjukkan topik yang
+    sedang NAIK, bukan sekadar video lama yang menumpuk views bertahun-tahun."""
+    from concurrent.futures import ThreadPoolExecutor
+    from datetime import date
+
+    ranked = sorted(videos, key=lambda v: -(v.get("views") or 0))[:top]
+    progress(f"Riset tren: mengambil tanggal unggah {len(ranked)} video teratas (±10-20 dtk)…")
+
+    def one(v):
+        try:
+            return v, _video_meta(v["url"])
+        except Exception:  # noqa: BLE001 — satu video gagal tidak menggagalkan riset
+            return v, None
+    with ThreadPoolExecutor(max_workers=3) as ex:
+        for v, meta in ex.map(one, ranked):
+            if not meta or not meta.get("upload_date"):
+                continue
+            up = date(int(meta["upload_date"][:4]), int(meta["upload_date"][4:6]), int(meta["upload_date"][6:]))
+            age = max((date.today() - up).days, 1)
+            v.update(upload_date=up.isoformat(), age_days=age, likes=meta.get("likes"),
+                     views=meta.get("views") or v.get("views"))
+            v["views_per_day"] = round((v["views"] or 0) / age, 1)
+    return videos
+
+
+def autocomplete(keyword: str, lang: str = "id") -> list[str]:
+    """Saran pencarian YouTube (yang sedang dicari orang) — endpoint publik tak resmi, boleh gagal."""
+    import httpx
+    try:
+        r = httpx.get("https://suggestqueries.google.com/complete/search",
+                      params={"client": "firefox", "ds": "yt", "q": keyword, "hl": lang}, timeout=10)
+        data = r.json()
+        return [s for s in data[1] if isinstance(s, str) and s.lower() != keyword.lower()][:10]
+    except Exception:  # noqa: BLE001
+        return []
+
+
 def generate_ideas(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     keyword = (params.get("keyword") or p["research"].get("keyword") or p["title"]).strip()
     progress(f"Riset: mencari video populer di YouTube untuk '{keyword}'…")
     competitors = youtube_search(keyword)
-    progress(f"Riset selesai: {len(competitors)} video pembanding. Menyiapkan bahan untuk AI…"
-             if competitors else "Riset YouTube tidak menemukan hasil — AI menyusun ide tanpa pembanding…")
-    sys_, usr = prompts.ideas(keyword, p["format"], p["language"], competitors)
+    if competitors and params.get("trends", True):
+        competitors = enrich_trends(competitors, progress=progress)
+    progress("Riset: mengambil saran pencarian YouTube (yang sedang dicari orang)…")
+    suggestions = autocomplete(keyword, p["language"])
+    progress(f"Riset selesai: {len(competitors)} video pembanding, {len(suggestions)} saran pencarian. "
+             "Menyiapkan bahan untuk AI…" if competitors else
+             "Riset YouTube tidak menemukan hasil — AI menyusun ide tanpa pembanding…")
+    sys_, usr = prompts.ideas(keyword, p["format"], p["language"], competitors, suggestions)
     res = llm.chat_json(sys_, usr, params.get("provider"))
     progress(f"Menyimpan {len(res.get('ideas', []))} ide ke proyek…")
 
     def apply(p):
-        p["research"].update({"keyword": keyword, "competitors": competitors,
+        p["research"].update({"keyword": keyword, "competitors": competitors, "suggestions": suggestions,
                               "insight": res.get("insight", ""), "ideas": res.get("ideas", []),
                               "selected": None})
         store.touch_stage(p, "research")

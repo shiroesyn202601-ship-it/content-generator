@@ -156,6 +156,13 @@ def _read_frames(wav_path: Path) -> bytes:
 
 def render_vo(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
+    if p["voice"].get("engine") == "gemini":
+        from . import tts_gemini
+        try:
+            return tts_gemini.render_vo(pid, params, progress)
+        except Exception as e:  # noqa: BLE001 — kuota habis / jaringan → tetap jadi dengan Edge-TTS
+            progress(f"Gemini TTS gagal ({str(e)[:120]}) — memakai Edge-TTS…")
+            store.update(pid, lambda q: store.log(q, f"Gemini TTS gagal, fallback Edge: {e}"))
     d = store.project_dir(pid)
     tmp = d / "audio" / "tmp"
     tmp.mkdir(parents=True, exist_ok=True)
@@ -213,7 +220,7 @@ def render_vo(pid: str, params: dict, progress) -> dict:
 
     def apply(p):
         p["audio"].update({"vo_path": "audio/vo.wav", "words": words, "sentences": sentences,
-                           "scene_timings": timings, "duration": round(total, 3)})
+                           "scene_timings": timings, "duration": round(total, 3), "engine": "edge"})
         store.touch_stage(p, "audio")
         store.log(p, f"VO dirender: {total:.1f}s, {len(words)} kata")
     store.update(pid, apply)

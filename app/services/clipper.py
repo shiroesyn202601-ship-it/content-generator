@@ -20,6 +20,12 @@ def _whisper():
 
 
 def transcribe_file(path, language: str | None, progress, total: float = 0) -> dict:
+    """Transkrip dengan timestamp kata: Whisper lokal bila bisa, kalau tidak Whisper Groq (lihat stt.py)."""
+    from . import stt
+    return stt.transcribe(path, language, progress, total)
+
+
+def transcribe_local(path, language: str | None, progress, total: float = 0) -> dict:
     progress(f"Memuat model Whisper '{config.WHISPER_MODEL}' (pertama kali akan mengunduh model)...")
     model = _whisper()
     # VAD default memakai jeda 2 dtk → segmen kepanjangan; 500 ms memberi batas kalimat lebih rapat.
@@ -161,8 +167,24 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
     mode = params.get("crop_mode") or p["assets"].get("crop_mode") or "center"
     w, h = config.RESOLUTIONS[p["format"]]
     (d / "assets").mkdir(exist_ok=True)
+    fit = ff.fit_filter(w, h, mode if mode != "face" else "blur")
+    reframe_info = None
+    if mode == "face":
+        from . import reframe
+        src = d / p["research"]["source"]["path"]
+        progress("Auto-reframe: mendeteksi wajah & pergantian shot…")
+        shots = reframe.track(src, clip["start"], clip["end"], progress)
+        vs = next(s for s in ff.probe(src)["streams"] if s.get("codec_type") == "video")
+        face_vf = reframe.crop_filter(shots, int(vs["width"]), int(vs["height"]), w, h)
+        n_face = sum(s["cx"] is not None for s in shots)
+        if face_vf:
+            fit = face_vf
+            progress(f"Auto-reframe: {len(shots)} shot, {n_face} dengan wajah — bingkai mengikuti wajah")
+        else:
+            progress("Auto-reframe: tidak ada wajah terdeteksi — memakai mode latar blur")
+        reframe_info = {"shots": shots, "faces": n_face}
     progress(f"Memotong {clip['start']:.1f}s - {clip['end']:.1f}s ({mode})...")
-    vf = f"{ff.fit_filter(w, h, mode)},fps={config.FPS},format=yuv420p"
+    vf = f"{fit},fps={config.FPS},format=yuv420p"
     ff.run(["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", p["research"]["source"]["path"],
             "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", "-map", "0:a?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k",
@@ -172,6 +194,7 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
         p["assets"]["clip_path"] = "assets/clip.mp4"
         p["assets"]["crop_mode"] = mode
         p["assets"]["clip_range"] = [clip["start"], clip["end"]]
+        p["assets"]["reframe"] = reframe_info
         store.touch_stage(p, "assets")
         store.log(p, f"Klip dipotong ({mode})")
     store.update(pid, apply)

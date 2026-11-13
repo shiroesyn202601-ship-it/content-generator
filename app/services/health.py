@@ -48,7 +48,18 @@ def check(ping_llm: bool = False) -> list[dict]:
     free_gb = shutil.disk_usage(config.DATA_DIR).free / 1e9
     out.append(_item("Sistem", "Ruang disk", "ok" if free_gb > 5 else "warn", f"{free_gb:.1f} GB kosong",
                      "" if free_gb > 5 else "Kosongkan disk: render & footage butuh beberapa GB"))
-    for pkg in ("edge-tts", "yt-dlp", "faster-whisper"):
+    from . import stt
+    ok_local, why = stt.local_available()
+    if ok_local:
+        out.append(_item("Sistem", "Transkrip (Whisper)", "ok", "Whisper lokal siap"))
+    elif config.GROQ_API_KEY:
+        out.append(_item("Sistem", "Transkrip (Whisper)", "ok",
+                         "Whisper lokal diblokir/tidak ada → memakai Whisper Groq (cloud, gratis)",
+                         "Penyebab umum: Smart App Control memblokir DLL ctranslate2. Tidak perlu tindakan."))
+    else:
+        out.append(_item("Sistem", "Transkrip (Whisper)", "fail", f"Whisper lokal gagal: {why[:120]}",
+                         "Isi GROQ_API_KEY agar transkrip memakai Whisper Groq"))
+    for pkg in ("edge-tts", "yt-dlp"):
         ver = _ver(pkg)
         out.append(_item("Sistem", pkg, "ok" if ver else "fail", ver or "belum terpasang",
                          "" if ver else "python -m pip install -r requirements.txt"))

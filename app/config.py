@@ -69,7 +69,11 @@ def _find_bin(name: str, configured: str) -> str:
     return configured or name
 
 
-VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")  # auto | libx264 | h264_nvenc | h264_qsv | h264_amf
+# Mode tablet/LAN (HOST=0.0.0.0): perangkat lain wajib PIN. Kosong + HOST non-lokal → PIN acak tiap start.
+APP_PIN = _env("APP_PIN")
+VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")
+# Transkrip: auto = Whisper lokal, bila diblokir/tidak ada → Whisper Groq | local | groq
+STT_PROVIDER = _env("STT_PROVIDER", "auto")  # auto | libx264 | h264_nvenc | h264_qsv | h264_amf
 FFMPEG = _find_bin("ffmpeg", _env("FFMPEG_BIN", "ffmpeg"))
 FFPROBE = _find_bin("ffprobe", _env("FFPROBE_BIN", "ffprobe"))
 

@@ -31,11 +31,27 @@ const lsSet = (k, v) => { try { v === null ? localStorage.removeItem(k) : localS
 let API_BASE = SERVED_BY_BACKEND ? '' : (lsGet('apiBase') || 'http://127.0.0.1:8000');
 const U = (path) => API_BASE + path;
 
-async function api(method, url, body) {
+/* Mode tablet/LAN: backend minta PIN untuk perangkat selain laptop. PIN disimpan di localStorage
+   (header) dan cookie (supaya <video>/<img> dari /media ikut terotorisasi). */
+function setPin(pin) {
+  lsSet('appPin', pin || null);
+  document.cookie = pin ? `app_pin=${encodeURIComponent(pin)}; path=/; max-age=31536000; SameSite=Lax` : 'app_pin=; path=/; max-age=0';
+}
+
+async function api(method, url, body, _retried = false) {
   const opt = { method, headers: {} };
+  const pin = lsGet('appPin');
+  if (pin) opt.headers['X-App-Pin'] = pin;
   if (body instanceof FormData) opt.body = body;
   else if (body !== undefined) { opt.headers['Content-Type'] = 'application/json'; opt.body = JSON.stringify(body); }
   const r = await fetch(U(url), opt);
+  if (r.status === 401 && !_retried) {
+    let d = {}; try { d = await r.clone().json(); } catch (_) {}
+    if (d.detail === 'PIN') {
+      const p = prompt('Masukkan PIN aplikasi (tertera di jendela terminal laptop):');
+      if (p) { setPin(p.trim()); return api(method, url, body, true); }
+    }
+  }
   if (!r.ok) {
     let m = r.statusText;
     try { const j = await r.json(); m = typeof j.detail === 'string' ? j.detail : JSON.stringify(j.detail); } catch (_) {}
@@ -60,7 +76,8 @@ function status(msg) {
 /* Nama aksi yang mudah dipahami untuk bar status & notifikasi. */
 const ACTION_LABEL = {
   'research.ideas': '💡 Membuat ide konten', 'research.download': '⬇ Mengunduh video sumber',
-  'script.generate': '✍ Menulis naskah', 'script.factcheck': '🔍 Cek fakta', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
+  'script.generate': '✍ Menulis naskah', 'script.factcheck': '🔍 Cek fakta', 'research.batch': '🏭 Produksi massal',
+  'publish.thumbs': '🖼 Membuat thumbnail', 'publish.thumbnail': '🖼 Memasang thumbnail', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
   'script.find_clips': '🔥 Mencari momen viral', 'assets.search': '🔎 Mencari stock footage',
   'assets.select': '🖼 Memasang aset', 'assets.auto_all': '⚡ Mengisi aset semua scene',
   'assets.cut_clip': '✂ Memotong klip', 'audio.render_vo': '🎙 Membuat voice over',
@@ -93,6 +110,7 @@ function jobStatusView(label, j, extra) {
 const S = {
   meta: null, p: null, view: 0, draft: null, dirty: false, raw: false, busy: false,
   voices: [], lib: null, globalPron: {}, voiceDraft: null, voiceDirty: false,
+  batch: new Set(),  // indeks ide yang dicentang untuk produksi massal
 };
 const stageKey = () => S.meta.stages[S.view];
 const media = (rel) => rel ? U(`/media/${S.p.id}/${rel}?v=${encodeURIComponent(S.p.updated_at)}`) : '';
@@ -151,10 +169,10 @@ async function runAction(name, params = {}, skipSave = false) {
     if (S.dirty && !skipSave) await saveDraft(true);
     S.busy = true; status(`${actionLabel(name)}…`);
     const res = await api('POST', `/api/projects/${S.p.id}/action/${name}`, params);
-    if (res.job) await pollJob(res.job, actionLabel(name));
+    const jobResult = res.job ? await pollJob(res.job, actionLabel(name)) : undefined;
     status('Memuat hasil…');
     await loadProject(S.p.id, true);
-    return res.result;
+    return res.job ? jobResult : res.result;
   } catch (e) {
     toast(`${actionLabel(name)} gagal:\n${e.message}`, true);
   } finally { S.busy = false; status(''); }
@@ -325,22 +343,41 @@ function rResearch() {
     box.append(h('div', { class: 'row' },
       h('div', { class: 'grow' }, field('Niche / kata kunci', d, 'keyword', { placeholder: 'mis. misteri sejarah nusantara' })),
       btn('🔎 Riset & Generate Ide (AI)', () => runAction('research.ideas', { keyword: d.keyword }), 'primary')));
-    box.append(hint('AI membaca judul video populer di YouTube untuk topik ini (via yt-dlp, gratis), lalu mencari celah/angle baru. Pilih satu ide; semua field bisa diedit.'));
+    box.append(hint('AI membaca video populer di YouTube untuk topik ini (judul, views, umur → views/hari untuk melihat topik yang sedang naik) dan saran pencarian YouTube, lalu mencari celah/angle baru. Pilih satu ide; semua field bisa diedit. Centang beberapa ide lalu "Produksi massal" untuk membuat banyak proyek sekaligus.'));
     if (d.insight) box.append(h('div', { class: 'card' }, h('b', {}, 'Insight riset: '), d.insight));
     (d.ideas || []).forEach((it, i) => {
       box.append(h('div', { class: `card ${d.selected === i ? 'selected' : ''}` },
         h('label', { class: 'row' }, h('input', { type: 'radio', name: 'idea', checked: d.selected === i,
           onchange: () => { d.selected = i; markDirty(); render(); } }), h('b', {}, `Ide ${i + 1}`),
-          h('span', { class: 'badge' }, `potensi ${it.potential ?? '?'}/10`)),
+          h('span', { class: 'badge' }, `potensi ${it.potential ?? '?'}/10`),
+          h('label', { class: 'small muted', style: 'margin-left:auto', onclick: (e) => e.stopPropagation() },
+            h('input', { type: 'checkbox', checked: S.batch.has(i), onchange: (e) => { e.target.checked ? S.batch.add(i) : S.batch.delete(i); render(); } }),
+            ' produksi massal')),
         field('Judul', it, 'title'),
         h('div', { class: 'grid2' }, field('Angle', it, 'angle', { type: 'textarea', rows: 2 }), field('Hook 3 detik', it, 'hook', { type: 'textarea', rows: 2 })),
         h('div', { class: 'grid2' }, field('Kata kunci SEO', it, 'keywords', { type: 'csv' }), field('Target penonton', it, 'target_audience'))));
     });
-    box.append(btn('+ Tambah ide manual', () => { d.ideas = d.ideas || []; d.ideas.push({ title: '', angle: '', hook: '', keywords: [] }); markDirty(); render(); }, 'ghost'));
+    box.append(h('div', { class: 'row' },
+      btn('+ Tambah ide manual', () => { d.ideas = d.ideas || []; d.ideas.push({ title: '', angle: '', hook: '', keywords: [] }); markDirty(); render(); }, 'ghost'),
+      S.batch.size ? btn(`🏭 Produksi massal (${S.batch.size} ide)`, async () => {
+        if (!confirm(`Buat ${S.batch.size} proyek baru dari ide yang dicentang? AI akan riset fakta & menulis naskah tiap proyek satu per satu (±1 menit per proyek). Setelah itu cek & setujui naskah masing-masing.`)) return;
+        const res = await runAction('research.batch', { indexes: [...S.batch].sort((a, b) => a - b) });
+        S.batch.clear();
+        if (res) toast(`${res.created.length} proyek dibuat. Lihat daftar Proyek di kiri.`);
+        refreshList();
+      }, 'primary') : null));
     if ((d.competitors || []).length) {
-      box.append(h('details', {}, h('summary', {}, `Data riset YouTube (${d.competitors.length} video)`),
-        h('table', {}, d.competitors.map((c) => h('tr', {}, h('td', {}, h('a', { href: c.url, target: '_blank' }, c.title)),
-          h('td', {}, c.channel || ''), h('td', {}, c.views ? c.views.toLocaleString('id') : '-'))))));
+      const comp = [...d.competitors].sort((a, b) => (b.views_per_day || -1) - (a.views_per_day || -1));
+      box.append(h('details', {}, h('summary', {}, `Data riset YouTube (${d.competitors.length} video · urut views/hari)`),
+        h('table', {}, h('tr', {}, h('th', {}, 'Judul'), h('th', {}, 'Channel'), h('th', {}, 'Views'), h('th', {}, 'Umur'), h('th', {}, 'Views/hari')),
+          comp.map((c) => h('tr', {}, h('td', {}, h('a', { href: c.url, target: '_blank' }, c.title)),
+            h('td', {}, c.channel || ''), h('td', {}, c.views ? c.views.toLocaleString('id') : '-'),
+            h('td', {}, c.age_days ? `${c.age_days} hr` : '-'),
+            h('td', {}, c.views_per_day != null ? h('b', {}, Math.round(c.views_per_day).toLocaleString('id')) : '-'))))));
+    }
+    if ((d.suggestions || []).length) {
+      box.append(h('details', {}, h('summary', {}, `Yang sedang dicari di YouTube (${d.suggestions.length})`),
+        h('div', { class: 'row', style: 'flex-wrap:wrap' }, d.suggestions.map((s) => h('span', { class: 'chip' }, s)))));
     }
   } else {
     const st = { url: (d.source && d.source.url) || '' };
@@ -477,7 +514,7 @@ function rAssets() {
     box.append(h('div', { class: 'card' }, h('b', {}, clip.title), h('div', { class: 'muted' }, `${fmtT(clip.start)} → ${fmtT(clip.end)}`)));
     box.append(h('div', { class: 'row' },
       h('div', { style: 'min-width:260px' }, field('Mode bingkai', d, 'crop_mode', { type: 'select', options: [
-        ['blur', 'Latar blur (video utuh di tengah)'], ['center', 'Crop tengah (isi penuh)'], ['none', 'Letterbox hitam']] })),
+        ['face', 'Ikuti wajah otomatis (auto-reframe)'], ['blur', 'Latar blur (video utuh di tengah)'], ['center', 'Crop tengah (isi penuh)'], ['none', 'Letterbox hitam']] })),
       btn('✂ Potong klip (FFmpeg)', () => runAction('assets.cut_clip', { crop_mode: d.crop_mode }), 'primary')));
     if (d.clip_path) box.append(h('video', { class: 'preview-v', src: media(d.clip_path), controls: true }));
     return box;
@@ -511,7 +548,7 @@ function rAssets() {
             ['auto', 'Otomatis'], ['center', 'Isi penuh (crop tengah)'], ['blur', 'Utuh + latar blur']] })) : null,
           h('div', { class: 'row' },
             h('div', { class: 'grow' }, field('', q, 'query', { dirty: () => {} })),
-            field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pixabay', 'Pixabay'], ['commons', 'Wikimedia (foto asli/sejarah)'], ['pexels', 'Pexels'], ['photos', 'Foto Pexels']], dirty: () => {} }),
+            field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pixabay', 'Pixabay'], ['commons', 'Wikimedia (foto asli/sejarah)'], ['ai', 'Gambar AI (tulis deskripsi Inggris)'], ['pexels', 'Pexels'], ['photos', 'Foto Pexels']], dirty: () => {} }),
             btn('Cari', () => runAction('assets.search', { scene_id: s.id, query: q.query, provider: q.provider }), 'small'),
             btn('📁 Unggah', () => uploadFile(`/api/projects/${S.p.id}/assets/${s.id}/upload`, 'video/*,image/*'), 'small')))),
       (slot.candidates || []).length ? h('div', { class: 'grid', style: 'margin-top:8px' }, slot.candidates.map((c, k) =>
@@ -558,13 +595,18 @@ function rAudio() {
     const voiceOpts = (S.voices.length ? S.voices : [{ name: v.voice }]).map((x) => [x.name, `${x.name}${x.gender ? ` (${x.gender})` : ''}`]);
     box.append(h('div', { class: 'card' }, h('h3', {}, '🎙 Karakter suara (Tone of Voice)'),
       h('div', { class: 'grid' },
+        field('Mesin suara', v, 'engine', { type: 'select', dirty: vdirty, onchange: () => render(), options: [
+          ['edge', 'Edge-TTS (stabil, cepat)'], ['gemini', 'Gemini TTS (lebih ekspresif, kuota harian terbatas)']] }),
         field('Preset karakter', v, 'preset', { type: 'select', options: Object.keys(S.meta.voice_presets), dirty: vdirty,
           onchange: (k) => { Object.assign(v, S.meta.voice_presets[k]); render(); } }),
-        field('Suara', v, 'voice', { type: 'select', options: voiceOpts, dirty: vdirty }),
+        v.engine === 'gemini'
+          ? field('Suara Gemini', v, 'gemini_voice', { type: 'select', dirty: vdirty, options: ['Kore', 'Puck', 'Charon', 'Fenrir', 'Aoede', 'Leda', 'Orus', 'Zephyr'] })
+          : field('Suara', v, 'voice', { type: 'select', options: voiceOpts, dirty: vdirty }),
         field('Kecepatan', v, 'speed', { type: 'range', min: 0.8, max: 1.5, step: 0.05, fmt: (x) => `${(+x).toFixed(2)}x`, dirty: vdirty }),
         field('Pitch', v, 'pitch_hz', { type: 'range', min: -20, max: 20, step: 1, fmt: (x) => `${x} Hz`, dirty: vdirty }),
         field('Jeda antar-kalimat', v, 'pause_ms', { type: 'range', min: 100, max: 1500, step: 50, fmt: (x) => `${x} ms`, dirty: vdirty })),
       field('Tekankan intonasi kalimat yang berisi *kata kunci*', v, 'emphasis_boost', { type: 'checkbox', dirty: vdirty }),
+      v.engine === 'gemini' ? hint('Gemini TTS membaca seluruh naskah sekaligus dengan gaya sesuai preset & emosi tiap scene. Timing kata diambil dengan Whisper (pertama kali mengunduh model ±0.5 GB). Pitch & jeda tidak berlaku. Bila kuota habis, otomatis kembali ke Edge-TTS. Pratinjau 🔊 tetap memakai Edge-TTS.') : null,
       h('div', { class: 'row' },
         btn('💾 Simpan pengaturan suara', async () => {
           S.p = await api('PUT', `/api/projects/${S.p.id}/voice`, S.voiceDraft); S.voiceDirty = false; toast('Pengaturan suara tersimpan');
@@ -782,6 +824,8 @@ function rPublish() {
       ['28', 'Science & Tech'], ['20', 'Gaming'], ['10', 'Music'], ['17', 'Sports'], ['25', 'News & Politics'], ['19', 'Travel']] }),
     field('Konten untuk anak-anak', d, 'made_for_kids', { type: 'checkbox' }),
     field('Berisi konten AI/sintetis yang tampak nyata', d, 'synthetic_media', { type: 'checkbox' })));
+  const aiUsed = Object.values((S.p.assets && S.p.assets.scenes) || {}).some((sl) => sl.selected && sl.selected.provider === 'ai');
+  if (aiUsed) box.append(hint('⚠️ Proyek ini memakai GAMBAR AI di tahap visual. Bila gambarnya tampak nyata (orang/tempat/peristiwa), centang "konten AI/sintetis".', 'warn'));
   box.append(hint('Centang "konten AI/sintetis" bila video memuat gambar/video buatan AI yang tampak nyata (orang, tempat, atau peristiwa yang tidak pernah terjadi). Suara AI + stok footage biasa umumnya tidak wajib — lihat kebijakan YouTube "altered or synthetic content".'));
   if (d.pinned_comment) box.append(field('Komentar untuk di-pin (salin manual setelah tayang)', d, 'pinned_comment', { type: 'textarea', rows: 2 }));
   box.append(hint('Jadwal memakai fitur publishAt bawaan YouTube: video diunggah private lalu YouTube menayangkannya otomatis — komputer tidak perlu menyala saat jam tayang. Kuota upload API ±100 video/hari. Login Google (mode Testing) perlu dihubungkan ulang tiap 7 hari.'));
@@ -794,6 +838,23 @@ function rPublish() {
     if (confirm(`Upload "${d.title}" ke channel YouTube Anda${d.publish_at ? `, tayang ${d.publish_at}` : ` sebagai ${d.privacy}`}?`)) runAction('publish.upload');
   }, 'success')));
   if (d.video_id) box.append(h('div', { class: 'card' }, '✅ Terunggah: ', h('a', { href: d.url, target: '_blank' }, d.url), ` · status: ${d.status}`));
+
+  // --- thumbnail
+  const tb = h('div', { class: 'card' }, h('b', {}, '🖼 Thumbnail'),
+    h('div', { class: 'row' },
+      btn((d.thumbs || []).length ? '↻ Buat ulang thumbnail' : '🖼 Buat 3 thumbnail dari video', () => runAction('publish.thumbs', { text: d.thumb_text || undefined }), 'small'),
+      h('div', { class: 'grow' }, field('Teks di thumbnail', d, 'thumb_text', { placeholder: 'kosong = teks hook / judul' }))));
+  if ((d.thumbs || []).length) {
+    d.thumb_selected = d.thumb_selected || 0;
+    tb.append(h('div', { class: 'row', style: 'align-items:flex-start;flex-wrap:wrap' }, d.thumbs.map((t, k) =>
+      h('img', { src: media(t), class: `thumbpick ${d.thumb_selected === k ? 'on' : ''}`, style: `width:${S.p.format === 'short' ? 120 : 220}px`,
+        onclick: () => { d.thumb_selected = k; markDirty(); render(); } }))));
+    tb.append(h('div', { class: 'row' },
+      d.video_id ? btn('⬆ Pasang thumbnail terpilih ke YouTube', () => runAction('publish.thumbnail', { index: d.thumb_selected }), 'small primary')
+        : h('span', { class: 'muted small' }, 'Thumbnail bisa dipasang setelah video terunggah.'),
+      d.thumb_uploaded ? h('span', { class: 'muted small' }, `terpasang ${d.thumb_uploaded}`) : null));
+  }
+  box.append(tb);
   return box;
 }
 

@@ -4,11 +4,24 @@ Tanpa auto-reload:            python run.py --no-reload
 Hubungkan Google (sekali):    python run.py --setup-google
 Pulihkan proyek dari Drive:   python run.py --restore <drive_file_id_project.json>
 """
+import os
+import secrets
 import shutil
+import socket
 import sys
 import webbrowser
 
 from app import config
+
+
+def _lan_ip() -> str:
+    """IP laptop di jaringan lokal (tanpa mengirim data apa pun: UDP connect hanya memilih rute)."""
+    try:
+        with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+            s.connect(("10.255.255.255", 1))
+            return s.getsockname()[0]
+    except OSError:
+        return "IP-laptop"
 
 
 def main():
@@ -30,8 +43,13 @@ def main():
     url = f"http://{host}:{config.PORT}"
     print(f"Shiroe Syn Content Studio -> {url}")
     if config.HOST in ("0.0.0.0", "::"):
-        print("PERINGATAN: HOST=0.0.0.0 — aplikasi bisa diakses semua perangkat di Wi-Fi ini TANPA login. "
-              "Pakai hanya di jaringan rumah.")
+        # Mode tablet: perangkat lain wajib PIN. Tanpa APP_PIN di .env → PIN acak (diwariskan ke proses reload).
+        if not config.APP_PIN:
+            os.environ["APP_PIN"] = f"{secrets.randbelow(10 ** 6):06d}"
+        print("=" * 60)
+        print(f" Mode tablet/LAN aktif. Buka di tablet (Wi-Fi yang sama): http://{_lan_ip()}:{config.PORT}")
+        print(f" PIN: {os.environ.get('APP_PIN') or config.APP_PIN}   (atur sendiri: APP_PIN=xxxx di .env)")
+        print("=" * 60)
     if not config.find_deno():
         print("Info: Deno belum terpasang — unduh video YouTube (Clipper) akan gagal. "
               "Install: winget install DenoLand.Deno")

@@ -116,14 +116,27 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
    `x-ratelimit-reset-*`); job persisten `data/jobs.json` (restart → interrupted) + tombol Batalkan
    (membunuh proses ffmpeg). Catatan: batas per menit Groq gratis ketat, terutama model vision.
 
-## 5. Status & langkah berikutnya
-Roadmap hasil riset (lihat percakapan 13 Nov 2026):
-- Tahap 1, 2, 3 selesai. Sisa ide: thumbnail Shorts (`thumbnails.set`), riset tren views/hari (YouTube Data
-  API key), mode tablet ber-PIN, auto-reframe wajah Clipper, TTS Gemini, gambar AI (Cloudflare), batch produksi.
-- [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive, lalu uji satu upload.
+10. **Tahap 4** (14 Nov 2026): mode tablet ber-PIN (`APP_PIN`, middleware `lan_pin_guard`, loopback bebas PIN,
+    PIN acak bila HOST=0.0.0.0); riset tren (`research.enrich_trends` views/hari via yt-dlp+Deno,
+    `research.autocomplete`); produksi massal (`batch.py`, berurutan, tunggu 65 dtk bila 429); thumbnail
+    (`thumbs.py`: 3 varian dari video final + teks Anton, `thumbnails.set` setelah processing succeeded);
+    auto-reframe wajah Clipper (`reframe.py`, OpenCV **4.x** Haar alt2 — OpenCV 5 tak punya CascadeClassifier;
+    crop x per shot); Gemini TTS (`tts_gemini.py`, 1 request per naskah, timing kata via STT + difflib,
+    fallback Edge); gambar AI Pollinations (`assets.search_ai`, crop watermark 6% bawah, fallback scene kosong).
+    **Temuan penting:** Smart App Control di laptop user **memblokir DLL ctranslate2** → faster-whisper lokal
+    tidak bisa jalan. Dibuat `stt.py`: lokal → otomatis **Whisper Groq** (`whisper-large-v3-turbo`, gratis,
+    timestamp kata). Jangan sarankan mematikan Smart App Control (tidak bisa dinyalakan lagi).
 
-**Sudah diuji nyata:** render FFmpeg (tes sintetis), LLM Groq, pencarian Pixabay.
-**Belum diuji nyata:** TTS Edge end-to-end, Whisper, yt-dlp download YouTube, integrasi Google, upload YouTube.
+## 5. Status & langkah berikutnya
+- Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**.
+- [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive, lalu uji satu upload
+      (+ pasang thumbnail; channel perlu verifikasi nomor HP untuk thumbnail kustom).
+- Ide lanjutan: diarization pembicara Clipper, beat-sync potongan ke musik, importer musik Freesound,
+  akun Pollinations (tanpa watermark) / Cloudflare Workers AI.
+
+**Sudah diuji nyata:** render FFmpeg (sintetis), LLM Groq, Pixabay, Wikipedia/Commons, Edge-TTS & Gemini TTS
+end-to-end, Whisper Groq, auto-reframe (video sintetis), thumbnail, riset tren, produksi massal, PIN.
+**Belum diuji nyata:** yt-dlp unduh video YouTube penuh, Clipper end-to-end, integrasi Google, upload YouTube.
 
 ## 6. Catatan untuk sesi berikutnya
 - Bahasa komunikasi dengan user: **Bahasa Indonesia**, santai tapi jelas.

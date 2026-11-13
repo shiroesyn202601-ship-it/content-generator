@@ -17,3 +17,5 @@ google-auth-httplib2>=0.2
 
 # Gambar (lembar kontak thumbnail untuk juri visual AI)
 pillow>=10.0
+# Auto-reframe Clipper (deteksi wajah, CPU)
+opencv-python-headless>=4.8,<5  # OpenCV 5 menghapus CascadeClassifier
