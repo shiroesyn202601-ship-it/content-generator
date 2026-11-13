@@ -14,3 +14,6 @@ yt-dlp[default]>=2026.10.26  # [default] menyertakan yt-dlp-ejs; YouTube juga bu
 google-api-python-client>=2.140
 google-auth-oauthlib>=1.2
 google-auth-httplib2>=0.2
+
+# Gambar (lembar kontak thumbnail untuk juri visual AI)
+pillow>=10.0

@@ -34,7 +34,42 @@ FACT_RULES = """ATURAN AKURASI (WAJIB):
   ganti dengan pernyataan umum yang pasti benar. Lebih baik kurang dramatis daripada salah fakta."""
 
 
-def script(idea: dict, fmt: str, lang: str, preset: str, max_words: int | None = None) -> tuple[str, str]:
+def sources_block(sources_text: str) -> str:
+    if not sources_text:
+        return ""
+    return f"""SUMBER FAKTA (Wikipedia). Semua angka, tahun, nama, lokasi, dan superlatif HANYA boleh diambil dari sumber
+ini. Kalau sumber tidak menyebutnya, JANGAN tulis (atau pakai bahasa umum yang pasti benar). Boleh menyederhanakan
+bahasa, tapi jangan menambah fakta. Isi field "sources" tiap scene dengan id sumber yang dipakai (mis. ["S1"]).
+---
+{sources_text}
+---"""
+
+
+def factcheck(scenes: list[dict], sources_text: str) -> tuple[str, str]:
+    lines = "\n".join(f'[{s["id"]}] {s["text"].replace("*", "")}' for s in scenes)
+    system = "Kamu pemeriksa fakta yang teliti dan skeptis untuk konten edukasi."
+    user = f"""Periksa setiap KLAIM FAKTUAL di naskah (angka, tahun, nama, lokasi, sebab-akibat, superlatif seperti
+"terbesar/pertama/satu-satunya/lebih maju dari"). Abaikan kalimat opini/ajakan.
+Bandingkan dengan SUMBER. Untuk tiap klaim tentukan "verdict":
+- "didukung"  : sumber menyatakan hal yang sama (kutip singkat di "quote").
+- "tanpa_sumber": sumber tidak menyebutnya (belum tentu salah, tapi tidak bisa diverifikasi).
+- "bertentangan": sumber menyatakan hal berbeda.
+Superlatif & perbandingan ("lebih maju dari Roma") tanpa kutipan sumber = "tanpa_sumber".
+Beri "fix": usulan kalimat pengganti yang aman (bahasa Indonesia), kosongkan bila "didukung".
+
+NASKAH:
+{lines}
+
+SUMBER:
+{sources_text or "(tidak ada sumber)"}
+
+Balas JSON: {{"claims": [{{"scene_id": "s1", "claim": "...", "verdict": "didukung", "source_id": "S1",
+"quote": "...", "fix": ""}}]}}"""
+    return system, user
+
+
+def script(idea: dict, fmt: str, lang: str, preset: str, max_words: int | None = None,
+           sources_text: str = "") -> tuple[str, str]:
     if fmt == "short":
         mw = max_words or 110
         n = (f"5-8 scene, TOTAL {int(mw * 0.8)}-{mw} kata (±45-55 detik). Lebih dari {mw} kata melewati batas "
@@ -48,6 +83,7 @@ def script(idea: dict, fmt: str, lang: str, preset: str, max_words: int | None =
 
 Tulis naskah voice over lengkap, {n}, bahasa {LANG_NAME.get(lang, lang)}, karakter suara "{preset}".
 {FACT_RULES}
+{sources_block(sources_text)}
 Aturan:
 - Pecah per scene. Setiap scene = 1-3 kalimat yang dibacakan narator.
 - Beri PENANDA EMOSI tiap scene di field "emotion", pilih dari: {list(EMOTION_VOICE)}.
@@ -65,7 +101,7 @@ Aturan:
 Balas JSON:
 {{"title": "...", "framework": {{"hook": "...", "konflik": "...", "eskalasi": "...", "payoff": "...", "cta": "..."}},
   "scenes": [{{"role": "hook", "text": "...", "on_screen_text": "MAKS 5 KATA (hanya scene 1, lainnya \\"\\")",
-              "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "..."}}]}}"""
+              "emotion": "...", "mood": "...", "visual_query": "...", "sfx": "...", "sources": ["S1"]}}]}}"""
     return system, user
 
 
@@ -99,12 +135,13 @@ Balas JSON: {{"scenes": [{{"role": "...", "text": "...", "on_screen_text": "..."
     return system, user
 
 
-def expand_script(res: dict, min_words: int, max_words: int) -> tuple[str, str]:
+def expand_script(res: dict, min_words: int, max_words: int, sources_text: str = "") -> tuple[str, str]:
     system = "Kamu editor naskah video pendek. Kamu mengembangkan naskah supaya lebih berisi tanpa mengarang."
     user = f"""Naskah berikut terlalu pendek. Kembangkan menjadi TOTAL {min_words}-{max_words} kata (hitung semua
 field "text"): tambah penjelasan, contoh, atau konteks yang membuat penonton paham & penasaran. Boleh menambah
 1-3 scene. Pertahankan hook, struktur (role), penanda *bintang*, dan semua field lain.
 {FACT_RULES}
+{sources_block(sources_text)}
 
 {json.dumps({"scenes": res.get("scenes", [])}, ensure_ascii=False)}
 
@@ -140,7 +177,10 @@ Selain itu, buat daftar "avoid": 10-25 tag stok footage (1 kata, bahasa Inggris,
 untuk topik ini secara era/budaya/lokasi — mis. untuk sejarah Jawa kuno: traffic, urban, skyscraper, office,
 construction, excavator, sewer, pollution, wastewater, car, japan, kyoto, rome, italy, egypt, paris.
 Jangan masukkan kata yang mungkin dibutuhkan narasi.
-Balas JSON: {{"avoid": ["..."], "scenes": [{{"id": "s1", "queries": ["...", "...", "..."]}}]}}"""
+Untuk scene yang menyebut OBJEK/TEMPAT/TOKOH NYATA yang mungkin ada fotonya (artefak, situs, candi, peta kuno,
+lukisan), isi "commons_query": 2-4 kata bahasa Inggris untuk mencari foto asli di Wikimedia Commons — di sini
+nama asli BOLEH (mis. "Majapahit cannon", "Trowulan ruins", "Borobudur relief"). Selain itu isi "".
+Balas JSON: {{"avoid": ["..."], "scenes": [{{"id": "s1", "queries": ["...", "...", "..."], "commons_query": ""}}]}}"""
     return system, user
 
 

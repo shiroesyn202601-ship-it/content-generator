@@ -72,6 +72,11 @@ textarea { resize: vertical; }
   padding: 6px 10px; border-radius: 4px; margin: 8px 0; }
 .warn { border-left-color: var(--warn); }
 .warn-text { color: var(--warn); font-weight: 600; }
+.claims { margin: 6px 0; display: grid; gap: 6px; }
+.claim { border-left: 3px solid var(--line); padding: 4px 10px; background: var(--panel2); border-radius: 6px; font-size: 13px; }
+.claim.didukung { border-left-color: var(--accent2); }
+.claim.tanpa_sumber { border-left-color: var(--warn); }
+.claim.bertentangan { border-left-color: var(--danger); }
 table.health { width: 100%; border-collapse: collapse; font-size: 13px; }
 table.health th { text-align: left; padding: 10px 6px 4px; color: var(--muted); font-weight: 600; border-bottom: 1px solid var(--line); }
 table.health td { padding: 6px; vertical-align: top; border-bottom: 1px solid var(--line); }
@@ -106,6 +111,7 @@ video.preview-v { max-height: 360px; background: #000; }
 #statusbar { position: fixed; bottom: 0; left: 290px; right: 0; background: var(--accent); color: #fff;
   padding: 8px 20px; font-size: 13px; z-index: 20; box-shadow: 0 -6px 20px #0006; }
 #statusbar .sb-head { display: flex; align-items: center; gap: 8px; }
+#statusbar .sb-cancel { margin-left: auto; color: #fff; border-color: #fff8; }
 #statusbar .sb-now { margin-top: 2px; }
 #statusbar .sb-done { margin-top: 4px; font-size: 12px; opacity: .75; }
 #statusbar .sb-time { opacity: .75; font-variant-numeric: tabular-nums; }

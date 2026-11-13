@@ -1,6 +1,7 @@
 """Tahap 3 (scratch): cari & unduh stock footage gratis dari Pexels / Pixabay."""
 import hashlib
 import json
+import re
 import shutil
 import time
 from pathlib import Path
@@ -8,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from .. import config, store
-from . import llm, prompts
+from . import llm, prompts, vision
 
 HTTP = httpx.Client(timeout=httpx.Timeout(60.0, connect=15.0), follow_redirects=True)
 
@@ -61,7 +62,7 @@ def search_pexels_photos(query: str, orientation: str, n: int) -> list[dict]:
 CACHE_TTL = 24 * 3600  # aturan API Pixabay: hasil pencarian wajib di-cache 24 jam
 
 
-def _cached_get(url: str, params: dict, key_param: str = "key") -> dict:
+def _cached_get(url: str, params: dict, key_param: str = "key", client: httpx.Client | None = None) -> dict:
     """GET JSON dengan cache disk 24 jam (kunci cache tanpa API key)."""
     ident = json.dumps({"u": url, **{k: v for k, v in params.items() if k != key_param}}, sort_keys=True)
     f = config.CACHE_DIR / "search" / (hashlib.sha1(ident.encode()).hexdigest() + ".json")
@@ -70,7 +71,7 @@ def _cached_get(url: str, params: dict, key_param: str = "key") -> dict:
             return json.loads(f.read_text(encoding="utf-8"))
         except (OSError, ValueError):
             pass
-    r = HTTP.get(url, params=params)
+    r = (client or HTTP).get(url, params=params)
     if r.status_code == 429:
         raise RuntimeError("Batas Pixabay tercapai (100 permintaan/menit). Tunggu 1 menit lalu coba lagi.")
     r.raise_for_status()
@@ -103,6 +104,66 @@ def search_pixabay(query: str, orientation: str, n: int) -> list[dict]:
     return out[:max(3, n)]
 
 
+def _strip_html(s: str) -> str:
+    return re.sub(r"\s+", " ", re.sub(r"<[^>]+>", " ", s or "")).strip()
+
+
+def _commons_license(short: str) -> tuple[bool, bool]:
+    """(boleh dipakai, wajib atribusi). Hanya PD/CC0/CC BY/CC BY-SA — tolak NC/ND/fair use/lainnya."""
+    s = (short or "").lower()
+    if "nc" in s.split("-") or "-nd" in s or "fair" in s or "non-commercial" in s:
+        return False, False
+    if s.startswith(("public domain", "pd")) or "cc0" in s:
+        return True, False
+    if s.startswith("cc by"):
+        return True, True
+    return False, False
+
+
+def search_commons(query: str, n: int = 6) -> list[dict]:
+    """Wikimedia Commons: foto artefak/tempat bersejarah yang tidak ada di situs stok.
+    Lisensi dicek per file; atribusi disimpan untuk deskripsi YouTube."""
+    from .factsource import HTTP as WM  # klien dengan User-Agent sesuai kebijakan Wikimedia
+    data = _cached_get("https://commons.wikimedia.org/w/api.php", {
+        "action": "query", "format": "json", "generator": "search", "gsrsearch": f"filetype:bitmap {query}",
+        "gsrnamespace": 6, "gsrlimit": n * 2, "prop": "imageinfo", "iiprop": "url|size|extmetadata",
+        "iiurlwidth": 1600}, client=WM)
+    out = []
+    pages = sorted((data.get("query", {}).get("pages") or {}).values(), key=lambda x: x.get("index", 0))
+    for pg in pages:
+        ii = (pg.get("imageinfo") or [{}])[0]
+        md = ii.get("extmetadata") or {}
+        lic = (md.get("LicenseShortName") or {}).get("value", "")
+        allowed, attrib = _commons_license(lic)
+        if not allowed or (ii.get("width") or 0) < 700 or not ii.get("thumburl"):
+            continue
+        title = re.sub(r"^File:|\.[a-z]{3,4}$", "", pg.get("title", ""), flags=re.I)
+        desc = _strip_html((md.get("ImageDescription") or {}).get("value", ""))[:200]
+        out.append({"provider": "commons", "type": "image", "id": str(pg.get("pageid")), "thumb": ii["thumburl"],
+                    "url": ii["thumburl"], "width": ii.get("thumbwidth"), "height": ii.get("thumbheight"),
+                    "page_url": ii.get("descriptionurl"), "author": _strip_html((md.get("Artist") or {}).get("value", ""))[:80],
+                    "license": lic, "license_url": (md.get("LicenseUrl") or {}).get("value", ""),
+                    "requires_attribution": attrib, "title": title,
+                    "tags": f"{title}. {desc}".lower()})
+        if len(out) >= n:
+            break
+    return out
+
+
+def credits(p: dict) -> str:
+    """Blok 'Kredit visual' untuk deskripsi YouTube (wajib bagi CC BY / CC BY-SA)."""
+    lines = []
+    for slot in (p.get("assets", {}).get("scenes") or {}).values():
+        sel = slot.get("selected") or {}
+        if sel.get("requires_attribution"):
+            line = f"• \"{sel.get('title') or 'Gambar'}\" oleh {sel.get('author') or 'tidak diketahui'}, {sel.get('license')}"
+            if sel.get("page_url"):
+                line += f" — {sel['page_url']}"
+            if line not in lines:
+                lines.append(line)
+    return ("Kredit visual (Wikimedia Commons):\n" + "\n".join(lines)) if lines else ""
+
+
 def search(p: dict, query: str, provider: str = "all", n: int = 8) -> list[dict]:
     orientation = "portrait" if p["format"] == "short" else "landscape"
     target = 1920
@@ -113,7 +174,12 @@ def search(p: dict, query: str, provider: str = "all", n: int = 8) -> list[dict]
         res += search_pixabay(query, orientation, n)
     if provider in ("all", "photos") and len(res) < 4:
         res += search_pexels_photos(query, orientation, n)
-    if not res and not (config.PEXELS_API_KEY or config.PIXABAY_API_KEY):
+    if provider in ("all", "commons"):
+        try:
+            res += search_commons(query, 4 if provider == "all" else n)
+        except (httpx.HTTPError, RuntimeError):
+            pass
+    if not res and provider != "commons" and not (config.PEXELS_API_KEY or config.PIXABAY_API_KEY):
         raise RuntimeError("Isi PEXELS_API_KEY / PIXABAY_API_KEY di .env (gratis).")
     return res
 
@@ -185,6 +251,9 @@ def _tag_score(c: dict, words: set[str]) -> int:
     return len(_tag_words(c) & words)
 
 
+VISION_MAX = 3
+
+
 def auto_all(pid: str, params: dict, progress) -> dict:
     """Isi visual semua scene dengan bantuan AI:
     1) AI menulis 3 kata kunci per scene (spesifik → umum, sesuai budaya topik),
@@ -202,6 +271,7 @@ def auto_all(pid: str, params: dict, progress) -> dict:
 
     # 1) kata kunci
     queries: dict[str, list[str]] = {}
+    commons_q: dict[str, str] = {}
     avoid: set[str] = set()
     for batch in _chunks(scenes, 8):
         progress(f"AI menyusun kata kunci footage untuk {len(scenes)} scene…")
@@ -212,6 +282,9 @@ def auto_all(pid: str, params: dict, progress) -> dict:
                 qs = [q.strip() for q in r.get("queries", []) if isinstance(q, str) and q.strip()]
                 if qs:
                     queries[r.get("id")] = qs[:3]
+                cq = (r.get("commons_query") or "").strip()
+                if cq:
+                    commons_q[r.get("id")] = cq
         except llm.LLMError as e:
             progress("AI gagal menyusun kata kunci — memakai kata kunci dari naskah…")
             store.update(pid, lambda p, e=e: store.log(p, f"Kata kunci footage AI gagal: {e}"))
@@ -224,9 +297,17 @@ def auto_all(pid: str, params: dict, progress) -> dict:
         used_q[s["id"]] = qs
         progress(f"Mencari footage scene {i + 1}/{len(scenes)}: {' · '.join(qs)}")
         seen, found = set(), []
+        # Foto asli dari Wikimedia Commons (artefak/tempat bersejarah) ditaruh di depan bila ada.
+        if commons_q.get(s["id"]):
+            try:
+                for c in search_commons(commons_q[s["id"]], 3):
+                    seen.add((c["provider"], c["id"]))
+                    found.append({**c, "query": commons_q[s["id"]]})
+            except (httpx.HTTPError, RuntimeError) as e:
+                store.update(pid, lambda p, e=e: store.log(p, f"Cari Commons gagal: {e}"))
         for q in qs:
             try:
-                res = search(p, q, n=6)
+                res = search(p, q, provider="pixabay" if not config.PEXELS_API_KEY else "all", n=6)
             except httpx.HTTPError as e:
                 store.update(pid, lambda p, e=e, q=q: store.log(p, f"Cari '{q}' gagal: {e}"))
                 continue
@@ -243,10 +324,10 @@ def auto_all(pid: str, params: dict, progress) -> dict:
             progress(f"Scene {i + 1}: {len(found) - len(clean)} footage dibuang (tidak sesuai era/budaya topik)")
         cands[s["id"]] = (clean or found)[:12]
 
-    # 3) AI memilih
+    # 3a) Penilaian murah dulu: AI menilai SEMUA scene dari tag (1 panggilan per 6 scene).
     picks: dict[str, dict] = {}
     for batch in _chunks([s for s in scenes if cands[s["id"]]], 6):
-        progress(f"AI menilai kecocokan footage dengan narasi ({len(picks) + len(batch)}/{len(scenes)} scene)…")
+        progress(f"AI menilai kecocokan footage dari tag ({len(picks) + len(batch)}/{len(scenes)} scene)…")
         items = [{"id": s["id"], "text": s["text"].replace("*", ""),
                   "candidates": [{"i": k, "tags": ", ".join((c.get("tags") or "").split(", ")[:12]),
                                   "orientation": _orientation(c), "duration": c.get("duration")}
@@ -258,6 +339,24 @@ def auto_all(pid: str, params: dict, progress) -> dict:
         except llm.LLMError as e:
             progress("AI gagal menilai — memilih berdasarkan kecocokan tag…")
             store.update(pid, lambda p, e=e: store.log(p, f"Pemilihan footage AI gagal: {e}"))
+
+    # 3b) Juri visual: AI MELIHAT lembar kontak thumbnail, hanya untuk scene yang belum "cocok".
+    #     Model vision gratis punya batas per menit yang ketat → maks VISION_MAX scene per proses.
+    if params.get("vision", True) and config.GROQ_API_KEY:
+        doubtful = [s for s in scenes if cands[s["id"]] and (picks.get(s["id"]) or {}).get("fit") != "cocok"]
+        for i, s in enumerate(doubtful[:VISION_MAX]):
+            progress(f"AI melihat thumbnail kandidat scene {scenes.index(s) + 1} "
+                     f"(penilaian tag belum yakin, {i + 1}/{min(len(doubtful), VISION_MAX)})…")
+            try:
+                v = vision.pick(topic, s["text"].replace("*", ""),
+                                [c.get("thumb") or "" for c in cands[s["id"]]], sorted(avoid))
+            except Exception as e:  # noqa: BLE001 — gagal visual → tetap pakai penilaian tag
+                msg = f"Juri visual gagal di scene {scenes.index(s) + 1}: {str(e)[:160]}"
+                store.update(pid, lambda p, msg=msg: store.log(p, msg))
+                progress(msg + " — memakai penilaian tag.")
+                break
+            if v:
+                picks[s["id"]] = {**v, "reason": "👁 " + v["reason"][:160]}
 
     # 4) simpan & unduh
     done, weak = 0, 0

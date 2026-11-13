@@ -107,11 +107,19 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
    cache Pixabay 24 jam, musik acak per mood, `containsSyntheticMedia`, prompt metadata SEO Shorts,
    halaman 🩺 Cek Kesiapan (`/api/health`).
 
+9. **Tahap 3** (14 Nov 2026): `factsource.py` (Wikipedia id/en → sumber [S1..S4] di `research.sources`,
+   naskah wajib berdasar sumber) + cek fakta (`script.claims`: didukung/tanpa_sumber/bertentangan + usulan);
+   potongan visual dinamis per kalimat VO maks 4 dtk + punch-in (`render._plan_shots`, `render.cut_style`);
+   Wikimedia Commons (`assets.search_commons`, lisensi PD/CC0/CC BY/BY-SA, `assets.credits` → deskripsi);
+   juri visual (`vision.py`, lembar kontak → `qwen/qwen3.8-27b`, hanya scene yang belum "cocok", maks 3);
+   structured output strict Groq (`llm.strict`, fallback JSON biasa); 429 Groq ditunggu ≤60 dtk (baca
+   `x-ratelimit-reset-*`); job persisten `data/jobs.json` (restart → interrupted) + tombol Batalkan
+   (membunuh proses ffmpeg). Catatan: batas per menit Groq gratis ketat, terutama model vision.
+
 ## 5. Status & langkah berikutnya
 Roadmap hasil riset (lihat percakapan 13 Nov 2026):
-- Tahap 1 & 2 selesai. Belum: thumbnail Shorts (`thumbnails.set`) — butuh UI pilih gambar.
-- **Tahap 3 (fitur besar):** riset fakta Wikipedia + tahap cek fakta, potongan visual per kalimat VO,
-  juri visual CLIP/vision LLM, Wikimedia Commons + atribusi, job persisten + batal, structured output Groq.
+- Tahap 1, 2, 3 selesai. Sisa ide: thumbnail Shorts (`thumbnails.set`), riset tren views/hari (YouTube Data
+  API key), mode tablet ber-PIN, auto-reframe wajah Clipper, TTS Gemini, gambar AI (Cloudflare), batch produksi.
 - [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive, lalu uji satu upload.
 
 **Sudah diuji nyata:** render FFmpeg (tes sintetis), LLM Groq, pencarian Pixabay.

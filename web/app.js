@@ -60,7 +60,7 @@ function status(msg) {
 /* Nama aksi yang mudah dipahami untuk bar status & notifikasi. */
 const ACTION_LABEL = {
   'research.ideas': '💡 Membuat ide konten', 'research.download': '⬇ Mengunduh video sumber',
-  'script.generate': '✍ Menulis naskah', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
+  'script.generate': '✍ Menulis naskah', 'script.factcheck': '🔍 Cek fakta', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
   'script.find_clips': '🔥 Mencari momen viral', 'assets.search': '🔎 Mencari stock footage',
   'assets.select': '🖼 Memasang aset', 'assets.auto_all': '⚡ Mengisi aset semua scene',
   'assets.cut_clip': '✂ Memotong klip', 'audio.render_vo': '🎙 Membuat voice over',
@@ -77,9 +77,13 @@ function jobStatusView(label, j, extra) {
   const steps = j.steps || [];
   const cur = steps[steps.length - 1];
   const done = steps.slice(0, -1).slice(-3);
+  const cancelBtn = j.status === 'running' ? h('button', { class: 'small ghost sb-cancel', onclick: async (e) => {
+    e.target.disabled = true; e.target.textContent = 'Membatalkan…';
+    try { await api('POST', `/api/jobs/${j.id}/cancel`); } catch (err) { toast(err.message, true); }
+  } }, '✕ Batalkan') : null;
   return h('div', {},
     h('div', { class: 'sb-head' }, h('span', { class: 'spin' }), h('b', {}, label),
-      h('span', { class: 'sb-time' }, `· total ${fmtDur(j.elapsed + extra)}`)),
+      h('span', { class: 'sb-time' }, `· total ${fmtDur(j.elapsed + extra)}`), cancelBtn),
     h('div', { class: 'sb-now' }, '▶ ', cur ? cur.msg : 'Memulai…',
       cur ? h('span', { class: 'sb-time' }, ` (${fmtDur(j.step_elapsed + extra)})`) : null),
     done.length ? h('div', { class: 'sb-done' }, done.map((s) =>
@@ -107,6 +111,13 @@ async function loadProject(pid, keepView = false) {
 
 /* Proyek dibuka ulang (refresh halaman / pindah proyek) saat proses masih berjalan → lanjutkan bar status. */
 async function resumeJobs() {
+  // Proses yang terputus karena server restart: beri tahu sekali per proses.
+  (S.p._interrupted || []).forEach((j) => {
+    const key = `seen-int-${j.id}`;
+    if (sessionStorage.getItem(key)) return;
+    sessionStorage.setItem(key, '1');
+    toast(`${actionLabel(j.kind)} terhenti karena server di-restart. Jalankan ulang aksinya.`, true);
+  });
   const running = (S.p._jobs || []).filter((j) => !j.kind.startsWith('sync.'));
   if (!running.length || S.busy) return;
   const j = running[0], pid = S.p.id;
@@ -160,7 +171,8 @@ async function pollJob(jid, label) {
       last = j; at = Date.now();
       status(jobStatusView(label, j, 0));
       if (j.status === 'done') { toast(`${label} selesai ✓ (${fmtDur(j.elapsed)})`); return j.result; }
-      if (j.status === 'error') throw new Error(j.error);
+      if (j.status === 'cancelled') { toast(`${label} dibatalkan.`); return null; }
+      if (j.status === 'error' || j.status === 'interrupted') throw new Error(j.error);
     }
   } finally { clearInterval(tick); }
 }
@@ -360,7 +372,23 @@ function rScriptScratch() {
   const over = S.p.format === 'short' && secs > 58;
   box.append(h('div', { class: 'row' },
     btn('✍ Generate Kerangka & Naskah (AI)', () => runAction('script.generate'), 'primary'),
+    d.scenes.length ? btn('🔍 Cek Fakta', () => runAction('script.factcheck'), 'small') : null,
     h('span', { class: over ? 'warn-text' : 'muted' }, `${d.scenes.length} scene · ${words} kata · ±${secs} detik${over ? ' — terlalu panjang untuk Shorts (maks 60 dtk)!' : ''}`)));
+  // --- hasil riset sumber & cek fakta
+  const sources = (S.p.research && S.p.research.sources) || [];
+  const claims = d.claims || [];
+  const VERD = { didukung: ['✅', 'Didukung sumber'], tanpa_sumber: ['⚠️', 'Tanpa sumber — perlu dicek'], bertentangan: ['❌', 'Bertentangan dengan sumber'] };
+  if (sources.length || claims.length) {
+    const n = (v) => claims.filter((c) => c.verdict === v).length;
+    const risky = n('tanpa_sumber') + n('bertentangan');
+    box.append(h('div', { class: `hint ${n('bertentangan') ? 'warn' : ''}` },
+      claims.length ? `Cek fakta: ✅ ${n('didukung')} didukung · ⚠️ ${n('tanpa_sumber')} tanpa sumber · ❌ ${n('bertentangan')} bertentangan.`
+        + (risky ? ' Perbaiki klaim bertanda ⚠️/❌ di bawah sebelum menyetujui naskah.' : ' Semua klaim didukung sumber.') : 'Belum dicek fakta.',
+      S.dirty ? ' (Naskah sudah diedit — simpan lalu klik Cek Fakta lagi.)' : ''));
+    if (sources.length) box.append(h('details', {}, h('summary', {}, `📚 Sumber riset (${sources.length} artikel Wikipedia)`),
+      h('ul', {}, sources.map((s) => h('li', {}, h('b', {}, `[${s.id}] `), h('a', { href: s.url, target: '_blank' }, s.title), ` · Wikipedia ${s.lang.toUpperCase()}`)))));
+  }
+  const claimsFor = (sid) => claims.filter((c) => c.scene_id === sid);
   box.append(hint('Tandai kata kunci dengan *bintang* → ditekankan di subtitle (warna/ukuran) dan intonasi TTS. "Emosi" mengatur nada suara; "Mood" memilih musik latar; "Visual" = kata kunci stock footage (Inggris).'));
   if (d.framework) {
     box.append(h('details', { open: true }, h('summary', {}, 'Kerangka cerita'),
@@ -376,6 +404,11 @@ function rScriptScratch() {
           btn('▲', () => move(-1), 'small ghost'), btn('▼', () => move(1), 'small ghost'),
           btn('✕', () => { d.scenes.splice(i, 1); markDirty(); render(); }, 'small ghost danger'))),
       field('', s, 'text', { type: 'textarea', rows: 3 }),
+      claimsFor(s.id).length ? h('div', { class: 'claims' }, claimsFor(s.id).map((c) => h('div', { class: `claim ${c.verdict}` },
+        h('span', { title: VERD[c.verdict][1] }, VERD[c.verdict][0], ' '), h('b', {}, c.claim),
+        c.quote ? h('div', { class: 'small muted' }, `“${c.quote}”${c.source_id ? ` — ${c.source_id}` : ''}`) : null,
+        c.fix ? h('div', { class: 'small' }, '💡 Usulan: ', c.fix, ' ',
+          btn('Salin', () => { navigator.clipboard && navigator.clipboard.writeText(c.fix); toast('Usulan disalin — tempel ke teks scene.'); }, 'small ghost')) : null))) : null,
       i === 0 ? field('Teks hook di layar (2.5 dtk pertama, maks 5 kata)', s, 'on_screen_text', { placeholder: 'mis. KOTA KUNO LEBIH MAJU DARI ROMA?' }) : null,
       h('div', { class: 'grid' },
         field('Emosi', s, 'emotion', { type: 'select', options: m.emotions }),
@@ -468,7 +501,8 @@ function rAssets() {
       h('div', { class: 'row', style: 'align-items:flex-start' }, preview,
         h('div', { class: 'grow' },
           h('b', {}, `Scene ${i + 1}`), h('div', { class: 'muted small' }, s.text.replace(/\*/g, '')),
-          sel ? h('div', { class: 'small muted' }, `${sel.provider} · ${sel.author || ''} · ${sel.license || ''}`) : null,
+          sel ? h('div', { class: 'small muted' }, `${sel.provider} · ${sel.author || ''} · ${sel.license || ''}`,
+            sel.requires_attribution ? ' · atribusi otomatis masuk deskripsi YouTube' : '') : null,
           sel && slot.pick ? h('div', { class: `hint ${slot.pick.fit === 'lemah' ? 'warn' : ''}`, style: 'margin-top:4px' },
             `${{ cocok: '✅ Cocok', lumayan: '🟡 Lumayan', lemah: '⚠ Kurang cocok — mohon dicek/ganti' }[slot.pick.fit] || slot.pick.fit}`,
             slot.pick.reason ? ` · ${slot.pick.reason}` : '') : null,
@@ -477,7 +511,7 @@ function rAssets() {
             ['auto', 'Otomatis'], ['center', 'Isi penuh (crop tengah)'], ['blur', 'Utuh + latar blur']] })) : null,
           h('div', { class: 'row' },
             h('div', { class: 'grow' }, field('', q, 'query', { dirty: () => {} })),
-            field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pexels', 'Pexels'], ['pixabay', 'Pixabay'], ['photos', 'Foto']], dirty: () => {} }),
+            field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pixabay', 'Pixabay'], ['commons', 'Wikimedia (foto asli/sejarah)'], ['pexels', 'Pexels'], ['photos', 'Foto Pexels']], dirty: () => {} }),
             btn('Cari', () => runAction('assets.search', { scene_id: s.id, query: q.query, provider: q.provider }), 'small'),
             btn('📁 Unggah', () => uploadFile(`/api/projects/${S.p.id}/assets/${s.id}/upload`, 'video/*,image/*'), 'small')))),
       (slot.candidates || []).length ? h('div', { class: 'grid', style: 'margin-top:8px' }, slot.candidates.map((c, k) =>
@@ -715,7 +749,12 @@ function rRender() {
   const d = S.draft, box = h('div');
   box.append(h('div', { class: 'row' }, btn('🎬 Render video final (FFmpeg)', () => runAction('render.run'), 'primary'),
     h('span', { class: 'muted' }, S.p.format === 'short' ? '1080×1920 · 30fps' : '1920×1080 · 30fps')));
-  box.append(hint('Menggabungkan visual + voice over + musik (auto-ducking) + SFX + burn-in subtitle. Untuk font khusus, taruh file .ttf di data/fonts/.'));
+  if (S.p.mode === 'scratch') {
+    d.cut_style = d.cut_style || (S.p.format === 'short' ? 'dinamis' : 'statis');
+    box.append(h('div', { style: 'max-width:420px' }, field('Gaya potongan visual', d, 'cut_style', { type: 'select', options: [
+      ['dinamis', 'Dinamis — shot baru tiap kalimat, zoom bergantian (cocok Shorts)'], ['statis', 'Statis — 1 shot per scene']] })));
+  }
+  box.append(hint('Menggabungkan visual + voice over + musik (auto-ducking) + SFX + burn-in subtitle. Untuk font khusus, taruh file .ttf di data/fonts/. Ubah gaya potongan → klik "Simpan Edit Manual" lalu render.'));
   if (d.output_path) {
     box.append(h('video', { class: 'preview-v', src: media(d.output_path), controls: true }));
     box.append(h('div', { class: 'row' },

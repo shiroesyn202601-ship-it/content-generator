@@ -12,13 +12,26 @@ class FFmpegError(RuntimeError):
 
 
 def run(args: list[str], cwd: Path | None = None) -> None:
+    """Jalankan ffmpeg. Bila job yang memanggil diminta batal, proses ffmpeg dihentikan (render panjang
+    bisa dibatalkan dari UI)."""
+    from .. import jobs
     cmd = [config.FFMPEG, "-y", "-hide_banner", "-loglevel", "error", *map(str, args)]
     try:
-        r = subprocess.run(cmd, cwd=cwd, capture_output=True, text=True, encoding="utf-8", errors="replace")
+        proc = subprocess.Popen(cmd, cwd=cwd, stdout=subprocess.DEVNULL, stderr=subprocess.PIPE,
+                                text=True, encoding="utf-8", errors="replace")
     except FileNotFoundError:
         raise FFmpegError("ffmpeg tidak ditemukan. Install ffmpeg dan pastikan ada di PATH (atau set FFMPEG_BIN).")
-    if r.returncode != 0:
-        raise FFmpegError(f"ffmpeg gagal:\n{' '.join(cmd)}\n{r.stderr[-2000:]}")
+    while True:
+        try:
+            _, err = proc.communicate(timeout=0.5)
+            break
+        except subprocess.TimeoutExpired:
+            if jobs.cancelled():
+                proc.kill()
+                proc.communicate()
+                raise jobs.JobCancelled()
+    if proc.returncode != 0:
+        raise FFmpegError(f"ffmpeg gagal:\n{' '.join(cmd)}\n{(err or '')[-2000:]}")
 
 
 def probe(path: Path) -> dict:
@@ -98,7 +111,7 @@ def run_encode(pre: list, post: list, cwd: Path | None = None) -> str:
     try:
         run([*pre, *video_codec_args(enc), *post], cwd=cwd)
         return enc
-    except FFmpegError:
+    except FFmpegError:  # (JobCancelled bukan FFmpegError → pembatalan tidak memicu ulang dengan libx264)
         if enc == "libx264":
             raise
         _encoder = "libx264"  # jangan coba hardware lagi di sesi ini

@@ -38,6 +38,7 @@ ACTIONS = {
     "research.ideas":      (research.generate_ideas, "research", True),
     "research.download":   (research.download_source, "research", True),
     "script.generate":     (scriptgen.generate, "script", True),
+    "script.factcheck":    (scriptgen.factcheck, "script", True),
     "script.transcribe":   (clipper.transcribe, "script", True),
     "script.find_clips":   (clipper.find_clips, "script", True),
     "assets.search":       (assets.search_scene, "assets", True),
@@ -96,6 +97,7 @@ def create(body: dict = Body(...)):
 def get_project(pid: str):
     p = _load(pid)
     p["_jobs"] = jobs.active_for(pid)
+    p["_interrupted"] = jobs.recent_interrupted(pid)
     return p
 
 
@@ -183,6 +185,13 @@ def action(pid: str, name: str, params: dict = Body(default={})):
         return {"result": fn(pid, params, lambda m: None), "project": store.load(pid)}
     except Exception as e:
         raise HTTPException(400, f"{type(e).__name__}: {e}")
+
+
+@app.post("/api/jobs/{jid}/cancel")
+def cancel_job(jid: str):
+    if not jobs.cancel(jid):
+        raise HTTPException(409, "Proses ini sudah selesai atau tidak ditemukan.")
+    return {"ok": True}
 
 
 @app.get("/api/jobs/{jid}")

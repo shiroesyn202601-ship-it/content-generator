@@ -29,9 +29,14 @@ def _resolve_fit(d: Path, asset_rel: str, fit: str, W: int, H: int) -> str:
     return "center"
 
 
+PUNCH = 1.12  # zoom "punch-in" untuk shot bernomor ganjil (jump cut ala Shorts)
+
+
 def _scene_segment(d: Path, asset_rel: str | None, frames: int, out_rel: str, W: int, H: int,
-                   fit: str = "auto") -> None:
-    """Satu segmen scene dengan jumlah frame PERSIS (bukan -t detik) supaya visual tidak bergeser dari VO."""
+                   fit: str = "auto", shot: int = 0, offset: float = 0.0) -> None:
+    """Satu shot dengan jumlah frame PERSIS (bukan -t detik) supaya visual tidak bergeser dari VO.
+    shot  = nomor shot di dalam scene (variasi: punch-in / arah gerak bergantian),
+    offset = detik ke berapa video aset dimulai (shot berikutnya melanjutkan klip, bukan mengulang)."""
     enc = ["-frames:v", str(frames), "-an", "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", out_rel]
     if not asset_rel:
         # Scene tanpa visual: latar gelap polos supaya render tidak gagal.
@@ -39,28 +44,68 @@ def _scene_segment(d: Path, asset_rel: str | None, frames: int, out_rel: str, W:
                 "-vf", "format=yuv420p", *enc], cwd=d)
         return
     fit = _resolve_fit(d, asset_rel, fit, W, H)
+    n = max(frames, 1)
     if asset_rel.lower().endswith(IMG_EXT):
-        # Ken Burns pelan. Gambar dibaca SEKALI (tanpa -loop) lalu zoompan menghasilkan semua frame:
+        # Ken Burns. Gambar dibaca SEKALI (tanpa -loop) lalu zoompan menghasilkan semua frame:
         # jauh lebih cepat daripada men-scale ulang gambar 4K di setiap frame. Skala 2x mengurangi jitter.
-        zoom = (f"zoompan=z='1+0.12*on/{max(frames, 1)}':d={frames}:x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)'"
+        # Gerak bergantian per shot: zoom-in tengah → geser kiri→kanan → zoom-out → geser kanan→kiri.
+        mode = shot % 4
+        if mode == 0:
+            z, x = f"1+0.12*on/{n}", "iw/2-(iw/zoom/2)"
+        elif mode == 1:
+            z, x = "1.15", f"(iw-iw/zoom)*on/{n}"
+        elif mode == 2:
+            z, x = f"1.14-0.12*on/{n}", "iw/2-(iw/zoom/2)"
+        else:
+            z, x = "1.15", f"(iw-iw/zoom)*(1-on/{n})"
+        zoom = (f"zoompan=z='{z}':d={frames}:x='{x}':y='ih/2-(ih/zoom/2)'"
                 f":s={W}x{H}:fps={config.FPS},format=yuv420p")
         ff.run(["-i", asset_rel, "-filter_complex", f"[0:v]{ff.fit_filter(W * 2, H * 2, fit)},{zoom}[v]",
                 "-map", "[v]", *enc], cwd=d)
     else:
-        vf = f"{ff.fit_filter(W, H, fit)},fps={config.FPS},format=yuv420p"
-        ff.run(["-stream_loop", "-1", "-i", asset_rel, "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", *enc],
-               cwd=d)
+        punch = (f",scale={int(W * PUNCH) // 2 * 2}:{int(H * PUNCH) // 2 * 2},crop={W}:{H}"
+                 if shot % 2 == 1 else "")
+        vf = f"{ff.fit_filter(W, H, fit)}{punch},fps={config.FPS},format=yuv420p"
+        if offset > 0.05:  # klip pendek: lanjutkan dari awal lagi (modulo durasi), bukan seek melewati akhir
+            try:
+                offset %= max(ff.duration(d / asset_rel) - 0.3, 0.5)
+            except (ff.FFmpegError, ValueError, KeyError):
+                offset = 0.0
+        seek = ["-ss", f"{offset:.3f}"] if offset > 0.05 else []
+        ff.run(["-stream_loop", "-1", *seek, "-i", asset_rel, "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]",
+                *enc], cwd=d)
 
 
-def _scene_frames(scenes: list[dict], timings: dict, total: float) -> list[int]:
-    """Batas frame kumulatif: scene i tampil dari awal VO-nya sampai awal scene berikutnya
-    (jeda antar-scene ikut dihitung), scene terakhir sampai akhir video. Pembulatan per batas,
-    bukan per durasi, sehingga error tidak menumpuk."""
+def _plan_shots(scenes: list[dict], timings: dict, sentences: list[dict], total: float,
+                max_shot: float, dynamic: bool) -> list[dict]:
+    """Rencana shot. Statis: 1 shot per scene. Dinamis: potong di awal tiap kalimat VO, lalu shot yang
+    masih > max_shot dibagi rata. Batas frame dibulatkan sekali (kumulatif) → tidak bergeser dari VO."""
     fps = config.FPS
-    bounds = [0] + [round(float(timings[s["id"]]["start"]) * fps) for s in scenes[1:]] + [round(total * fps)]
-    for k in range(1, len(bounds)):  # jaga urutan naik & minimal 1 frame
+    starts = [0.0] + [float(timings[s["id"]]["start"]) for s in scenes[1:]] + [total]
+    cuts = []  # (detik, scene_idx)
+    for i, s in enumerate(scenes):
+        a, b = starts[i], starts[i + 1]
+        pts = [a]
+        if dynamic:
+            pts += [float(x["start"]) for x in sentences
+                    if x.get("scene_id") == s["id"] and a + 0.8 < float(x["start"]) < b - 0.8]
+        pts = sorted(set(pts)) + [b]
+        for k in range(len(pts) - 1):
+            seg_a, seg_b = pts[k], pts[k + 1]
+            parts = max(1, int((seg_b - seg_a) / max_shot + 0.999)) if dynamic else 1
+            for j in range(parts):
+                cuts.append((seg_a + (seg_b - seg_a) * j / parts, i))
+    bounds = [round(t * fps) for t, _ in cuts] + [round(total * fps)]
+    bounds[0] = 0
+    for k in range(1, len(bounds)):
         bounds[k] = max(bounds[k], bounds[k - 1] + 1)
-    return [bounds[k + 1] - bounds[k] for k in range(len(scenes))]
+    shots, prev_scene, k_in_scene = [], None, 0
+    for idx, (t, scene_idx) in enumerate(cuts):
+        k_in_scene = k_in_scene + 1 if scene_idx == prev_scene else 0
+        prev_scene = scene_idx
+        shots.append({"scene": scene_idx, "frames": bounds[idx + 1] - bounds[idx], "shot": k_in_scene,
+                      "offset": (bounds[idx] / fps) - starts[scene_idx]})
+    return shots
 
 
 def _audio_graph(base: str, n_inputs_before: int, music: tuple | None, sfx: list, total: float):
@@ -136,16 +181,21 @@ def run(pid: str, params: dict, progress) -> dict:
         missing = [s["id"] for s in scenes if s["id"] not in timings]
         if missing:
             raise RuntimeError(f"Timing VO tidak ada untuk scene {', '.join(missing)} — render ulang voice over.")
-        frames = _scene_frames(scenes, timings, total)
-        for i, s in enumerate(scenes):
+        # Gaya potongan: "dinamis" (default Shorts) = shot baru tiap kalimat VO, maks 4 dtk per shot,
+        # punch-in bergantian → ritme cepat yang menahan penonton; "statis" = 1 shot per scene.
+        cut = p["render"].get("cut_style") or ("dinamis" if p["format"] == "short" else "statis")
+        shots = _plan_shots(scenes, timings, p["audio"].get("sentences") or [], total,
+                            4.0 if p["format"] == "short" else 7.0, cut == "dinamis")
+        for j, sh in enumerate(shots):
+            s = scenes[sh["scene"]]
             slot = p["assets"]["scenes"].get(s["id"]) or {}
             sel = slot.get("selected") or {}
             asset = sel.get("path") if sel.get("path") and (d / sel["path"]).is_file() else None
-            out = f"render/seg_{i:03d}.mp4"
-            progress(f"Scene {i + 1}/{len(scenes)} ({frames[i] / config.FPS:.1f}s)"
+            out = f"render/seg_{j:03d}.mp4"
+            progress(f"Shot {j + 1}/{len(shots)} · scene {sh['scene'] + 1} ({sh['frames'] / config.FPS:.1f}s)"
                      + ("" if asset else " — tanpa visual, memakai latar polos"))
-            _scene_segment(d, asset, frames[i], out, W, H, slot.get("fit") or "auto")
-            concat.append(f"file 'seg_{i:03d}.mp4'")
+            _scene_segment(d, asset, sh["frames"], out, W, H, slot.get("fit") or "auto", sh["shot"], sh["offset"])
+            concat.append(f"file 'seg_{j:03d}.mp4'")
         (d / "render" / "concat.txt").write_text("\n".join(concat), encoding="utf-8")
         progress("Menggabungkan scene...")
         ff.run(["-f", "concat", "-safe", "0", "-i", "render/concat.txt", "-c", "copy", "render/visual.mp4"], cwd=d)

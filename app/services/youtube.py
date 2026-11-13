@@ -31,6 +31,13 @@ def to_rfc3339_utc(local_dt: str) -> str:
     return dt.astimezone(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
+def _with_credits(p: dict, desc: str) -> str:
+    """Pastikan atribusi CC BY tetap ada walau deskripsi diedit manual setelah metadata dibuat."""
+    from .assets import credits
+    cr = credits(p)
+    return desc if not cr or "Kredit visual" in desc else f"{desc}\n\n{cr}"
+
+
 def _clean(s: str) -> str:
     """YouTube menolak '<' dan '>' di judul/deskripsi (invalidTitle/invalidDescription)."""
     return re.sub(r"[<>]", "", s or "").strip()
@@ -72,6 +79,10 @@ def gen_metadata(pid: str, params: dict, progress) -> dict:
         pub["pinned_comment"] = res.get("pinned_comment", "")
         if p["format"] == "short" and "#shorts" not in pub["description"].lower():
             pub["description"] += "\n\n#Shorts"
+        from .assets import credits
+        cr = credits(p)  # atribusi wajib untuk gambar CC BY / CC BY-SA dari Wikimedia Commons
+        if cr and "Kredit visual" not in pub["description"]:
+            pub["description"] += "\n\n" + cr
         store.touch_stage(p, "publish")
     store.update(pid, apply)
     return res
@@ -99,7 +110,7 @@ def upload(pid: str, params: dict, progress) -> dict:
         status["privacyStatus"] = "private"            # wajib private untuk jadwal
         status["publishAt"] = to_rfc3339_utc(pub["publish_at"])
     body = {
-        "snippet": {"title": _clean(pub["title"])[:100], "description": _clean(pub.get("description", ""))[:5000],
+        "snippet": {"title": _clean(pub["title"])[:100], "description": _clean(_with_credits(p, pub.get("description", "")))[:5000],
                     "tags": _fit_tags(pub.get("tags", [])), "categoryId": str(pub.get("category_id") or "22"),
                     "defaultLanguage": p["language"], "defaultAudioLanguage": p["language"]},
         "status": status,
