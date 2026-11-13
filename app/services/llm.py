@@ -11,7 +11,7 @@ from ..jobs import report
 
 TIMEOUT = httpx.Timeout(180.0, connect=15.0)
 PROVIDER_LABEL = {"gemini": "Gemini", "groq": "Groq", "ollama": "Ollama (lokal)"}
-STATUS_REASON = {429: "kuota per menit habis", 500: "error di server Google", 503: "server Google sedang sibuk",
+STATUS_REASON = {429: "kuota gratis habis", 500: "error di server Google", 503: "server Google sedang sibuk",
                  404: "model sudah tidak tersedia"}
 
 
@@ -45,7 +45,9 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
             print(f"LLM: {primary} gagal, memakai cadangan '{name}'.")
         report(f"Jawaban AI ({PROVIDER_LABEL[name]}) diterima, membaca hasilnya…")
         return parse_json(raw)
-    hint = "" if len(chain) > 1 else " Tip: isi GROQ_API_KEY di .env (gratis) sebagai cadangan otomatis."
+    hint = ("" if len(chain) > 1 else
+            "\n\nSolusi cepat: isi GROQ_API_KEY di .env (gratis, https://console.groq.com/keys) — "
+            "aplikasi otomatis memakai Groq saat Gemini gagal.")
     raise LLMError("\n\n".join(errors) + hint)
 
 
@@ -93,7 +95,8 @@ def _gemini(system: str, user: str, temperature: float) -> str:
                     return r.json()["candidates"][0]["content"]["parts"][0]["text"]
                 except (KeyError, IndexError):
                     raise LLMError(f"Respons Gemini ({model}) tak terduga: {r.text[:400]}")
-            if r.status_code in GEMINI_RETRY_STATUS and attempt < 2:
+            # 429 "kuota habis" tidak pulih dalam hitungan detik → jangan buang kuota, langsung pindah model.
+            if r.status_code in GEMINI_RETRY_STATUS and attempt < 2 and r.status_code != 429:
                 wait = 2 * (attempt + 1)
                 report(f"Gemini {model}: {STATUS_REASON.get(r.status_code, f'error {r.status_code}')} "
                        f"— mencoba lagi dalam {wait} dtk…")
@@ -110,9 +113,14 @@ def _gemini(system: str, user: str, temperature: float) -> str:
         errors.append(f"{model} → {r.status_code}")
         if r.status_code not in GEMINI_RETRY_STATUS | GEMINI_SKIP_STATUS:
             raise LLMError(f"Gemini {r.status_code} ({model}): {r.text[:400]}")
-    raise LLMError("Semua model Gemini gagal (" + ", ".join(errors) + "). Server Google sedang sibuk atau "
-                   "model tidak tersedia — coba lagi beberapa menit lagi, atau ganti GEMINI_MODEL / "
-                   f"LLM_PROVIDER di .env." + (f" Detail terakhir: {r.text[:300]}" if r is not None else ""))
+    if any("→ 429" in e for e in errors):
+        why = ("Kuota gratis Gemini untuk API key ini habis (429). Kuota per menit pulih dalam ±1 menit, "
+               "kuota harian pulih besok (sekitar pukul 14.00–15.00 WIB). Cek pemakaian: https://ai.dev/rate-limit")
+    elif all("→ 503" in e or "timeout" in e for e in errors):
+        why = "Server Google sedang sibuk. Coba lagi beberapa menit lagi."
+    else:
+        why = "Model tidak tersedia atau error di server Google. Coba lagi nanti, atau ganti GEMINI_MODEL di .env."
+    raise LLMError(f"Semua model Gemini gagal ({', '.join(errors)}). {why}")
 
 
 def _groq(system: str, user: str, temperature: float) -> str:
