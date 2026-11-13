@@ -5,7 +5,9 @@ from pathlib import Path
 from dotenv import load_dotenv
 
 ROOT = Path(__file__).resolve().parent.parent
-load_dotenv(ROOT / ".env")
+# override=True: saat auto-reload, proses server baru mewarisi env lama dari proses induk;
+# tanpa override, perubahan .env tidak akan pernah terbaca sampai restart manual.
+load_dotenv(ROOT / ".env", override=True)
 
 
 def _env(key: str, default: str = "") -> str:
