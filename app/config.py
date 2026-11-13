@@ -1,5 +1,6 @@
 """Konfigurasi terpusat. Semua nilai dibaca dari .env (lihat .env.example)."""
 import os
+import shutil
 from pathlib import Path
 
 from dotenv import load_dotenv
@@ -49,8 +50,27 @@ DRIVE_ROOT_FOLDER_ID = _env("DRIVE_ROOT_FOLDER_ID")
 DRIVE_MUSIC_FOLDER_ID = _env("DRIVE_MUSIC_FOLDER_ID")
 DRIVE_SFX_FOLDER_ID = _env("DRIVE_SFX_FOLDER_ID")
 
-FFMPEG = _env("FFMPEG_BIN", "ffmpeg")
-FFPROBE = _env("FFPROBE_BIN", "ffprobe")
+def _find_bin(name: str, configured: str) -> str:
+    """Cari ffmpeg/ffprobe: nilai .env → PATH → lokasi instal umum di Windows (winget, C:\\ffmpeg).
+    Terminal yang dibuka sebelum ffmpeg di-install tidak punya PATH terbaru, jadi kita cari sendiri."""
+    if configured and (Path(configured).is_file() or shutil.which(configured)):
+        return shutil.which(configured) or configured
+    found = shutil.which(name)
+    if found:
+        return found
+    exe = name + (".exe" if os.name == "nt" else "")
+    local = Path(os.environ.get("LOCALAPPDATA", ""))
+    candidates = [local / "Microsoft/WinGet/Links" / exe, Path("C:/ffmpeg/bin") / exe,
+                  Path(os.environ.get("ProgramFiles", "C:/Program Files")) / "ffmpeg/bin" / exe]
+    candidates += sorted((local / "Microsoft/WinGet/Packages").glob(f"Gyan.FFmpeg*/**/bin/{exe}"))
+    for c in candidates:
+        if c.is_file():
+            return str(c)
+    return configured or name
+
+
+FFMPEG = _find_bin("ffmpeg", _env("FFMPEG_BIN", "ffmpeg"))
+FFPROBE = _find_bin("ffprobe", _env("FFPROBE_BIN", "ffprobe"))
 DEFAULT_LANGUAGE = _env("DEFAULT_LANGUAGE", "id")
 HOST = _env("HOST", "127.0.0.1")
 PORT = int(_env("PORT", "8000"))
