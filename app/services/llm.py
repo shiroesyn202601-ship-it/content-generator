@@ -15,13 +15,31 @@ class LLMError(RuntimeError):
     pass
 
 
+def _configured(provider: str) -> bool:
+    """Provider cadangan hanya dicoba kalau memang sudah disiapkan (API key terisi)."""
+    return {"gemini": bool(config.GEMINI_API_KEY), "groq": bool(config.GROQ_API_KEY), "ollama": True}.get(provider, False)
+
+
 def chat_json(system: str, user: str, provider: str | None = None, temperature: float = 0.8) -> dict:
-    provider = (provider or config.LLM_PROVIDER).lower()
-    fn = {"gemini": _gemini, "groq": _groq, "ollama": _ollama}.get(provider)
-    if not fn:
-        raise LLMError(f"Provider LLM tidak dikenal: {provider}")
-    raw = fn(system, user, temperature)
-    return parse_json(raw)
+    providers = {"gemini": _gemini, "groq": _groq, "ollama": _ollama}
+    primary = (provider or config.LLM_PROVIDER).lower()
+    if primary not in providers:
+        raise LLMError(f"Provider LLM tidak dikenal: {primary}")
+    # Provider utama dulu, lalu cadangan (LLM_FALLBACK_PROVIDERS) yang sudah dikonfigurasi.
+    chain = [primary] + [p for p in config.LLM_FALLBACK_PROVIDERS
+                         if p != primary and p in providers and _configured(p)]
+    errors = []
+    for name in chain:
+        try:
+            raw = providers[name](system, user, temperature)
+        except (LLMError, httpx.HTTPError) as e:
+            errors.append(f"[{name}] {e}")
+            continue
+        if errors:
+            print(f"LLM: {primary} gagal, memakai cadangan '{name}'.")
+        return parse_json(raw)
+    hint = "" if len(chain) > 1 else " Tip: isi GROQ_API_KEY di .env (gratis) sebagai cadangan otomatis."
+    raise LLMError("\n\n".join(errors) + hint)
 
 
 def parse_json(raw: str) -> dict:

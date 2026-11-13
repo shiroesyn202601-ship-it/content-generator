@@ -19,6 +19,8 @@ for _d in (PROJECTS_DIR, CACHE_DIR):
     _d.mkdir(parents=True, exist_ok=True)
 
 LLM_PROVIDER = _env("LLM_PROVIDER", "gemini").lower()
+# Provider cadangan bila provider utama gagal (dilewati otomatis kalau API key-nya kosong).
+LLM_FALLBACK_PROVIDERS = [p.strip().lower() for p in _env("LLM_FALLBACK_PROVIDERS", "groq").split(",") if p.strip()]
 GEMINI_API_KEY = _env("GEMINI_API_KEY")
 GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.8-flash")
 # Dicoba berurutan bila model utama sibuk (503/429) atau sudah dipensiunkan (404).
