@@ -1,0 +1,48 @@
+# Cek otomatis setiap commit: dependensi bisa di-install, semua modul Python bisa di-import,
+# dan JavaScript UI valid.
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+      - name: Install dependensi
+        run: pip install -r requirements.txt
+      - name: Compile & import semua modul
+        run: |
+          python -m compileall -q app run.py
+          python - <<'EOF'
+          import importlib, pkgutil, app.services as s
+          import app.main
+          for m in pkgutil.iter_modules(s.__path__):
+              importlib.import_module(f"app.services.{m.name}")
+          print("import OK")
+          EOF
+      - name: Smoke test API
+        run: |
+          python - <<'EOF'
+          from fastapi.testclient import TestClient
+          from app.main import app
+          c = TestClient(app)
+          assert c.get("/api/meta").status_code == 200
+          p = c.post("/api/projects", json={"mode": "scratch", "format": "short", "title": "ci"}).json()
+          assert c.get(f"/api/projects/{p['id']}").status_code == 200
+          r = c.post(f"/api/projects/{p['id']}/stage/research/approve")
+          assert r.status_code == 409, r.text   # belum pilih ide -> gerbang menolak
+          assert c.get("/").status_code == 200
+          print("smoke OK")
+          EOF
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 20
+      - name: Cek sintaks JS
+        run: node --check web/app.js

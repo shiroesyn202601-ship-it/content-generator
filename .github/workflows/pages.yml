@@ -1,0 +1,42 @@
+# Auto-deploy UI (folder web/) ke GitHub Pages setiap push ke main.
+# Sekali saja: Settings -> Pages -> Source = "GitHub Actions".
+name: Deploy Pages
+
+on:
+  push:
+    branches: [main]
+    paths: ["web/**", "docs/**", ".github/workflows/pages.yml"]
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Susun situs statis
+        run: |
+          mkdir -p _site/static
+          cp web/index.html _site/index.html
+          cp web/app.js web/style.css _site/static/
+          cp docs/ARCHITECTURE.md _site/ARCHITECTURE.md
+          touch _site/.nojekyll
+
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with:
+          path: _site
+      - id: deployment
+        uses: actions/deploy-pages@v4
