@@ -5,6 +5,7 @@ from pathlib import Path
 import httpx
 
 from .. import config, store
+from . import llm, prompts
 
 HTTP = httpx.Client(timeout=httpx.Timeout(60.0, connect=15.0), follow_redirects=True)
 
@@ -29,9 +30,16 @@ def search_pexels(query: str, orientation: str, n: int, target: int) -> list[dic
         if f:
             out.append({"provider": "pexels", "type": "video", "id": v["id"], "thumb": v.get("image"),
                         "url": f["link"], "duration": v.get("duration"), "width": f.get("width"),
-                        "height": f.get("height"), "page_url": v.get("url"),
+                        "height": f.get("height"), "page_url": v.get("url"), "tags": _slug_tags(v.get("url")),
                         "author": (v.get("user") or {}).get("name"), "license": "Pexels License"})
     return out
+
+
+def _slug_tags(url: str | None) -> str:
+    """Pexels tidak memberi tag, tapi URL-nya berisi deskripsi: /video/aerial-view-of-rice-field-123/."""
+    slug = (url or "").rstrip("/").rsplit("/", 1)[-1]
+    words = [w for w in slug.split("-") if w and not w.isdigit()]
+    return ", ".join(words)
 
 
 def search_pexels_photos(query: str, orientation: str, n: int) -> list[dict]:
@@ -43,7 +51,8 @@ def search_pexels_photos(query: str, orientation: str, n: int) -> list[dict]:
     r.raise_for_status()
     return [{"provider": "pexels", "type": "image", "id": ph["id"], "thumb": ph["src"]["medium"],
              "url": ph["src"]["large2x"], "page_url": ph.get("url"), "author": ph.get("photographer"),
-             "license": "Pexels License"} for ph in r.json().get("photos", [])]
+             "tags": ph.get("alt") or _slug_tags(ph.get("url")), "license": "Pexels License"}
+            for ph in r.json().get("photos", [])]
 
 
 def search_pixabay(query: str, orientation: str, n: int) -> list[dict]:
@@ -64,7 +73,8 @@ def search_pixabay(query: str, orientation: str, n: int) -> list[dict]:
         thumb = (vids.get("medium") or {}).get("thumbnail") or (vids.get("tiny") or {}).get("thumbnail")
         out.append({"provider": "pixabay", "type": "video", "id": h["id"], "thumb": thumb, "url": f["url"],
                     "duration": h.get("duration"), "width": f.get("width"), "height": f.get("height"),
-                    "page_url": h.get("pageURL"), "author": h.get("user"), "license": "Pixabay Content License"})
+                    "page_url": h.get("pageURL"), "author": h.get("user"), "tags": h.get("tags") or "",
+                    "license": "Pixabay Content License"})
     return out
 
 
@@ -120,28 +130,138 @@ def select_candidate(pid: str, params: dict, progress) -> dict:
         _download(cand["url"], dest)
 
     def apply(p):
-        p["assets"]["scenes"][sid]["selected"] = {**cand, "path": rel}
+        slot = p["assets"]["scenes"][sid]
+        slot["selected"] = {**cand, "path": rel}
+        # Penilaian AI hanya berlaku untuk pilihan AI; pilihan manual menghapusnya.
+        if params.get("pick"):
+            slot["pick"] = params["pick"]
+        else:
+            slot.pop("pick", None)
         store.touch_stage(p, "assets")
     store.update(pid, apply)
     return {"path": rel}
 
 
+def _chunks(lst: list, n: int):
+    for i in range(0, len(lst), n):
+        yield lst[i:i + n]
+
+
+def _orientation(c: dict) -> str:
+    w, h = c.get("width") or 0, c.get("height") or 0
+    return "portrait" if h > w else "landscape" if w > h else "square"
+
+
+def _tag_words(c: dict) -> set[str]:
+    return {t.strip().lower() for t in (c.get("tags") or "").replace(",", " ").split()}
+
+
+def _tag_score(c: dict, words: set[str]) -> int:
+    return len(_tag_words(c) & words)
+
+
 def auto_all(pid: str, params: dict, progress) -> dict:
-    """Cari + pilih kandidat pertama untuk setiap scene yang belum punya visual."""
+    """Isi visual semua scene dengan bantuan AI:
+    1) AI menulis 3 kata kunci per scene (spesifik → umum, sesuai budaya topik),
+    2) cari semua kata kunci di Pexels/Pixabay dan kumpulkan kandidat + tag-nya,
+    3) AI memilih kandidat yang paling cocok dengan narasi (fallback: skor kecocokan tag),
+    4) unduh pilihan. params.redo=True → pilih ulang juga scene yang sudah punya visual."""
     p = store.load(pid)
-    done = 0
-    for i, s in enumerate(p["script"]["scenes"]):
-        slot = p["assets"]["scenes"].get(s["id"]) or {}
-        if slot.get("selected"):
-            continue
-        progress(f"Scene {i + 1}/{len(p['script']['scenes'])}: {s.get('visual_query')}")
+    redo = bool(params.get("redo"))
+    scenes = [s for s in p["script"]["scenes"]
+              if redo or not (p["assets"]["scenes"].get(s["id"]) or {}).get("selected")]
+    if not scenes:
+        progress("Semua scene sudah punya visual.")
+        return {"filled": 0}
+    topic = p["script"].get("title") or p["title"]
+
+    # 1) kata kunci
+    queries: dict[str, list[str]] = {}
+    avoid: set[str] = set()
+    for batch in _chunks(scenes, 8):
+        progress(f"AI menyusun kata kunci footage untuk {len(scenes)} scene…")
         try:
-            search_scene(pid, {"scene_id": s["id"]}, progress)
-            select_candidate(pid, {"scene_id": s["id"], "index": 0}, progress)
+            res = llm.chat_json(*prompts.footage_queries(topic, batch), temperature=0.4)
+            avoid |= {a.strip().lower() for a in res.get("avoid", []) if isinstance(a, str) and a.strip()}
+            for r in res.get("scenes", []):
+                qs = [q.strip() for q in r.get("queries", []) if isinstance(q, str) and q.strip()]
+                if qs:
+                    queries[r.get("id")] = qs[:3]
+        except llm.LLMError as e:
+            progress("AI gagal menyusun kata kunci — memakai kata kunci dari naskah…")
+            store.update(pid, lambda p, e=e: store.log(p, f"Kata kunci footage AI gagal: {e}"))
+
+    # 2) cari kandidat
+    cands: dict[str, list[dict]] = {}
+    used_q: dict[str, list[str]] = {}
+    for i, s in enumerate(scenes):
+        qs = queries.get(s["id"]) or [s.get("visual_query") or s["text"].replace("*", "")[:40]]
+        used_q[s["id"]] = qs
+        progress(f"Mencari footage scene {i + 1}/{len(scenes)}: {' · '.join(qs)}")
+        seen, found = set(), []
+        for q in qs:
+            try:
+                res = search(p, q, n=6)
+            except httpx.HTTPError as e:
+                store.update(pid, lambda p, e=e, q=q: store.log(p, f"Cari '{q}' gagal: {e}"))
+                continue
+            for c in res:
+                key = (c["provider"], c["id"])
+                if key not in seen:
+                    seen.add(key)
+                    found.append({**c, "query": q})
+        # Buang kandidat yang tag-nya jelas salah era/budaya (kecuali narasinya memang menyebut kata itu).
+        narr = s["text"].lower()
+        bad = {w for w in avoid if w not in narr}
+        clean = [c for c in found if not (_tag_words(c) & bad)]
+        if len(clean) < len(found):
+            progress(f"Scene {i + 1}: {len(found) - len(clean)} footage dibuang (tidak sesuai era/budaya topik)")
+        cands[s["id"]] = (clean or found)[:12]
+
+    # 3) AI memilih
+    picks: dict[str, dict] = {}
+    for batch in _chunks([s for s in scenes if cands[s["id"]]], 6):
+        progress(f"AI menilai kecocokan footage dengan narasi ({len(picks) + len(batch)}/{len(scenes)} scene)…")
+        items = [{"id": s["id"], "text": s["text"].replace("*", ""),
+                  "candidates": [{"i": k, "tags": ", ".join((c.get("tags") or "").split(", ")[:12]),
+                                  "orientation": _orientation(c), "duration": c.get("duration")}
+                                 for k, c in enumerate(cands[s["id"]])]} for s in batch]
+        try:
+            res = llm.chat_json(*prompts.pick_footage(topic, items), temperature=0.2)
+            for r in res.get("picks", []):
+                picks[r.get("id")] = r
+        except llm.LLMError as e:
+            progress("AI gagal menilai — memilih berdasarkan kecocokan tag…")
+            store.update(pid, lambda p, e=e: store.log(p, f"Pemilihan footage AI gagal: {e}"))
+
+    # 4) simpan & unduh
+    done, weak = 0, 0
+    for i, s in enumerate(scenes):
+        found = cands[s["id"]]
+
+        def save(p, s=s, found=found):
+            slot = p["assets"]["scenes"].setdefault(s["id"], {})
+            slot["query"] = ", ".join(used_q[s["id"]])
+            slot["candidates"] = found
+        store.update(pid, save)
+        if not found:
+            store.update(pid, lambda p, s=s: store.log(p, f"Aset {s['id']}: tidak ada footage ditemukan"))
+            continue
+        pk = picks.get(s["id"]) or {}
+        idx = pk.get("index")
+        if not isinstance(idx, int) or not 0 <= idx < len(found):
+            words = {w.lower() for q in used_q[s["id"]] for w in q.split()}
+            idx = max(range(len(found)), key=lambda k: _tag_score(found[k], words))
+            pk = {"fit": "lemah", "reason": "Dipilih dari kecocokan tag (AI tidak memberi pilihan) — mohon dicek."}
+        pick = {"fit": pk.get("fit") or "lumayan", "reason": pk.get("reason") or ""}
+        weak += pick["fit"] == "lemah"
+        progress(f"Mengunduh footage scene {i + 1}/{len(scenes)} ({pick['fit']})…")
+        try:
+            select_candidate(pid, {"scene_id": s["id"], "index": idx, "pick": pick}, lambda m: None)
             done += 1
-        except (IndexError, KeyError, httpx.HTTPError) as e:
-            store.update(pid, lambda p, e=e, s=s: store.log(p, f"Aset {s['id']} gagal: {e}"))
-    return {"filled": done}
+        except httpx.HTTPError as e:
+            store.update(pid, lambda p, e=e, s=s: store.log(p, f"Unduh aset {s['id']} gagal: {e}"))
+    return {"filled": done, "weak": weak}
 
 
 def save_upload(pid: str, sid: str, filename: str, fileobj) -> dict:

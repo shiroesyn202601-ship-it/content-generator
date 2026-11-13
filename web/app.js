@@ -431,8 +431,11 @@ function rAssets() {
   }
   const keys = S.meta.keys;
   if (!keys.pexels && !keys.pixabay) box.append(hint('PEXELS_API_KEY / PIXABAY_API_KEY belum diisi di .env — pencarian stok tidak aktif. Anda tetap bisa unggah file manual.', 'warn'));
-  box.append(h('div', { class: 'row' }, btn('⚡ Isi otomatis semua scene', () => runAction('assets.auto_all'), 'primary'),
-    h('span', { class: 'muted' }, 'Lalu ganti yang kurang pas per scene.')));
+  box.append(h('div', { class: 'row' }, btn('⚡ Isi otomatis semua scene (AI)', () => runAction('assets.auto_all'), 'primary'),
+    btn('🔁 Pilih ulang semua (AI)', () => {
+      if (confirm('AI akan mencari & memilih ulang footage untuk SEMUA scene (pilihan sekarang diganti). Lanjut?')) runAction('assets.auto_all', { redo: true });
+    }, 'ghost'),
+    h('span', { class: 'muted' }, 'AI memilih footage sesuai narasi. Ganti yang kurang pas per scene.')));
   d.scenes = d.scenes || {};
   S.p.script.scenes.forEach((s, i) => {
     const slot = d.scenes[s.id] || {};
@@ -446,13 +449,17 @@ function rAssets() {
         h('div', { class: 'grow' },
           h('b', {}, `Scene ${i + 1}`), h('div', { class: 'muted small' }, s.text.replace(/\*/g, '')),
           sel ? h('div', { class: 'small muted' }, `${sel.provider} · ${sel.author || ''} · ${sel.license || ''}`) : null,
+          sel && slot.pick ? h('div', { class: `hint ${slot.pick.fit === 'lemah' ? 'warn' : ''}`, style: 'margin-top:4px' },
+            `${{ cocok: '✅ Cocok', lumayan: '🟡 Lumayan', lemah: '⚠ Kurang cocok — mohon dicek/ganti' }[slot.pick.fit] || slot.pick.fit}`,
+            slot.pick.reason ? ` · ${slot.pick.reason}` : '') : null,
+          sel && sel.tags ? h('div', { class: 'small muted' }, `Isi video: ${sel.tags}`) : null,
           h('div', { class: 'row' },
             h('div', { class: 'grow' }, field('', q, 'query', { dirty: () => {} })),
             field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pexels', 'Pexels'], ['pixabay', 'Pixabay'], ['photos', 'Foto']], dirty: () => {} }),
             btn('Cari', () => runAction('assets.search', { scene_id: s.id, query: q.query, provider: q.provider }), 'small'),
             btn('📁 Unggah', () => uploadFile(`/api/projects/${S.p.id}/assets/${s.id}/upload`, 'video/*,image/*'), 'small')))),
       (slot.candidates || []).length ? h('div', { class: 'grid', style: 'margin-top:8px' }, slot.candidates.map((c, k) =>
-        h('div', { class: 'thumb', title: `${c.provider} · ${c.author || ''}`, onclick: () => runAction('assets.select', { scene_id: s.id, index: k }) },
+        h('div', { class: 'thumb', title: `${c.tags || '(tanpa tag)'}\n${c.provider} · ${c.author || ''}${c.query ? ` · dicari: "${c.query}"` : ''}`, onclick: () => runAction('assets.select', { scene_id: s.id, index: k }) },
           h('img', { src: c.thumb || '', loading: 'lazy' }),
           h('span', { class: 'tag' }, `${c.type}${c.duration ? ` · ${c.duration}s` : ''} · ${c.provider}`)))) : null));
   });
