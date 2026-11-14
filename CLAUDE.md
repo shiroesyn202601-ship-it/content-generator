@@ -154,6 +154,10 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       bertumpuk, jumlah klip `max(3, min(10, durasi//90+2))`, buang tumpang-tindih ≥25%, kolom **Arahan AI**.
     - **PySceneDetect sengaja tidak dipakai:** `pip install scenedetect` menarik opencv-python 5 → cv2 diblokir
       Smart App Control. Cek Kesiapan kini punya baris "Auto-reframe" untuk mendeteksi hal ini.
+    - Cari momen viral video panjang: jendela dibagi PARALEL ke 3 model Groq (kuota 8rb token/menit PER model),
+      tanpa schema strict (gpt-oss sering json_validate_failed & membakar kuota), reasoning "low", baris transkrip
+      ringkas, tunggu 429 s.d. 4x, tanpa fallback Gemini per jendela; hasil per jendela di `script.clip_cache`
+      (klik ulang hanya jendela yang gagal) + `script.clip_note`. Video 50 mnt: ±45 dtk (dulu 4+ mnt / gagal).
     - Belum: deteksi pembicara aktif + layout split, sinyal audio lokal, subtitle YouTube sebagai transkrip.
 
 ## 5. Status & langkah berikutnya

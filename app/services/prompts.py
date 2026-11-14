@@ -224,15 +224,17 @@ def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int 
     """Rubrik penilaian klip (diadaptasi dari Anil-matcha & openshorts). Satuan = kalimat bernomor,
     jadi AI memilih nomor kalimat, bukan menebak detik."""
     lo, hi = (20, 59) if fmt == "short" else (90, 600)
-    lines = "\n".join(f"[{i + offset}] {s['start']:.1f}-{s['end']:.1f}: {s['text']}" for i, s in enumerate(units))
+    # ringkas (hemat token): nomor + menit:detik mulai; durasi klip dihitung ulang oleh kode
+    lines = "\n".join(f"[{i + offset}] {int(s['start'] // 60)}:{int(s['start'] % 60):02d} {s['text']}"
+                      for i, s in enumerate(units))
     system = ("Kamu editor klip viral profesional untuk YouTube Shorts/TikTok. Kamu jujur menilai: "
               "kebanyakan bagian video BIASA saja, hanya sedikit yang benar-benar layak diklip.")
     arah = f"\nARAHAN KREATOR (utamakan ini): {direction.strip()}\n" if direction.strip() else ""
-    user = f"""Video sumber: "{title}". Transkrip per KALIMAT bernomor (detik):
+    user = f"""Video sumber: "{title}". Transkrip per KALIMAT bernomor ([nomor] menit:detik mulai):
 {lines}
 {arah}
 Pilih sampai {count} momen terbaik. Setiap klip:
-- mulai di kalimat "start_unit" dan berakhir di kalimat "end_unit" (nomor di kurung siku), durasi {lo}-{hi} detik;
+- mulai di kalimat "start_unit" dan berakhir di kalimat "end_unit" (nomor di kurung siku), durasi {lo}-{hi} detik (hitung dari waktu mulai kalimat);
 - kalimat PERTAMA harus bisa dipahami tanpa konteks sebelumnya (jangan mulai dengan "jadi", "nah itu", "makanya",
   "dia" yang merujuk hal sebelumnya) dan langsung memancing rasa penasaran;
 - kalimat TERAKHIR terasa tuntas (punchline, kesimpulan, jawaban) — jangan berhenti di tengah cerita.

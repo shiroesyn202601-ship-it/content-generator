@@ -38,21 +38,26 @@ INT = {"type": "integer"}
 
 
 def chat_json(system: str, user: str, provider: str | None = None, temperature: float = 0.8,
-              schema: dict | None = None) -> dict:
-    """schema (opsional): JSON schema strict → Groq menjamin bentuk jawaban (field & enum) valid."""
+              schema: dict | None = None, groq_model: str | None = None, effort: str | None = None,
+              fallback: bool = True) -> dict:
+    """schema (opsional): JSON schema strict → Groq menjamin bentuk jawaban (field & enum) valid.
+    groq_model: model Groq yang dicoba pertama (tiap model punya kuota token/menit sendiri → tugas besar
+    bisa dibagi ke beberapa model). effort: reasoning_effort gpt-oss (low/medium/high).
+    fallback=False: jangan pindah ke provider cadangan (mis. Gemini yang lambat) — pemanggil menangani gagal."""
     providers = {"gemini": _gemini, "groq": _groq, "ollama": _ollama}
     primary = (provider or config.LLM_PROVIDER).lower()
     if primary not in providers:
         raise LLMError(f"Provider LLM tidak dikenal: {primary}")
     # Provider utama dulu, lalu cadangan (LLM_FALLBACK_PROVIDERS) yang sudah dikonfigurasi.
-    chain = [primary] + [p for p in config.LLM_FALLBACK_PROVIDERS
-                         if p != primary and p in providers and _configured(p)]
+    chain = [primary] + ([p for p in config.LLM_FALLBACK_PROVIDERS
+                          if p != primary and p in providers and _configured(p)] if fallback else [])
     errors = []
     for i, name in enumerate(chain):
         if errors:
             report(f"{PROVIDER_LABEL[chain[i - 1]]} gagal → beralih ke cadangan {PROVIDER_LABEL[name]}…")
         try:
-            raw = providers[name](system, user, temperature, schema)
+            raw = (_groq(system, user, temperature, schema, prefer=groq_model, effort=effort) if name == "groq"
+                   else providers[name](system, user, temperature, schema))
         except (LLMError, httpx.HTTPError) as e:
             errors.append(f"[{name}] {e}")
             continue
@@ -165,32 +170,41 @@ def _retry_after(r: httpx.Response) -> float:
     return 0.0
 
 
-def _groq_post(model: str, messages: list, temperature: float, schema: dict | None) -> httpx.Response:
+def _groq_post(model: str, messages: list, temperature: float, schema: dict | None,
+               effort: str | None = None) -> httpx.Response:
     rf = {"type": "json_object"}
     if schema and model in STRICT_MODELS:
         rf = {"type": "json_schema", "json_schema": {"name": "jawaban", "strict": True, "schema": schema}}
     body = {"model": model, "temperature": temperature, "response_format": rf, "messages": messages}
     if model.startswith("openai/gpt-oss"):
-        body["reasoning_effort"] = "medium"
+        body["reasoning_effort"] = effort or "medium"
     return httpx.post(GROQ_URL, headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"}, json=body,
                       timeout=TIMEOUT)
 
 
-def _groq(system: str, user: str, temperature: float, schema: dict | None = None) -> str:
+def groq_models() -> list[str]:
+    return list(dict.fromkeys([config.GROQ_MODEL, *config.GROQ_FALLBACK_MODELS]))
+
+
+def _groq(system: str, user: str, temperature: float, schema: dict | None = None,
+          prefer: str | None = None, effort: str | None = None) -> str:
     if not config.GROQ_API_KEY:
         raise LLMError("GROQ_API_KEY belum diisi di .env (gratis di console.groq.com)")
-    models = list(dict.fromkeys([config.GROQ_MODEL, *config.GROQ_FALLBACK_MODELS]))
+    models = groq_models()
+    if prefer:
+        models = list(dict.fromkeys([prefer, *models]))
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
     errors, r = [], None
     for idx, model in enumerate(models):
         use_schema = schema
-        for attempt in range(3):
+        for attempt in range(4):
             report(f"Menunggu jawaban AI dari Groq {model} — biasanya 1–10 dtk…")
-            r = _groq_post(model, messages, temperature, use_schema)
+            r = _groq_post(model, messages, temperature, use_schema, effort)
             # 429 di Groq gratis biasanya batas token PER MENIT (pulih < 60 dtk) → tunggu lalu ulangi model
             # yang sama; ini lebih cepat & lebih baik daripada jatuh ke model lain yang juga kena batas.
             wait = _retry_after(r)
-            if r.status_code == 429 and attempt < 2 and 0 < wait <= 60:
+            if r.status_code == 429 and attempt < 3 and 0 < wait <= 60:
+                wait = max(wait, 3.0)  # header kadang "0.2s" → langsung coba lagi = kena 429 lagi
                 report(f"Groq {model}: batas token per menit tercapai — menunggu {wait:.0f} dtk lalu mencoba lagi…")
                 time.sleep(wait + 0.5)
                 continue

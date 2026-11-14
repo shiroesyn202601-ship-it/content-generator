@@ -203,12 +203,11 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     want = max(3, min(10, int(dur // 90) + 2))  # jumlah klip wajar sesuai panjang video
     wins = _windows(units)
     per_win = max(3, min(6, -(-want * 2 // len(wins))))
-    raw = []
-    for k, (ws, we) in enumerate(wins):
-        progress("AI menilai momen viral…" if len(wins) == 1 else f"AI menilai momen viral (bagian {k + 1}/{len(wins)})…")
-        sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
-                                        count=per_win, direction=params.get("direction") or p["script"].get("direction") or "")
-        raw += llm.chat_json(sys_, usr, params.get("provider"), temperature=0.4, schema=_schema()).get("clips", [])
+    direction = params.get("direction") if params.get("direction") is not None else p["script"].get("direction") or ""
+    raw, failed = _score_windows(pid, p, units, wins, title, per_win, direction, params.get("provider"), progress)
+    if failed and not raw:
+        raise RuntimeError(f"Semua {len(wins)} bagian gagal dinilai AI — kuota gratis sedang habis. "
+                           f"Tunggu 1-2 menit lalu klik lagi (bagian yang sudah berhasil tidak diulang).\n\n{failed[0]}")
 
     progress("Merapikan kandidat klip (batas kalimat, durasi & tumpang-tindih)…")
     cands = []
@@ -235,15 +234,88 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     if not clips:
         raise RuntimeError(f"AI tidak menemukan klip berdurasi {lo}-{hi} dtk. Coba lagi, atau pilih manual.")
 
+    note = (f"{len(failed)} dari {len(wins)} bagian video belum dinilai (kuota AI gratis habis). "
+            "Klik \"Cari Momen Viral\" lagi 1-2 menit kemudian untuk melengkapi — bagian yang sudah dinilai tidak diulang."
+            if failed else "")
+
     def apply(p):
         p["script"]["clips"] = clips
         p["script"]["selected_clip"] = None
+        p["script"]["clip_note"] = note
         if params.get("direction") is not None:
             p["script"]["direction"] = params["direction"]
         store.touch_stage(p, "script")
-        store.log(p, f"AI: {len(clips)} kandidat klip dari {len(units)} kalimat")
+        store.log(p, f"AI: {len(clips)} kandidat klip dari {len(units)} kalimat"
+                     + (f" ({len(failed)}/{len(wins)} bagian gagal)" if failed else ""))
     store.update(pid, apply)
-    return {"count": len(clips)}
+    return {"count": len(clips), "failed_parts": len(failed), "parts": len(wins)}
+
+
+def _score_windows(pid, p, units, wins, title, per_win, direction, provider, progress):
+    """Nilai tiap jendela transkrip. Jendela dibagi bergiliran ke model-model Groq dan dikerjakan PARALEL
+    (tiap model punya kuota token/menit sendiri, ±8rb di tier gratis). Hasil tiap jendela disimpan di
+    script.clip_cache → bila sebagian gagal, klik ulang hanya mengerjakan jendela yang belum.
+    Mengembalikan (kandidat mentah, [pesan error])."""
+    import hashlib
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .. import jobs
+
+    def key(ws, we):
+        txt = "|".join(u["text"] for u in units[ws:we])
+        return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{txt}".encode()).hexdigest()[:16]
+
+    cache = dict(p["script"].get("clip_cache") or {})
+    todo = [(k, ws, we) for k, (ws, we) in enumerate(wins) if key(ws, we) not in cache]
+    raw = [c for ws, we in wins for c in cache.get(key(ws, we), [])]
+    if not todo:
+        return raw, []
+    use_groq = (provider or config.LLM_PROVIDER).lower() == "groq" or (
+        not provider and "groq" in config.LLM_FALLBACK_PROVIDERS and config.GROQ_API_KEY)
+    models = llm.groq_models() if use_groq and config.GROQ_API_KEY else [None]
+    lanes = {m: [t for i, t in enumerate(todo) if models[i % len(models)] == m] for m in models}
+    done, errors, lock = [len(wins) - len(todo)], [], __import__("threading").Lock()
+    parent_progress, parent_jid = getattr(jobs._local, "progress", None), getattr(jobs._local, "jid", None)
+    progress(f"AI menilai {len(todo)} bagian video" + (f" paralel di {len(models)} model Groq…" if len(models) > 1 else "…"))
+
+    def lane(model, items):
+        jobs._local.progress, jobs._local.jid = parent_progress, parent_jid  # bar status & tombol Batalkan
+        for k, ws, we in items:
+            sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
+                                            count=per_win, direction=direction)
+            try:
+                # tanpa schema strict: jawaban panjang gpt-oss sering gagal validasi & membakar kuota token
+                got = llm.chat_json(sys_, usr, "groq" if model else provider, temperature=0.4,
+                                    groq_model=model, effort="low", fallback=model is None).get("clips", [])
+            except (llm.LLMError, Exception) as e:  # noqa: BLE001 — satu bagian gagal tidak menggagalkan semua
+                if isinstance(e, jobs.JobCancelled):
+                    raise
+                with lock:
+                    errors.append(f"Bagian {k + 1}: {str(e)[:300]}")
+                continue
+            got = [c for c in got if isinstance(c, dict)]
+            with lock:
+                raw.extend(got)
+                cache[key(ws, we)] = got
+                done[0] += 1
+                n = done[0]
+
+            def save(pp, kk=key(ws, we), g=got):
+                pp["script"].setdefault("clip_cache", {})[kk] = g
+            store.update(pid, save)
+            progress(f"AI menilai momen viral: {n}/{len(wins)} bagian selesai…")
+
+    with ThreadPoolExecutor(max_workers=len(models)) as ex:
+        futs = [ex.submit(lane, m, items) for m, items in lanes.items() if items]
+        for f in futs:
+            f.result()
+    # buang cache jendela yang sudah tidak dipakai (transkrip / arahan berubah)
+    keep = {key(ws, we) for ws, we in wins}
+
+    def prune(pp):
+        pp["script"]["clip_cache"] = {k: v for k, v in (pp["script"].get("clip_cache") or {}).items() if k in keep}
+    store.update(pid, prune)
+    return raw, errors
 
 
 def cut_clip(pid: str, params: dict, progress) -> dict:
