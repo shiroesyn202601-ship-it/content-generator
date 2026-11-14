@@ -257,7 +257,8 @@ def run(pid: str, params: dict, progress) -> dict:
                             [*ff.AUDIO_ARGS, "-t", f"{total:.3f}", "-movflags", "+faststart", "render/final.mp4"], cwd=d)
 
     drive_id = None
-    if config.google_enabled():
+    drive_bg = config.google_enabled() and params.get("drive_background")
+    if config.google_enabled() and not drive_bg:
         progress("Upload hasil render ke Google Drive...")
         from . import sync
         drive_id = sync.upload_artifact(p, "render/final.mp4", f"{p['id']} - final.mp4")
@@ -268,4 +269,16 @@ def run(pid: str, params: dict, progress) -> dict:
         store.touch_stage(p, "render")
         store.log(p, f"Render selesai ({total:.1f}s, encoder {enc})")
     store.update(pid, apply)
+    if drive_bg:  # produksi massal: upload Drive di latar belakang supaya klip berikutnya langsung dikerjakan
+        import threading
+        threading.Thread(target=_drive_upload_bg, args=(pid,), daemon=True).start()
     return {"path": "render/final.mp4"}
+
+
+def _drive_upload_bg(pid: str) -> None:
+    from . import sync
+    try:
+        fid = sync.upload_artifact(store.load(pid), "render/final.mp4", f"{pid} - final.mp4")
+        store.update(pid, lambda q: q["render"].update({"drive_file_id": fid}))
+    except Exception as e:  # noqa: BLE001 — gagal upload tidak merusak hasil render
+        store.update(pid, lambda q, e=e: store.log(q, f"Upload Drive (latar belakang) gagal: {e}"))

@@ -80,6 +80,7 @@ const ACTION_LABEL = {
   'publish.thumbnail': '🖼 Memasang thumbnail', 'thumbnail.frames': '🎞 Mengambil kandidat frame',
   'thumbnail.render': '🖼 Menyimpan thumbnail', 'thumbnail.auto': '⚡ Membuat 3 thumbnail otomatis',
   'thumbnail.remove': '✕ Menghapus thumbnail', 'script.produce_clips': '🏭 Produksi banyak video',
+  'research.auto_clip': '✨ Membuat klip',
   'assets.story_setup': '📖 Menyusun karakter & prompt', 'assets.story_chars': '👤 Membuat gambar karakter',
   'assets.story_scenes': '🎨 Membuat gambar scene', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
   'script.find_clips': '🔥 Mencari momen viral', 'assets.search': '🔎 Mencari stock footage',
@@ -213,6 +214,7 @@ async function pollJob(jid, label) {
       await sleep(1000);
       const j = await api('GET', `/api/jobs/${jid}`);
       last = j; at = Date.now();
+      if (S.onJob) try { S.onJob(j); } catch (_) {}
       status(jobStatusView(label, j, 0));
       if (j.status === 'done') { toast(`${label} selesai ✓ (${fmtDur(j.elapsed)})`); return j.result; }
       if (j.status === 'cancelled') { toast(`${label} dibatalkan.`); return null; }
@@ -314,8 +316,14 @@ async function uploadFile(url, accept) {
 // ---------------------------------------------------------------- main render
 function render() {
   if (S.tab === 'publish') return renderPublishView();
+  S.onJob = null;
+  if (S.tab === 'clipper' && S.p && !S.p.parent && !(S.adv || {})[S.p.id]) return renderClipSource();
   const p = S.p, main = $('#main');
   main.innerHTML = '';
+  if (p.mode === 'clipper') main.append(h('div', { class: 'row', style: 'margin-bottom:6px' },
+    p.parent ? btn('← Kembali ke galeri klip', () => loadProject(p.parent, false, 'clipper'), 'small ghost')
+      : btn('← Tampilan sederhana', () => { S.adv[p.id] = false; render(); }, 'small ghost'),
+    h('span', { class: 'muted small' }, p.parent ? 'Edit detail klip ini (subtitle, bingkai, thumbnail…). Setelah selesai, render ulang.' : 'Mode lanjutan: kerjakan per tahap.')));
   const st = stageKey(), locked = S.view > p.current_stage, L = labelsFor(p.mode);
   applyTheme(p.mode);
 
@@ -1545,6 +1553,200 @@ async function refreshList() {
   });
 }
 
+
+// ================================================================ CLIPPER SEDERHANA (ala 2short.ai)
+/* Satu halaman: tempel link → "Buat Klip" → galeri klip jadi. Wizard per tahap tetap ada sebagai
+   "Mode lanjutan" & untuk mengedit satu klip. */
+S.adv = {};
+const CLIP_PHASES = ['Mengunduh video', 'Transkrip suara', 'Mencari momen viral', 'Membuat klip'];
+const clipOpts = () => {
+  let o = {};
+  try { o = JSON.parse(lsGet('clipOpts') || '{}'); } catch (_) {}
+  return { duration: 'auto', count: 0, template: 'pop', crop_mode: 'face', music: false, format: 'short', direction: '', ...o };
+};
+const saveClipOpts = (o) => lsSet('clipOpts', JSON.stringify(o));
+
+function seg(opts, key, choices, onchange) {
+  return h('div', { class: 'seg' }, choices.map(([v, l]) => h('button', {
+    class: String(opts[key]) === String(v) ? 'on' : '', onclick: () => { opts[key] = v; onchange(); } }, l)));
+}
+
+function tplCard(key, t, on, onclick) {
+  const ts = { ...S.meta.sub_defaults, ...t.style };
+  return h('div', { class: `tpl ${on ? 'on' : ''}`, title: t.desc, onclick },
+    h('div', { class: 'tpl-sample', style: [`font-family:"${ts.font}",Arial`, `color:${ts.primary}`,
+      `-webkit-text-stroke:${Math.min(3, ts.stroke_w / 3)}px ${ts.stroke}`,
+      ts.box === 'box' ? `background:${hexA(ts.box_color, ts.box_alpha)};padding:2px 6px` : '',
+      ts.glow ? `text-shadow:0 0 8px ${ts.glow}` : ''].join(';') },
+    ts.case === 'lower' ? 'ini ' : 'INI ',
+    h('span', { style: ['pill', 'box'].includes(ts.highlight_mode)
+      ? `background:${ts.highlight_bg};color:${ts.highlight_text};border-radius:${ts.highlight_mode === 'pill' ? 99 : 4}px;padding:0 5px;-webkit-text-stroke:0`
+      : `color:${ts.highlight}` }, ts.case === 'lower' ? 'viral' : 'VIRAL')),
+    h('div', { class: 'tpl-name' }, t.label));
+}
+
+function clipOptionsView(o, rerender) {
+  const tpls = { ...(S.meta.sub_templates || {}), ...(S.meta.sub_user_templates || {}) };
+  const upd = () => { saveClipOpts(o); rerender(); };
+  return h('div', { class: 'ch-opts' },
+    h('div', { class: 'ch-opt' }, h('b', {}, 'Durasi klip'),
+      seg(o, 'duration', [['auto', 'Otomatis'], ['pendek', '15–30 dtk'], ['sedang', '30–60 dtk'], ['panjang', '60–90 dtk']], upd)),
+    h('div', { class: 'ch-opt' }, h('b', {}, 'Jumlah klip'),
+      seg(o, 'count', [[0, 'Semua yang bagus'], [3, '3'], [5, '5'], [10, '10']], upd)),
+    h('div', { class: 'ch-opt' }, h('b', {}, 'Gaya subtitle'),
+      h('div', { class: 'tpl-row' }, Object.entries(tpls).filter(([k]) => k !== 'klasik').map(([k, t]) =>
+        tplCard(k, t, o.template === k, () => { o.template = k; upd(); })))),
+    h('details', { class: 'ch-more' }, h('summary', {}, 'Opsi lain'),
+      h('div', { class: 'ch-opt' }, h('b', {}, 'Bingkai'),
+        seg(o, 'crop_mode', [['face', 'Ikuti wajah'], ['blur', 'Latar blur'], ['center', 'Crop tengah']], upd)),
+      h('div', { class: 'ch-opt' }, h('b', {}, 'Musik latar'), seg(o, 'music', [[false, 'Tidak'], [true, 'Ya (otomatis pelan saat ada suara)']], upd)),
+      h('div', { class: 'ch-opt' }, h('b', {}, 'Format'), seg(o, 'format', [['short', 'Vertikal 9:16'], ['long', 'Lebar 16:9']], upd)),
+      h('div', { class: 'ch-opt' }, h('b', {}, 'Arahan AI (opsional)'),
+        h('input', { value: o.direction || '', placeholder: 'mis. cari momen lucu / fokus ke tips praktis',
+          oninput: (e) => { o.direction = e.target.value; saveClipOpts(o); } }))));
+}
+
+function clipHome() {
+  applyTheme('clipper');
+  const main = $('#main'); main.innerHTML = '';
+  const o = clipOpts();
+  const url = h('input', { class: 'ch-url', placeholder: 'Tempel link YouTube di sini…', autofocus: true });
+  const go = async (file) => {
+    const u = url.value.trim();
+    if (!file && !/^https?:\/\//.test(u)) { toast('Tempel link video (https://…) dulu.', true); url.focus(); return; }
+    try {
+      const p = await api('POST', '/api/projects', { mode: 'clipper', format: o.format, title: '', keyword: '' });
+      await loadProject(p.id, false, 'clipper');
+      if (file) {
+        await uploadFile(`/api/projects/${p.id}/upload-source`, 'video/*');
+        if (!((S.p.research || {}).source || {}).path) return;
+      }
+      startAutoClip(file ? {} : { url: u });
+    } catch (e) { toast(e.message, true); }
+  };
+  url.onkeydown = (e) => { if (e.key === 'Enter') go(); };
+  const opts = h('div');
+  const draw = () => { opts.innerHTML = ''; opts.append(clipOptionsView(o, draw)); };
+  draw();
+  main.append(h('div', { class: 'clip-home' },
+    h('h1', {}, '✂ Ubah video panjang jadi klip viral'),
+    h('p', { class: 'muted' }, 'AI mencari momen terbaik, memotong ke 9:16 mengikuti wajah, memberi subtitle & thumbnail — tinggal unduh atau jadwalkan.'),
+    h('div', { class: 'ch-input' }, url, h('button', { class: 'primary ch-go', onclick: () => go() }, '✨ Buat Klip')),
+    h('div', { class: 'row', style: 'justify-content:center' }, h('span', { class: 'muted small' }, 'atau'),
+      h('button', { class: 'ghost small', onclick: () => go(true) }, '📁 Unggah file video')),
+    opts,
+    h('div', { class: 'muted small', style: 'text-align:center;margin-top:12px' },
+      'Gunakan hanya video milik sendiri, berlisensi CC, atau yang sudah diizinkan pemiliknya.')));
+}
+
+async function startAutoClip(extra = {}) {
+  const o = clipOpts();
+  S.clipRun = S.p.id;
+  render();
+  const r = await runAction('research.auto_clip', { ...extra, duration: o.duration, count: o.count, template: o.template,
+    crop_mode: o.crop_mode, music: o.music, direction: o.direction });
+  S.clipRun = null;
+  if (r) toast(`${r.created.length} klip jadi 🎉${r.failed.length ? ` (${r.failed.length} gagal)` : ''}`);
+  await refreshList(); render();
+}
+
+function clipProgressView(msg) {
+  const m = /^\[(\d)\/4\]\s*(.*)$/.exec(msg || '');
+  const cur = m ? +m[1] - 1 : 0;
+  return h('div', { class: 'clip-progress' },
+    h('div', { class: 'cp-steps' }, CLIP_PHASES.map((ph, i) => h('div', { class: `cp-step ${i < cur ? 'done' : i === cur ? 'now' : ''}` },
+      h('span', { class: 'cp-dot' }, i < cur ? '✓' : String(i + 1)), ph))),
+    h('div', { class: 'cp-msg' }, h('span', { class: 'spin' }), ' ', m ? m[2] : (msg || 'Memulai…')),
+    h('div', { class: 'muted small' }, 'Boleh ditinggal / buka tab lain — proses tetap jalan. Video 1 jam biasanya selesai dalam beberapa menit.'));
+}
+
+function renderClipSource() {
+  const p = S.p, main = $('#main'); main.innerHTML = '';
+  applyTheme('clipper');
+  const src = (p.research || {}).source || {};
+  const kids = (S.all || []).filter((c) => c.parent === p.id);
+  const running = S.clipRun === p.id || (p._jobs || []).some((j) => j.kind === 'research.auto_clip' || j.kind === 'script.produce_clips');
+  main.append(h('div', { class: 'row between' },
+    h('div', {}, h('h1', {}, p.title || 'Video baru'),
+      h('div', { class: 'muted small' }, [src.channel, src.duration ? fmtT(src.duration) : '', src.url ? h('a', { href: src.url, target: '_blank' }, 'sumber') : null]
+        .filter(Boolean).flatMap((x, i) => (i ? [' · ', x] : [x])))),
+    h('div', { class: 'row' },
+      btn('⚙ Mode lanjutan', () => { S.adv[p.id] = true; S.view = Math.min(p.current_stage, PUB - 1); fixView(); S.draft = clone(S.p[stageKey()]); render(); }, 'small ghost'),
+      h('button', { class: 'ghost danger small', onclick: deleteProject }, 'Hapus'))));
+
+  if (running) {
+    const box = h('div', {}, clipProgressView(''));
+    S.onJob = (j) => { box.innerHTML = ''; box.append(clipProgressView(j.progress || ((j.steps || []).slice(-1)[0] || {}).msg)); };
+    main.append(box);
+  } else if (!src.path) {
+    const o = clipOpts();
+    const url = h('input', { class: 'ch-url', placeholder: 'Tempel link YouTube…' });
+    main.append(h('div', { class: 'clip-home' }, h('div', { class: 'ch-input' }, url,
+      h('button', { class: 'primary ch-go', onclick: () => /^https?:\/\//.test(url.value.trim()) ? startAutoClip({ url: url.value.trim() }) : toast('Tempel link dulu', true) }, '✨ Buat Klip')),
+      h('div', { class: 'row', style: 'justify-content:center' }, h('button', { class: 'ghost small', onclick: async () => {
+        await uploadFile(`/api/projects/${p.id}/upload-source`, 'video/*'); if (((S.p.research || {}).source || {}).path) startAutoClip();
+      } }, '📁 Unggah file video')), (() => { const d = h('div'); const r = () => { d.innerHTML = ''; d.append(clipOptionsView(o, r)); }; r(); return d; })()));
+    return;
+  } else if ((p.autoclip || {}).status === 'error' && !kids.length) {
+    main.append(h('div', { class: 'hint warn' }, `Proses berhenti: ${p.autoclip.error || 'gagal'}`),
+      h('div', { class: 'row' }, btn('↻ Coba lagi', () => startAutoClip(), 'primary'),
+        h('span', { class: 'muted small' }, 'Langkah yang sudah selesai (unduh, transkrip) tidak diulang.')));
+  } else if (!kids.length) {
+    main.append(h('div', { class: 'card' }, h('p', {}, 'Video sudah siap. Buat klip sekarang?'),
+      (() => { const o = clipOpts(); const d = h('div'); const r = () => { d.innerHTML = ''; d.append(clipOptionsView(o, r)); }; r(); return d; })(),
+      btn('✨ Buat Klip', () => startAutoClip(), 'primary')));
+  }
+
+  // --- galeri klip jadi
+  if (kids.length) {
+    kids.sort((a, b) => ((b.clip || {}).score || 0) - ((a.clip || {}).score || 0));
+    main.append(h('div', { class: 'row between', style: 'margin-top:14px' }, h('h2', {}, `🎬 ${kids.length} klip jadi`),
+      h('span', { class: 'muted small' }, 'Klik video untuk memutar. Skor = potensi viral menurut AI.')));
+    main.append(h('div', { class: 'clip-grid' }, kids.map((c) => clipCard(c))));
+  }
+  // --- momen lain yang belum dibuat
+  const made = new Set(kids.map((c) => (c.clip || {}).id));
+  const rest = ((p.script || {}).clips || []).map((c, i) => [c, i]).filter(([c]) => !made.has(c.id));
+  if (rest.length && !running) {
+    main.append(h('details', { class: 'more-moments', open: !kids.length },
+      h('summary', {}, `💡 ${rest.length} momen lain ditemukan AI`),
+      rest.map(([c, i]) => h('div', { class: 'mm-row' },
+        h('span', { class: `badge score ${c.score >= 75 ? 'hi' : c.score >= 55 ? 'mid' : 'lo'}` }, c.score),
+        h('div', { class: 'grow' }, h('b', {}, c.title || c.id), h('div', { class: 'muted small' }, `${fmtT(c.start)} · ${Math.round(c.end - c.start)} dtk · ${c.hook || ''}`)),
+        btn('✨ Buat klip ini', async () => {
+          const o = clipOpts(); S.clipRun = p.id; render();
+          const tpl = (S.meta.sub_user_templates || {})[o.template] || (S.meta.sub_templates || {})[o.template];
+          await runAction('script.produce_clips', { indexes: [i], crop_mode: o.crop_mode, music: o.music,
+            sub_style: tpl ? { ...S.meta.sub_defaults, ...tpl.style, template: o.template } : null });
+          S.clipRun = null; await refreshList(); render();
+        }, 'small')))));
+  }
+}
+
+function clipCard(c) {
+  const src = c.output ? U(`/media/${c.id}/${c.output}`) : '';
+  const poster = c.thumb ? U(`/media/${c.id}/${c.thumb}`) : undefined;
+  const sc = (c.clip || {}).score;
+  const vid = h('video', { src, poster, preload: 'none', playsInline: true, onclick: (e) => {
+    const v = e.currentTarget; if (v.paused) { document.querySelectorAll('.clip-grid video').forEach((x) => x !== v && x.pause()); v.controls = true; v.play(); } else v.pause();
+  } });
+  const up = c.publish && c.publish.video_id;
+  return h('div', { class: 'clip-card' },
+    h('div', { class: 'cc-media' }, vid,
+      sc != null ? h('span', { class: `cc-score ${sc >= 75 ? 'hi' : sc >= 55 ? 'mid' : 'lo'}` }, `🔥 ${sc}`) : null,
+      c.duration ? h('span', { class: 'cc-dur' }, fmtT(c.duration).replace(/\.\d$/, '')) : null,
+      up ? h('span', { class: 'cc-up' }, '✅ diunggah') : null),
+    h('div', { class: 'cc-title', title: c.title }, c.title),
+    h('div', { class: 'cc-actions' },
+      src ? h('a', { class: 'btnlike', href: src, download: `${(c.title || c.id).replace(/[\\/:*?"<>|]+/g, '').slice(0, 60)}.mp4`, title: 'Unduh MP4' }, '⬇ Unduh') : null,
+      h('button', { title: 'Judul, deskripsi & jadwal upload', onclick: () => loadProject(c.id, false, 'publish') }, up ? '📅 Detail' : '📅 Jadwalkan'),
+      h('button', { title: 'Edit subtitle, bingkai, thumbnail…', onclick: () => { loadProject(c.id, false, 'clipper').then(() => setView(S.meta.stages.indexOf('subtitles'))); } }, '✏ Edit'),
+      h('button', { class: 'danger', title: 'Hapus klip', onclick: async () => {
+        if (!confirm(`Hapus klip "${c.title}"?`)) return;
+        await api('DELETE', `/api/projects/${c.id}`); await refreshList(); render();
+      } }, '🗑 Hapus')));
+}
+
 // ---------------------------------------------------------------- tab Upload & Jadwal
 /* Dipakai bersama oleh jalur Dari Nol dan Clipper: semua video yang render-nya sudah disetujui
    masuk ke sini, dikelompokkan: siap diunggah → terjadwal → sudah terunggah. */
@@ -1741,32 +1943,12 @@ function renderSidebarTab() {
       h('label', { class: 'field' }, h('span', {}, 'Format'), fmt),
       h('button', { class: 'primary', onclick: go }, '+ Buat proyek'));
   } else {
-    const fmt = fmtSel('short');
-    const url = h('input', { placeholder: 'https://www.youtube.com/watch?v=…' });
-    const create = () => api('POST', '/api/projects', { mode: 'clipper', format: fmt.value, title: '', keyword: '' });
-    const fromLink = async () => {
-      const u = url.value.trim();
-      if (!/^https?:\/\//.test(u)) return toast('Tempel link video (https://…) dulu.', true);
-      try {
-        const p = await create(); url.value = '';
-        await loadProject(p.id);
-        await runAction('research.download', { url: u });
-      } catch (e) { toast(e.message, true); }
-    };
-    const fromFile = async () => {
-      try {
-        const p = await create();
-        await loadProject(p.id);
-        await uploadFile(`/api/projects/${p.id}/upload-source`, 'video/*');
-      } catch (e) { toast(e.message, true); }
-    };
-    url.onkeydown = (e) => { if (e.key === 'Enter') fromLink(); };
-    box.append(h('h3', {}, '✂ Klip baru'),
-      h('label', { class: 'field' }, h('span', {}, 'Link YouTube'), url),
-      h('label', { class: 'field' }, h('span', {}, 'Format hasil'), fmt),
-      h('div', { class: 'row' }, h('button', { class: 'primary', onclick: fromLink }, '⬇ Buat & unduh'),
-        h('button', { class: 'ghost', onclick: fromFile }, '📁 Unggah file')),
-      h('div', { class: 'muted small', style: 'margin-top:6px' }, 'Hanya untuk video milik sendiri, berlisensi CC, atau yang sudah diizinkan pemiliknya.'));
+    box.append(h('h3', {}, '✂ Clipper'),
+      h('div', { class: 'muted small' }, 'Video panjang → banyak klip pendek siap upload, sekali klik.'),
+      h('button', { class: 'primary', style: 'margin-top:8px;width:100%', onclick: () => {
+        if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
+        S.p = null; S.dirty = false; lsSet('lastProject_clipper', null); renderWelcome('clipper'); refreshList();
+      } }, '+ Video baru'));
   }
 }
 
@@ -1791,6 +1973,7 @@ function renderWelcome(mode) {
     renderScheduleOverview(box);
     return;
   }
+  if (mode === 'clipper') return clipHome();
   const L = labelsFor(mode);
   const clip = mode === 'clipper';
   main.append(h('div', { class: 'empty' },

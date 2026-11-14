@@ -423,10 +423,10 @@ Balas JSON: {{"picks": [{{"id": "s1", "index": 0, "fit": "cocok", "reason": "...
 
 
 def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int = 0, count: int = 5,
-                direction: str = "") -> tuple[str, str]:
+                direction: str = "", limits: tuple | None = None) -> tuple[str, str]:
     """Rubrik penilaian klip (diadaptasi dari Anil-matcha & openshorts). Satuan = kalimat bernomor,
     jadi AI memilih nomor kalimat, bukan menebak detik."""
-    lo, hi = (20, 59) if fmt == "short" else (90, 600)
+    lo, hi = limits or ((20, 59) if fmt == "short" else (90, 600))
     # ringkas (hemat token): nomor + menit:detik mulai; durasi klip dihitung ulang oleh kode
     lines = "\n".join(f"[{i + offset}] {int(s['start'] // 60)}:{int(s['start'] % 60):02d} {s['text']}"
                       for i, s in enumerate(units))

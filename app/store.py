@@ -305,6 +305,18 @@ def list_projects() -> list[dict]:
             # Ringkasan untuk tab "Upload & Jadwal" (dipakai bersama jalur Dari Nol & Clipper).
             pub, rnd = p.get("publish") or {}, p.get("render") or {}
             item["rendered"] = bool(rnd.get("output_path"))
+            # Galeri Clipper (ala 2short.ai): klip jadi = proyek turunan dari video sumber
+            th = p.get("thumbnail") or {}
+            thumbs = th.get("thumbs") or []
+            item["parent"] = p.get("parent")
+            item["output"] = rnd.get("output_path")
+            item["duration"] = rnd.get("duration")
+            item["thumb"] = thumbs[min(th.get("selected") or 0, len(thumbs) - 1)] if thumbs else None
+            sc = p.get("script") or {}
+            clips, sel = sc.get("clips") or [], sc.get("selected_clip")
+            item["clip"] = ({k: clips[sel].get(k) for k in ("id", "score", "scores", "start", "end", "hook")}
+                            if p.get("parent") and sel is not None and sel < len(clips) else None)
+            item["autoclip"] = {k: (p.get("autoclip") or {}).get(k) for k in ("status", "error")} if p.get("autoclip") else None
             item["publish"] = {k: pub.get(k) for k in ("title", "publish_at", "privacy", "video_id", "url", "status")}
             # Clipper: 1 video sumber = 1 proyek; tiap video hasil = proyek anak (parent = proyek sumber).
             if p.get("parent"):

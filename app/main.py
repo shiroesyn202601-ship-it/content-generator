@@ -76,6 +76,7 @@ ACTIONS = {
     "assets.auto_all":     (assets.auto_all, "assets", True),
     "assets.cut_clip":     (clipper.cut_clip, "script", True),   # Clipper: tahap Momen & Potong (gabungan)
     "script.produce_clips": (clipper.produce_clips, "script", True),
+    "research.auto_clip":  (clipper.auto_clip, "research", True),
     "assets.story_setup":  (story.setup, "assets", True),
     "assets.story_chars":  (story.characters, "assets", True),
     "assets.story_scenes": (story.scenes, "assets", True),

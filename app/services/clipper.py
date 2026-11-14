@@ -198,6 +198,8 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     if not segs:
         raise RuntimeError("Transkrip kosong — jalankan Transkrip dulu.")
     lo, hi = CLIP_LIMITS[p["format"]]
+    if params.get("lo") and params.get("hi"):  # durasi pilihan kreator (mis. 15-30 dtk)
+        lo, hi = max(5, int(params["lo"])), max(int(params["lo"]) + 5, int(params["hi"]))
     title = p["research"]["source"].get("title", "")
     units = sentences(segs)
     words = _all_words(segs)
@@ -210,7 +212,8 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     wins = _windows(units, int(min(WINDOW_MAX, max(WINDOW_CHARS, total * 1.15 / lanes))))
     per_win = max(3, min(6, -(-want * 2 // len(wins))))
     direction = params.get("direction") if params.get("direction") is not None else p["script"].get("direction") or ""
-    raw, failed = _score_windows(pid, p, units, wins, title, per_win, direction, params.get("provider"), progress)
+    raw, failed = _score_windows(pid, p, units, wins, title, per_win, direction, params.get("provider"), progress,
+                                 (lo, hi))
     if failed and not raw:
         raise RuntimeError(f"Semua {len(wins)} bagian gagal dinilai AI — kuota gratis sedang habis. "
                            f"Tunggu 1-2 menit lalu klik lagi (bagian yang sudah berhasil tidak diulang).\n\n{failed[0]}")
@@ -257,7 +260,7 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     return {"count": len(clips), "failed_parts": len(failed), "parts": len(wins)}
 
 
-def _score_windows(pid, p, units, wins, title, per_win, direction, provider, progress):
+def _score_windows(pid, p, units, wins, title, per_win, direction, provider, progress, limits=None):
     """Nilai tiap jendela transkrip. Jendela dibagi bergiliran ke model-model Groq dan dikerjakan PARALEL
     (tiap model punya kuota token/menit sendiri, ±8rb di tier gratis). Hasil tiap jendela disimpan di
     script.clip_cache → bila sebagian gagal, klik ulang hanya mengerjakan jendela yang belum.
@@ -269,7 +272,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
 
     def key(ws, we):
         txt = "|".join(u["text"] for u in units[ws:we])
-        return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{txt}".encode()).hexdigest()[:16]
+        return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{limits}|{txt}".encode()).hexdigest()[:16]
 
     cache = dict(p["script"].get("clip_cache") or {})
     todo = [(k, ws, we) for k, (ws, we) in enumerate(wins) if key(ws, we) not in cache]
@@ -302,7 +305,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
             except queue.Empty:
                 continue  # bagian sedang dikerjakan model lain (bisa dikembalikan bila kena batas)
             sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
-                                            count=per_win, direction=direction)
+                                            count=per_win, direction=direction, limits=limits)
             try:
                 # tanpa schema strict: jawaban panjang gpt-oss sering gagal validasi & membakar kuota token
                 got = llm.chat_json(sys_, usr, "groq" if model else provider, temperature=0.4,
@@ -469,7 +472,7 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
             subtitles.build(qid, {}, sub)
             store.update(qid, lambda q: store.approve(q, "subtitles"))
             step = "render"
-            render.run(qid, {}, sub)
+            render.run(qid, {"drive_background": True}, sub)
             store.update(qid, lambda q: store.approve(q, "render"))
             step = "thumbnail"
             thumbs.auto(qid, {}, sub)
@@ -484,3 +487,57 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
     store.update(pid, lambda q: store.log(q, f"Produksi massal: {len(created)} video jadi"
                                              + (f", {len(failed)} perlu dicek manual" if failed else "")))
     return {"created": created, "failed": failed}
+
+
+# ---------------- satu tombol ala 2short.ai ----------------
+
+DURATIONS = {"auto": None, "pendek": (15, 30), "sedang": (30, 60), "panjang": (60, 90)}
+
+
+def auto_clip(pid: str, params: dict, progress) -> dict:
+    """Satu tombol: (unduh) → transkrip → cari momen → buat klip jadi (potong, subtitle, render, thumbnail).
+    Pesan progres diawali [n/4] supaya UI bisa menampilkan daftar langkah. Langkah yang sudah selesai
+    dilewati (bisa diulang / dilanjutkan bila sempat gagal)."""
+    from . import research
+
+    def step(n, label):
+        return lambda m: progress(f"[{n}/4] {label}: {m}")
+
+    p = store.load(pid)
+    opts = {**(p.get("autoclip") or {}), **{k: v for k, v in params.items() if k != "url"}}
+    store.update(pid, lambda q: q.update({"autoclip": {**opts, "status": "running"}}))
+    try:
+        if params.get("url") and not (p["research"].get("source") or {}).get("path"):
+            research.download_source(pid, {"url": params["url"]}, step(1, "Mengunduh video"))
+        else:
+            progress("[1/4] Video siap")
+        p = store.load(pid)
+        if not (p["research"].get("source") or {}).get("path"):
+            raise RuntimeError("Video belum ada — tempel link atau unggah file.")
+        if p["stage_status"].get("research") != "approved":
+            store.update(pid, lambda q: store.approve(q, "research"))
+        if not (p["script"].get("transcript") or {}).get("segments"):
+            transcribe(pid, {}, step(2, "Transkrip"))
+        else:
+            progress("[2/4] Transkrip sudah ada")
+        lim = DURATIONS.get(opts.get("duration") or "auto")
+        fp = {"direction": opts.get("direction") or ""}
+        if lim:
+            fp.update({"lo": lim[0], "hi": lim[1]})
+        find_clips(pid, fp, step(3, "Mencari momen viral"))
+        p = store.load(pid)
+        clips = p["script"]["clips"]
+        n = int(opts.get("count") or 0) or len(clips)
+        idx = sorted(range(len(clips)), key=lambda i: -(clips[i].get("score") or 0))[:n]
+        style = opts.get("sub_style")
+        if not style and opts.get("template"):
+            t = store.SUB_TEMPLATES.get(opts["template"]) or store.user_templates().get(opts["template"])
+            style = {**t["style"], "template": opts["template"]} if t else None
+        res = produce_clips(pid, {"indexes": sorted(idx), "crop_mode": opts.get("crop_mode") or "face",
+                                  "sub_style": style, "music": bool(opts.get("music")),
+                                  "mood": opts.get("mood") or "santai"}, step(4, "Membuat klip"))
+    except Exception as e:
+        store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"status": "error", "error": str(e)[:300]}))
+        raise
+    store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"status": "done", "error": ""}))
+    return res

@@ -200,6 +200,14 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     `parent` & `clip_id`. Hapus sumber: `?with_children=true` ikut hapus, kalau tidak anak dilepas jadi mandiri.
     Proyek lama yang sumbernya sudah jadi video sendiri (current_stage > 1) tetap berperilaku lama + anak bersarang.
 
+14. **15 Nov 2026 — Clipper satu tombol (ala 2short.ai):** tab Clipper = halaman awal "tempel link → ✨ Buat Klip"
+    (pilihan: durasi klip, jumlah, gaya subtitle visual; opsi lain dilipat; disimpan di localStorage `clipOpts`).
+    Aksi `research.auto_clip` (`clipper.auto_clip`): unduh → transkrip → cari momen (`lo/hi` sesuai durasi) →
+    `produce_clips` (top N), progres `[n/4]` untuk tampilan 4 langkah. Proyek sumber tampil sebagai **galeri klip**
+    (kartu 9:16, skor, ⬇ Unduh / 📅 Jadwalkan / ✏ Edit / 🗑) + "momen lain" sekali klik; wizard = "⚙ Mode lanjutan"
+    (`S.adv`). Dibangun di atas wadah sumber/anak dari commit 221f62f (sesi lain). Upload Drive saat produksi
+    massal berjalan di latar belakang (`render.run` param `drive_background`). Uji nyata: video 59 dtk → 2 klip, 76 dtk.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).
