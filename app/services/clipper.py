@@ -48,7 +48,7 @@ def transcribe_local(path, language: str | None, progress, total: float = 0) -> 
 
 def transcribe(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
-    src = store.project_dir(pid) / p["research"]["source"]["path"]
+    src = store.source_file(p)
     lang = params.get("language") or p["language"]
     tr = transcribe_file(src, lang, progress, p["research"]["source"].get("duration") or 0)
 
@@ -367,7 +367,7 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
     reframe_info = None
     if mode == "face":
         from . import reframe
-        src = d / p["research"]["source"]["path"]
+        src = store.source_file(p)
         progress("Auto-reframe: mendeteksi wajah & potongan scene…")
         pl, reframe_info = reframe.track(src, clip["start"], clip["end"], w, h, progress)
         if pl:
@@ -379,7 +379,7 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
             progress("Auto-reframe: tidak ada wajah terdeteksi — memakai mode latar blur")
     progress(f"Memotong {clip['start']:.1f}s - {clip['end']:.1f}s ({mode})...")
     vf = f"{fit},fps={config.FPS},format=yuv420p"
-    ff.run(["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", p["research"]["source"]["path"],
+    ff.run(["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", str(store.source_file(p)),
             "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", "-map", "0:a?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k",
             "assets/clip.mp4"], cwd=d)
@@ -398,21 +398,12 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
 # ---------------- satu video sumber → banyak video sekaligus ----------------
 
 def fork_clip(src_pid: str, idx: int) -> dict:
-    """Jadikan satu kandidat klip proyek baru (sumber & transkrip ikut disalin). Proyek mulai di tahap Momen."""
-    import shutil
+    """Jadikan satu kandidat klip proyek anak (transkrip ikut, video sumber dipakai bersama). Mulai di tahap Momen."""
     src = store.load(src_pid)
     clip = src["script"]["clips"][idx]
-    p = store.new_project("clipper", src["format"], "", language=src["language"])
-
-    def link_or_copy(a, b):
-        # Hardlink: video sumber (bisa ratusan MB) dipakai bersama tanpa memakan ruang disk lagi.
-        import os
-        try:
-            os.link(a, b)
-        except OSError:
-            shutil.copy2(a, b)
-    shutil.copytree(store.project_dir(src_pid) / "source", store.project_dir(p["id"]) / "source",
-                    dirs_exist_ok=True, copy_function=link_or_copy)
+    # Video hasil disimpan di dalam folder proyek sumber (clips/<id>) dan membaca video sumber milik
+    # induknya lewat store.source_file — tidak ada salinan video sumber per klip.
+    p = store.new_project("clipper", src["format"], "", language=src["language"], parent=src_pid)
     p.update({"title": clip.get("title") or src["title"], "current_stage": 1, "voice": src["voice"]})
     p["research"] = src["research"]
     p["script"] = {**src["script"], "selected_clip": idx, "clip_cache": {}}

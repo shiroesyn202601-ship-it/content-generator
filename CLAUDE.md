@@ -199,6 +199,10 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     proyek sumber. Video hasil: link ← ke sumber, hanya klipnya sendiri yang tampil. `list_projects` memuat
     `parent` & `clip_id`. Hapus sumber: `?with_children=true` ikut hapus, kalau tidak anak dilepas jadi mandiri.
     Proyek lama yang sumbernya sudah jadi video sendiri (current_stage > 1) tetap berperilaku lama + anak bersarang.
+    **Penyimpanan (15 Nov 2026):** folder video hasil ada DI DALAM proyek sumber: `data/projects/<sumber>/clips/<id>/`,
+    tanpa salinan/hardlink video sumber — `store.source_file(p)` membaca `source/` milik induk, `/media/<anak>/source/...`
+    disajikan dari induk. `store.project_dir` mencari `*/clips/<id>` otomatis; `store.nest_children()` (dipanggil saat
+    start) memindahkan anak gaya lama. Hapus sumber tanpa anak → `store.release_child` memindah anak keluar + hardlink sumber.
 
 14. **15 Nov 2026 — Clipper satu tombol (ala 2short.ai):** tab Clipper = halaman awal "tempel link → ✨ Buat Klip"
     (pilihan: durasi klip, jumlah, gaya subtitle visual; opsi lain dilipat; disimpan di localStorage `clipOpts`).

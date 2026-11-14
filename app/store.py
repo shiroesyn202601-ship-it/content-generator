@@ -101,18 +101,97 @@ def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
 
 
-def project_dir(pid: str, create: bool = False) -> Path:
+_nested: dict[str, Path] = {}  # cache lokasi video hasil Clipper: id anak → folder di dalam proyek sumber
+
+
+def project_dir(pid: str, create: bool = False, parent: str | None = None) -> Path:
     """Folder proyek. Hanya dibuat saat create=True (menyimpan), supaya GET ke id
-    sembarang tidak menghasilkan folder kosong."""
+    sembarang tidak menghasilkan folder kosong.
+    Clipper: video hasil disimpan DI DALAM proyek sumbernya — data/projects/<sumber>/clips/<id>/ —
+    dan memakai video sumber milik induknya (tidak disalin). `parent` hanya dipakai saat membuat."""
     if not re.fullmatch(r"[a-z0-9-]+", pid):
         raise ValueError("project id tidak valid")
     d = config.PROJECTS_DIR / pid
+    if not d.exists():
+        hit = _nested.get(pid)
+        if hit is None or not hit.exists():
+            hit = next(iter(config.PROJECTS_DIR.glob(f"*/clips/{pid}")), None)
+        if hit is not None:
+            _nested[pid] = hit
+            d = hit
+        elif parent:
+            d = project_dir(parent) / "clips" / pid
     if create:
         d.mkdir(parents=True, exist_ok=True)
     return d
 
 
-def new_project(mode: str, fmt: str, title: str, keyword: str = "", language: str = "") -> dict:
+def source_file(p: dict) -> Path | None:
+    """Path absolut video sumber Clipper. Video hasil membaca file milik proyek sumbernya."""
+    rel = (p["research"].get("source") or {}).get("path")
+    if not rel:
+        return None
+    own = project_dir(p["id"]) / rel
+    if own.exists() or not p.get("parent"):
+        return own
+    try:
+        return project_dir(p["parent"]) / rel
+    except ValueError:
+        return own
+
+
+def nest_children() -> int:
+    """Migrasi sekali jalan: video hasil Clipper lama (folder sendiri di data/projects + salinan/hardlink
+    video sumber) dipindah ke data/projects/<sumber>/clips/<id>/, salinan sumbernya dibuang."""
+    import os
+    import shutil
+    moved = 0
+    for f in list(config.PROJECTS_DIR.glob("*/project.json")):
+        d = f.parent
+        try:
+            p = json.loads(f.read_text(encoding="utf-8"))
+            par = p.get("parent")
+            if not par or not re.fullmatch(r"[a-z0-9-]+", par) or not (config.PROJECTS_DIR / par / "project.json").exists():
+                continue
+            parent_dir = config.PROJECTS_DIR / par
+            own_src = d / "source"
+            if own_src.exists():
+                for x in own_src.iterdir():
+                    twin = parent_dir / "source" / x.name
+                    if not twin.exists() or not (os.path.samefile(x, twin) or x.stat().st_size == twin.stat().st_size):
+                        raise RuntimeError("video sumber anak berbeda dari induk")
+                shutil.rmtree(own_src)
+            (parent_dir / "clips").mkdir(exist_ok=True)
+            shutil.move(str(d), str(parent_dir / "clips" / d.name))
+            moved += 1
+        except Exception:  # noqa: BLE001 — file sedang dipakai / data aneh: biarkan di tempat lama
+            continue
+    return moved
+
+
+def release_child(pid: str, note: str) -> None:
+    """Proyek sumber akan dihapus tapi video hasilnya dipertahankan: pindahkan ke folder mandiri
+    dan beri salinan video sumber (hardlink bila bisa) supaya tetap bisa diedit ulang."""
+    import os
+    import shutil
+    p = load(pid)
+    old, src = project_dir(pid), source_file(p)
+    new = config.PROJECTS_DIR / pid
+    if old != new:
+        shutil.move(str(old), str(new))
+        _nested.pop(pid, None)
+    if src and src.exists() and not (new / p["research"]["source"]["path"]).exists():
+        dest = new / p["research"]["source"]["path"]
+        dest.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            os.link(src, dest)
+        except OSError:
+            shutil.copy2(src, dest)
+    update(pid, lambda q: (q.pop("parent", None), log(q, note)))
+
+
+def new_project(mode: str, fmt: str, title: str, keyword: str = "", language: str = "",
+                parent: str | None = None) -> dict:
     if mode not in ("scratch", "clipper"):
         raise ValueError("mode harus scratch|clipper")
     if fmt not in ("short", "long"):
@@ -146,6 +225,8 @@ def new_project(mode: str, fmt: str, title: str, keyword: str = "", language: st
         "log": [],
     }
     p["stage_status"]["research"] = "draft"
+    if parent:
+        p["parent"] = parent
     save(p)
     return p
 
@@ -279,7 +360,7 @@ def load(pid: str) -> dict:
 
 def save(p: dict) -> dict:
     p["updated_at"] = now_iso()
-    f = project_dir(p["id"], create=True) / "project.json"
+    f = project_dir(p["id"], create=True, parent=p.get("parent")) / "project.json"
     with _lock:
         tmp = f.with_suffix(".tmp")
         tmp.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
@@ -297,7 +378,8 @@ def update(pid: str, fn) -> dict:
 
 def list_projects() -> list[dict]:
     out = []
-    for f in sorted(config.PROJECTS_DIR.glob("*/project.json"), reverse=True):
+    files = [*config.PROJECTS_DIR.glob("*/project.json"), *config.PROJECTS_DIR.glob("*/clips/*/project.json")]
+    for f in sorted(files, key=lambda f: f.parent.name, reverse=True):
         try:
             p = _migrate(json.loads(f.read_text(encoding="utf-8")))
             item = {k: p[k] for k in ("id", "title", "mode", "format", "current_stage",

@@ -11,6 +11,7 @@ from .services import (assets, audio_lib, batch, clipper, fonts, prompts, render
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
+store.nest_children()  # migrasi: video hasil Clipper lama → data/projects/<sumber>/clips/<id>/
 WEB = config.ROOT / "web"
 
 # UI di GitHub Pages (https://<user>.github.io) memanggil backend di laptop (http://127.0.0.1:8000)
@@ -155,18 +156,18 @@ def delete_project(pid: str, with_children: bool = False):
     """with_children: Clipper — ikut hapus video hasil (proyek anak). Tanpa itu anak jadi proyek mandiri."""
     _load(pid)
     kids = [q["id"] for q in store.list_projects() if q.get("parent") == pid]
-    shutil.rmtree(store.project_dir(pid), ignore_errors=True)
-    for k in kids:
+    for k in kids:  # video hasil ada di dalam folder sumber (clips/<id>) — pindahkan dulu bila dipertahankan
         if with_children:
             shutil.rmtree(store.project_dir(k), ignore_errors=True)
         else:
-            store.update(k, lambda q: (q.pop("parent", None), store.log(q, f"Proyek sumber {pid} dihapus")))
+            store.release_child(k, f"Proyek sumber {pid} dihapus")
+    shutil.rmtree(store.project_dir(pid), ignore_errors=True)
     return {"ok": True, "children": len(kids), "deleted_children": with_children}
 
 
 @app.post("/api/projects/{pid}/fork")
 def fork(pid: str, body: dict = Body(...)):
-    """Clipper: jadikan kandidat klip lain sebagai proyek baru (sumber & transkrip ikut disalin)."""
+    """Clipper: jadikan kandidat klip sebagai video hasil di dalam proyek sumber (video sumber dipakai bersama)."""
     _load(pid)
     return clipper.fork_clip(pid, int(body["clip_index"]))
 
@@ -469,7 +470,17 @@ def font_file(name: str):
 def media(pid: str, path: str):
     base = store.project_dir(pid).resolve()
     f = (base / path).resolve()
-    if not f.is_relative_to(base) or not f.is_file():
+    if not f.is_relative_to(base):
+        raise HTTPException(404)
+    if not f.is_file() and path.startswith("source/"):
+        # video hasil Clipper tidak punya salinan video sumber — sajikan milik proyek sumbernya
+        try:
+            src = store.source_file(store.load(pid))
+        except (FileNotFoundError, ValueError):
+            src = None
+        if src and src.is_file() and src.name == f.name:
+            f = src
+    if not f.is_file():
         raise HTTPException(404)
     return FileResponse(f)
 
