@@ -1,5 +1,6 @@
 """Jalur 2 (Clipper): transkrip Whisper -> pilih segmen viral -> potong tanpa memutus kalimat."""
 import threading
+import time
 
 from .. import config, store
 from . import ffmpeg_utils as ff
@@ -131,7 +132,8 @@ def snap(segments: list[dict], start: float, end: float) -> tuple[float, float]:
 
 
 CLIP_LIMITS = {"short": (20, 59), "long": (90, 600)}
-WINDOW_CHARS = 9000   # transkrip panjang dipecah per jendela agar tidak melewati batas token LLM gratis
+WINDOW_CHARS = 9000   # ukuran jendela minimum (karakter)
+WINDOW_MAX = 17000    # maks ±5rb token/permintaan: muat di kuota 8rb token/menit per model Groq gratis
 WINDOW_OVERLAP = 1500  # jendela bertumpuk supaya momen di perbatasan jendela tidak hilang
 # Bobot rubrik (diadaptasi dari Anil-matcha & openshorts): hook paling menentukan retensi Shorts.
 WEIGHTS = {"hook": 0.35, "alur": 0.25, "nilai": 0.25, "bagikan": 0.15}
@@ -157,13 +159,13 @@ def _fit_range(units: list[dict], a: int, b: int, lo: float, hi: float) -> tuple
     return a, b
 
 
-def _windows(units: list[dict]) -> list[tuple[int, int]]:
-    """Jendela [awal, akhir) berukuran ±WINDOW_CHARS yang saling tumpang ±WINDOW_OVERLAP karakter."""
+def _windows(units: list[dict], limit: int = WINDOW_CHARS) -> list[tuple[int, int]]:
+    """Jendela [awal, akhir) berukuran ±limit karakter yang saling tumpang ±WINDOW_OVERLAP karakter."""
     sizes = [len(u["text"]) + 20 for u in units]
     out, start = [], 0
     while start < len(units):
         end, size = start, 0
-        while end < len(units) and (size + sizes[end] <= WINDOW_CHARS or end == start):
+        while end < len(units) and (size + sizes[end] <= limit or end == start):
             size += sizes[end]
             end += 1
         out.append((start, end))
@@ -201,7 +203,11 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     words = _all_words(segs)
     dur = units[-1]["end"] - units[0]["start"]
     want = max(3, min(10, int(dur // 90) + 2))  # jumlah klip wajar sesuai panjang video
-    wins = _windows(units)
+    # Ukuran jendela menyesuaikan: sebisa mungkin 1 jendela per model Groq → semua dinilai bersamaan tanpa antre,
+    # dan instruksi prompt tidak diulang berkali-kali (hemat kuota token/menit).
+    lanes = len(llm.groq_models()) if config.GROQ_API_KEY else 1
+    total = sum(len(u["text"]) + 20 for u in units)
+    wins = _windows(units, int(min(WINDOW_MAX, max(WINDOW_CHARS, total * 1.15 / lanes))))
     per_win = max(3, min(6, -(-want * 2 // len(wins))))
     direction = params.get("direction") if params.get("direction") is not None else p["script"].get("direction") or ""
     raw, failed = _score_windows(pid, p, units, wins, title, per_win, direction, params.get("provider"), progress)
@@ -273,31 +279,60 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
     use_groq = (provider or config.LLM_PROVIDER).lower() == "groq" or (
         not provider and "groq" in config.LLM_FALLBACK_PROVIDERS and config.GROQ_API_KEY)
     models = llm.groq_models() if use_groq and config.GROQ_API_KEY else [None]
-    lanes = {m: [t for i, t in enumerate(todo) if models[i % len(models)] == m] for m in models}
-    done, errors, lock = [len(wins) - len(todo)], [], __import__("threading").Lock()
+    # Antrean bersama: model yang bebas langsung mengambil bagian berikutnya; model yang kena batas
+    # token/menit mengembalikan bagiannya ke antrean (diambil model lain) lalu istirahat sampai pulih.
+    import queue
+    import threading
+    q: "queue.Queue" = queue.Queue()
+    for t in todo:
+        q.put(t)
+    pending = [len(todo)]
+    done, errors, lock = [len(wins) - len(todo)], [], threading.Lock()
     parent_progress, parent_jid = getattr(jobs._local, "progress", None), getattr(jobs._local, "jid", None)
     progress(f"AI menilai {len(todo)} bagian video" + (f" paralel di {len(models)} model Groq…" if len(models) > 1 else "…"))
 
-    def lane(model, items):
+    def lane(model):
         jobs._local.progress, jobs._local.jid = parent_progress, parent_jid  # bar status & tombol Batalkan
-        for k, ws, we in items:
+        while True:
+            with lock:
+                if pending[0] <= 0:
+                    return
+            try:
+                k, ws, we = q.get(timeout=1)
+            except queue.Empty:
+                continue  # bagian sedang dikerjakan model lain (bisa dikembalikan bila kena batas)
             sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
                                             count=per_win, direction=direction)
             try:
                 # tanpa schema strict: jawaban panjang gpt-oss sering gagal validasi & membakar kuota token
                 got = llm.chat_json(sys_, usr, "groq" if model else provider, temperature=0.4,
-                                    groq_model=model, effort="low", fallback=model is None).get("clips", [])
-            except (llm.LLMError, Exception) as e:  # noqa: BLE001 — satu bagian gagal tidak menggagalkan semua
+                                    groq_model=model, effort="low", fallback=model is None,
+                                    max_wait=3 if model and len(models) > 1 else None).get("clips", [])
+            except llm.RateLimited as e:
+                q.put((k, ws, we))  # oper ke model lain
+                progress(f"AI menilai momen viral: {done[0]}/{len(wins)} bagian selesai — kuota gratis per menit "
+                         f"{e.model.split('/')[-1]} habis, sisa bagian dilanjutkan ±{e.wait:.0f} dtk lagi…")
+                for _ in range(int(e.wait) + 1):  # istirahat sampai kuota model ini pulih
+                    time.sleep(1)
+                    with lock:
+                        if pending[0] <= 0:
+                            return
+                continue
+            except Exception as e:  # noqa: BLE001 — satu bagian gagal tidak menggagalkan semua
                 if isinstance(e, jobs.JobCancelled):
+                    with lock:
+                        pending[0] = 0
                     raise
                 with lock:
                     errors.append(f"Bagian {k + 1}: {str(e)[:300]}")
+                    pending[0] -= 1
                 continue
             got = [c for c in got if isinstance(c, dict)]
             with lock:
                 raw.extend(got)
                 cache[key(ws, we)] = got
                 done[0] += 1
+                pending[0] -= 1
                 n = done[0]
 
             def save(pp, kk=key(ws, we), g=got):
@@ -306,7 +341,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
             progress(f"AI menilai momen viral: {n}/{len(wins)} bagian selesai…")
 
     with ThreadPoolExecutor(max_workers=len(models)) as ex:
-        futs = [ex.submit(lane, m, items) for m, items in lanes.items() if items]
+        futs = [ex.submit(lane, m) for m in models]
         for f in futs:
             f.result()
     # buang cache jendela yang sudah tidak dipakai (transkrip / arahan berubah)

@@ -19,6 +19,14 @@ class LLMError(RuntimeError):
     pass
 
 
+class RateLimited(LLMError):
+    """Model kena batas token/menit dan harus menunggu lebih lama dari max_wait (pemanggil boleh oper ke model lain)."""
+
+    def __init__(self, model: str, wait: float):
+        super().__init__(f"Groq {model}: batas per menit, pulih dalam {wait:.0f} dtk")
+        self.model, self.wait = model, wait
+
+
 def _configured(provider: str) -> bool:
     """Provider cadangan hanya dicoba kalau memang sudah disiapkan (API key terisi)."""
     return {"gemini": bool(config.GEMINI_API_KEY), "groq": bool(config.GROQ_API_KEY), "ollama": True}.get(provider, False)
@@ -39,7 +47,7 @@ INT = {"type": "integer"}
 
 def chat_json(system: str, user: str, provider: str | None = None, temperature: float = 0.8,
               schema: dict | None = None, groq_model: str | None = None, effort: str | None = None,
-              fallback: bool = True) -> dict:
+              fallback: bool = True, max_wait: float | None = None) -> dict:
     """schema (opsional): JSON schema strict → Groq menjamin bentuk jawaban (field & enum) valid.
     groq_model: model Groq yang dicoba pertama (tiap model punya kuota token/menit sendiri → tugas besar
     bisa dibagi ke beberapa model). effort: reasoning_effort gpt-oss (low/medium/high).
@@ -56,8 +64,10 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
         if errors:
             report(f"{PROVIDER_LABEL[chain[i - 1]]} gagal → beralih ke cadangan {PROVIDER_LABEL[name]}…")
         try:
-            raw = (_groq(system, user, temperature, schema, prefer=groq_model, effort=effort) if name == "groq"
-                   else providers[name](system, user, temperature, schema))
+            raw = (_groq(system, user, temperature, schema, prefer=groq_model, effort=effort, max_wait=max_wait)
+                   if name == "groq" else providers[name](system, user, temperature, schema))
+        except RateLimited:
+            raise  # pemanggil (mis. antrean paralel) yang memutuskan: oper ke model lain / tunggu
         except (LLMError, httpx.HTTPError) as e:
             errors.append(f"[{name}] {e}")
             continue
@@ -187,7 +197,7 @@ def groq_models() -> list[str]:
 
 
 def _groq(system: str, user: str, temperature: float, schema: dict | None = None,
-          prefer: str | None = None, effort: str | None = None) -> str:
+          prefer: str | None = None, effort: str | None = None, max_wait: float | None = None) -> str:
     if not config.GROQ_API_KEY:
         raise LLMError("GROQ_API_KEY belum diisi di .env (gratis di console.groq.com)")
     models = groq_models()
@@ -203,6 +213,8 @@ def _groq(system: str, user: str, temperature: float, schema: dict | None = None
             # 429 di Groq gratis biasanya batas token PER MENIT (pulih < 60 dtk) → tunggu lalu ulangi model
             # yang sama; ini lebih cepat & lebih baik daripada jatuh ke model lain yang juga kena batas.
             wait = _retry_after(r)
+            if r.status_code == 429 and max_wait is not None and idx == 0 and wait > max_wait:
+                raise RateLimited(model, min(wait, 60.0))
             if r.status_code == 429 and attempt < 3 and 0 < wait <= 60:
                 wait = max(wait, 3.0)  # header kadang "0.2s" → langsung coba lagi = kena 429 lagi
                 report(f"Groq {model}: batas token per menit tercapai — menunggu {wait:.0f} dtk lalu mencoba lagi…")
