@@ -1723,6 +1723,12 @@ function renderClipSource() {
   }
 }
 
+// Layar penuh: video selalu tampil utuh (9:16 tetap 9:16), walau di kartu dipotong "cover".
+['fullscreenchange', 'webkitfullscreenchange'].forEach((ev) => document.addEventListener(ev, () => {
+  const fs = document.fullscreenElement || document.webkitFullscreenElement;
+  document.querySelectorAll('video').forEach((v) => { v.style.objectFit = v === fs ? 'contain' : ''; });
+}));
+
 function clipCard(c) {
   const src = c.output ? U(`/media/${c.id}/${c.output}`) : '';
   const poster = c.thumb ? U(`/media/${c.id}/${c.thumb}`) : undefined;
