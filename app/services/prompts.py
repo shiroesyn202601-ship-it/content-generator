@@ -36,6 +36,209 @@ Balas JSON:
     return system, user
 
 
+# ---------------------------------------------------------------- Ide & narasi (meniru tab "Generate Narasi"
+# di repo test-google-ai-studio). Template ide bisa diedit kreator di UI; format JSON ditambahkan kode.
+IDEA_TEMPLATE = """Buatkan saya {numberOfIdeas} ide judul dan tema untuk video berdurasi {videoDuration} detik dengan topik {viralTopic}.
+Hasilkan dalam format JSON dengan struktur berupa array of objects, di mana setiap object memiliki properti berikut:
+
+"nomor" → nomor urut ide (number)
+
+"judul" → judul video yang singkat, padat, jelas, dan clickbait (maksimal sekitar 8–12 kata)
+
+"deskripsi" → penjelasan singkat yang relevan dengan topik video, menggambarkan isi atau pesan utama secara ringkas dan mengundang rasa penasaran penonton
+
+Pastikan:
+
+Judul harus menarik secara emosional, bisa memicu rasa penasaran, kaget, atau ingin tahu lebih lanjut.
+
+Hindari kalimat yang terlalu panjang, ambigu, atau bertele-tele.
+
+Gunakan gaya bahasa natural dan engaging, cocok untuk judul dan deskripsi YouTube Shorts atau video pendek.
+
+Semua hasil dalam bahasa Indonesia."""
+
+TEMPLATE_LABEL = {"fakta": "Fakta Menarik", "tragedi": "Tragedi", "kisah-hidup": "Kisah Hidup", "custom": "Custom"}
+
+
+def ideas_from_template(template: str, topic: str, count: int, duration: int, existing: list[str],
+                        yt_context: list[dict], suggestions: list[str]) -> tuple[str, str]:
+    body = ((template or IDEA_TEMPLATE).replace("{numberOfIdeas}", str(count))
+            .replace("{videoDuration}", str(duration)).replace("{viralTopic}", topic))
+    if existing:
+        body += ("\n\nPENTING: Buat ide BARU. Jangan membuat ulang ide dengan judul yang mirip dengan yang ada di "
+                 "daftar ini:\n- " + "\n- ".join(existing))
+    trend = bool(yt_context or suggestions)
+    if trend:
+        def line(v):
+            s = f"- {v['title']} ({v.get('views') or '?'} views"
+            if v.get("views_per_day") is not None:
+                s += f", umur {v['age_days']} hari, ±{v['views_per_day']:,.0f} views/hari"
+            return s + ")"
+        body += "\n\nKonteks riset (video populer di YouTube untuk topik ini — cari angle/celah yang BERBEDA):\n"
+        body += "\n".join(line(v) for v in yt_context[:15]) or "(tidak ada)"
+        if suggestions:
+            body += "\n\nYang sedang dicari orang di YouTube (autocomplete):\n" + "\n".join(f"- {s}" for s in suggestions)
+    fmt = ('{"insight": "ringkasan pola konten populer & celah yang bisa diisi", ' if trend else '{') + \
+        '"ideas": [{"nomor": 1, "judul": "...", "deskripsi": "...", ' \
+        '"hook": "teks hook thumbnail 7-10 kata, clickbait, bikin penasaran, tanpa typo"}]}'
+    system = ("Kamu kreator & periset konten YouTube Indonesia yang jago membuat ide viral. "
+              f"Balas HANYA JSON object dengan bentuk: {fmt}. Jumlah ide tepat {count}.")
+    return system, body
+
+
+def narration_prompt(template: str, title: str, desc: str, duration: int, wmin: int, wmax: int) -> str:
+    """Prompt narasi persis gaya repo referensi; jumlah kata dihitung dari kecepatan suara proyek."""
+    topik = f"{title} - {desc}".strip(" -")
+    if template == "tragedi":
+        return f"""Tulis sebuah narasi tragedi dengan gaya dokumenter jurnalistik.
+Gunakan bahasa Indonesia yang padat, lugas, dan berjarak emosional.
+Tulisan harus terasa seperti laporan naratif yang bisa dibacakan oleh narator dokumenter,
+bukan seperti cerita atau opini pribadi.
+
+🎯 TUJUAN:
+Membuat narasi tragedi berdasarkan fakta-fakta yang banyak diberitakan oleh media berita nasional atau internasional.
+Narasi harus membangun tensi dan rasa berat melalui data, kronologi, dan fakta nyata — bukan melalui bahasa emosional.
+
+TOPIK:
+{topik}
+
+
+📘 GAYA PENULISAN:
+Gunakan nada objektif, tenang, dan dokumenter.
+Hindari kalimat puitis, reflektif, atau moralistik.
+Gunakan kalimat yang jelas
+Gunakan ritme: kalimat panjang (penjelasan) → kalimat pendek (penegasan).
+Pilih kata konkret: “terbakar”, “menghantam”, “meledak”, “lenyap”, “tergelincir”.
+Hindari kata abstrak seperti “kerapuhan”, “air mata”, atau “harapan”.
+Gunakan penanda waktu alami seperti: “pagi itu”, “beberapa menit kemudian”, “tak lama setelah itu”.
+Hindari elipsis (...), tanda seru, dan pertanyaan retoris.
+Bangun ketegangan melalui urutan fakta, bukan gaya bahasa.
+
+🏗️ STRUKTUR PENULISAN:
+Paragraf 1 – Fakta Utama
+Kalimat pertama wajib dimulai dengan: “Inilah tragedi [nama tragedi].” dilanjut dengan penjelasan singkat.
+Lanjutkan 2–3 kalimat fakta konkret: lokasi, jumlah korban, dan hal unik dari kejadian.
+Hindari opini atau emosi.
+bagian ini adalah hook jadi buat se-menarik mungkin
+
+Paragraf 2–4 – Kronologi Kejadian
+sebutkan waktu kejadian,
+Jelaskan peristiwa secara linier dari awal hingga puncak tragedi.
+Gunakan waktu spesifik dan alur bergerak maju.
+Gunakan kalimat faktual yang menggambarkan urutan dengan jelas.
+
+Paragraf 5 – Dampak dan Korban
+Cantumkan jumlah korban tewas, hilang, dan selamat.
+Tambahkan fakta unik atau penting (misalnya korban pejabat, warga sipil di lokasi, atau anak-anak).
+Hindari kalimat emosional.
+
+Paragraf 6–7 – Penyelidikan atau Kejanggalan
+Jelaskan hasil penyelidikan resmi, teori penyebab, atau fakta teknis.
+Jika ada versi berbeda, tulis dengan netral: “Laporan lain menyebut...” atau “Penyebab pastinya masih belum jelas.”
+Hindari opini atau spekulasi moral.
+
+Paragraf 8 – Penutup
+Gunakan satu kalimat pendek dan datar untuk menutup.
+Contoh pola: “Hingga kini, tragedi ini masih dikenang sebagai salah satu yang paling kelam dalam sejarah.”
+Jangan menambahkan ajakan emosional atau kesimpulan moral.
+
+
+🧩 ATURAN TAMBAHAN:
+Gunakan fakta-fakta yang umum diberitakan di media utama.
+Hindari menambah detail yang tidak bisa diverifikasi.
+Gunakan tanda titik untuk mengakhiri hampir semua kalimat.
+Setiap paragraf maksimal 3–6 kalimat.
+Hindari repetisi dan kalimat pengisi.
+Pastikan narasi utama berada dalam rentang 1.400–1.700 karakter termasuk spasi, tidak boleh kurang atau lebih.
+
+🎯 FOKUS AKHIR:
+Teks harus terasa seperti naskah voice-over dokumenter tragedi.
+Nada harus datar, faktual, dan menggugah lewat data, bukan emosi.
+Bangun ketegangan perlahan melalui kronologi, dan akhiri dengan kalimat sunyi yang menandakan peringatan."""
+    if template == "kisah-hidup":
+        return f"""Buatkan saya cerita pendek dari tema: "{topik}". Cerita harus maksimal {wmin}–{wmax} kata, intens, bikin nagih, dan penuh emosi seperti karya manusia yang cocok untuk video pendek, konten storytelling, atau narasi dramatis berdurasi maksimal {duration} detik dengan struktur format:
+
+HOOK (Kalimat pertama – maksimal 2 kalimat) Buat pembuka yang nge-hook, bisa berupa pertanyaan mencurigakan, pernyataan aneh, atau situasi ekstrem.
+
+KONFLIK (isi tengah) Bangun ketegangan secara bertahap. Fokus pada emosi, tindakan dan dilema. Buat pembaca merasa seperti didalam cerita. Gunakan kalimat pendek dan ritme yang cepat jika ingin membangun intensitas.
+
+TWIST Ubah arah cerita dengan cara tak terduga. Hindari ending klise. Lebih baik jika pembaca harus membacanya dua kali untuk benar-benar paham.
+
+CTA (Call to Action & Pertanyaan Interaktif - 1 kalimat di akhir) Ajak penonton untuk berinteraksi. Ini penting untuk meningkatkan engagement. Buat pertanyaan singkat yang memancing diskusi atau komentar terkait cerita.
+Contoh: "Gimana menurutmu, apakah Edith pantas jadi pahlawan?" atau "Kira-kira cerita apalagi yang bikin kamu penasaran? Coba komen di bawah!". SUARA PENULIS/NUANSA (optional) Tambahkan gaya bahasa unik, nyeleneh atau puitis untuk memberi “rasa manusia”.
+
+Aturan tambahan: Gunakan bahasa Indonesia yang hidup dan santai. Hindari terlalu baku. Cerita harus punya ketegangan emosional tinggi (tekanan batin, rahasia besar, pertaruhan hidup mati, dll). Gunakan format 3 paragraf atau maksimal 6 baris."""
+    return f"""Buatkan naskah video short dengan topik: "{topik}".
+Naskah berdurasi {duration} detik dengan jumlah kata {wmin}–{wmax}.
+
+Ketentuan naskah:
+- Gaya storytelling singkat, padat, dan memikat sejak awal.
+- Gunakan bahasa dramatis, informatif, dan misterius, seolah membuka “tabir rahasia”
+- Sertakan kalimat retoris atau pertanyaan yang memancing rasa penasaran.
+- Suasana harus intens, bikin nagih, dan penuh emosi seperti karya manusia yang cocok untuk video pendek
+- output nya berupa naskah tanpa keterangan apapun
+
+Struktur alur cerita:
+1. HOOK: berupa pertanyaan, pernyataan ekstrem, fakta dari hal yang akan di bahas
+
+2. KONFLIK & VALUE:
+   Bangun ketegangan secara bertahap. buat pembaca merasa seperti didalam cerita. Gunakan kalimat pendek dan ritme yang cepat, buat supaya pendengar merasa masuk kedalam cerita ini
+
+3. TWIST / RAHASIA LEBIH DALAM: Sajikan plot twist atau lapisan misteri kedua.
+
+4. CALL TO ACTION & Pertanyaan Interaktif - 1 kalimat di akhir
+   Ajak penonton untuk berinteraksi. Ini penting untuk meningkatkan engagement.
+   HAL YANG WAJIB Hindari mengajak like atau subscribe channel ini
+   Buat pertanyaan singkat yang memancing diskusi atau komentar terkait cerita.
+   Contoh: "Gimana menurutmu, apakah Edith pantas jadi pahlawan?" atau
+   "Kira-kira cerita apalagi yang bikin kamu penasaran? Coba komen di bawah!"""
+
+
+NARRATION_SYSTEM = ("Kamu penulis naskah voice over untuk kreator YouTube Shiroe Syn. Ikuti instruksi pengguna "
+                    "persis. Teks narasi adalah yang DIBACAKAN narator: tanpa judul, label bagian (HOOK/KONFLIK/…), "
+                    "nomor, emoji, atau keterangan apa pun. Pisahkan paragraf dengan baris kosong. "
+                    'Balas HANYA JSON: {"narasi": "teks narasi lengkap", "hook": "satu kalimat hook thumbnail '
+                    'maks 7-10 kata, clickbait, bikin penasaran, tanpa typo, tanpa tanda kutip"}')
+
+
+def narration_sources(sources_text: str) -> str:
+    if not sources_text:
+        return ""
+    return f"""
+
+SUMBER FAKTA (Wikipedia). Angka, tahun, nama, lokasi, dan superlatif HANYA boleh diambil dari sumber ini.
+Kalau sumber tidak menyebutnya, jangan tulis (atau pakai bahasa umum yang pasti benar). Jangan menambah fakta.
+---
+{sources_text}
+---"""
+
+
+def split_narration(sentences: list[str], title: str, fmt: str) -> tuple[str, str]:
+    """AI hanya memilih batas scene (nomor kalimat) + anotasi; teks disusun ulang oleh kode → narasi tidak berubah."""
+    lines = "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences))
+    n = "4-9 scene" if fmt == "short" else "10-24 scene"
+    system = "Kamu sutradara video pendek. Kamu memecah narasi jadi scene visual & memberi arahan produksi."
+    user = f"""Judul video: "{title}". Narasi per KALIMAT bernomor:
+{lines}
+
+Bagi narasi menjadi {n} berurutan. Tiap scene = 1-3 kalimat berurutan; "start" = nomor kalimat pertama scene
+(scene pertama start 0, start harus naik). JANGAN menulis ulang narasinya.
+Untuk tiap scene isi:
+- "role": hook, setup, eskalasi, twist, payoff, atau loop.
+- "emphasis": 1-2 kata (persis seperti di kalimat) yang paling penting untuk ditekankan di subtitle & intonasi.
+- "emotion": salah satu {list(EMOTION_VOICE)}. "mood" musik: salah satu {MOODS}.
+- "visual_query": 2-4 kata BAHASA INGGRIS untuk stock footage — apa yang TERLIHAT (benda/tempat/suasana),
+  bukan nama tokoh/peristiwa; jaga budaya, lokasi & era topik.
+- "sfx": whoosh, boom, ding, riser, click, heartbeat, atau "".
+- "on_screen_text": hanya scene pertama, maks 5 kata kapital yang memperkuat hook; scene lain "".
+- "sources": [].
+Juga ringkas kerangka cerita di "framework" (hook, konflik, eskalasi = twist/rahasia lebih dalam, payoff, cta).
+Balas JSON: {{"title": "{title}", "framework": {{"hook": "...", "konflik": "...", "eskalasi": "...", "payoff": "...",
+"cta": "..."}}, "scenes": [{{"start": 0, "role": "hook", "emphasis": ["..."], "on_screen_text": "...",
+"emotion": "...", "mood": "...", "visual_query": "...", "sfx": "", "sources": []}}]}}"""
+    return system, user
+
+
 FACT_RULES = """ATURAN AKURASI (WAJIB):
 - Hanya tulis fakta yang kamu yakini benar & umum diketahui. JANGAN mengarang angka, tahun, nama penemu,
   lokasi temuan, atau superlatif ("terbesar", "pertama", "satu-satunya") yang tidak kamu yakini.

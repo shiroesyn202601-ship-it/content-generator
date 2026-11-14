@@ -160,6 +160,20 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       (klik ulang hanya jendela yang gagal) + `script.clip_note`. Video 50 mnt: ±45 dtk (dulu 4+ mnt / gagal).
     - Belum: deteksi pembicara aktif + layout split, sinyal audio lokal, subtitle YouTube sebagai transkrip.
 
+13. **15 Nov 2026 — Ide & Naskah meniru tab "Generate Narasi"** (repo `test-google-ai-studio`, `NarrationGenerator.tsx`):
+    - Tahap 1 (Dari Nol): topik utama, jumlah ide (default 20), target durasi (detik), template prompt ide yang bisa
+      diedit (`prompts.IDEA_TEMPLATE`, variabel `{numberOfIdeas}` `{videoDuration}` `{viralTopic}`), riset tren YouTube
+      opsional sebagai konteks. Ide = `{title, description, hook, released}`; "Tambah ide baru" (judul lama dikecualikan),
+      impor/unduh JSON (format sama dengan repo referensi), tampilan Excel + salin TSV, filter sudah/belum release,
+      hapus terpilih, produksi massal memakai template narasi pilihan (`research.narr_template`).
+    - Tahap 2: aksi `script.narrate` — template Fakta Menarik / Tragedi / Kisah Hidup / Custom (`prompts.narration_prompt`,
+      teks prompt disalin dari referensi) → `script.narration` + `script.hook_text`, lalu otomatis `script.split`:
+      AI hanya memilih nomor kalimat awal tiap scene + anotasi (emosi/mood/visual/SFX/penekanan), teks scene disusun
+      kode dari kalimat narasi → narasi tidak diubah AI. Modal "Lihat prompt" (`POST /api/projects/{id}/narration-prompt`).
+    - Beda dengan referensi: jumlah kata dihitung dari kecepatan suara proyek (`scriptgen.word_range`), bukan 3.5–4.2
+      kata/dtk (Edge-TTS Indonesia hanya ±2–2.5 kata/dtk → 50 dtk ≈ 92–109 kata). Fakta/Tragedi tetap bisa memakai
+      sumber Wikipedia + cek fakta.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

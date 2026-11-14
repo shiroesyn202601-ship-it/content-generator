@@ -7,8 +7,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, clipper, render, research, scriptgen, story, subtitles, sync,
-                       thumbs, tts, youtube)
+from .services import (assets, audio_lib, batch, clipper, prompts, render, research, scriptgen, story, subtitles,
+                       sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
 WEB = config.ROOT / "web"
@@ -67,6 +67,8 @@ ACTIONS = {
     "research.batch":      (batch.produce, "research", True),
     "script.generate":     (scriptgen.generate, "script", True),
     "script.factcheck":    (scriptgen.factcheck, "script", True),
+    "script.narrate":      (scriptgen.narrate, "script", True),
+    "script.split":        (scriptgen.split, "script", True),
     "script.transcribe":   (clipper.transcribe, "script", True),
     "script.find_clips":   (clipper.find_clips, "script", True),
     "assets.search":       (assets.search_scene, "assets", True),
@@ -106,7 +108,8 @@ def meta():
             "llm": config.LLM_PROVIDER,
             "keys": {"pexels": bool(config.PEXELS_API_KEY), "pixabay": bool(config.PIXABAY_API_KEY),
                      "pollinations": bool(config.POLLINATIONS_KEY)},
-            "story_styles": story.STYLE_LABEL}
+            "story_styles": story.STYLE_LABEL,
+            "idea_template": prompts.IDEA_TEMPLATE, "narr_templates": prompts.TEMPLATE_LABEL}
 
 
 @app.get("/api/health")
@@ -160,6 +163,22 @@ def fork(pid: str, body: dict = Body(...)):
     p["stage_status"].update({"research": "approved", "script": "draft"})
     store.log(p, f"Fork dari {pid}, klip {clip['id']}")
     return store.save(p)
+
+
+@app.post("/api/projects/{pid}/narration-prompt")
+def narration_prompt(pid: str, body: dict = Body(default={})):
+    """Pratinjau prompt narasi (modal 'Opsi Prompt Cerita') untuk template & durasi tertentu."""
+    p = _load(pid)
+    tpl = body.get("template") or "fakta"
+    secs = scriptgen.duration_of(p, body)
+    wmin, wmax = scriptgen.word_range(p, secs)
+    if tpl not in scriptgen.NARR_TEMPLATES or tpl == "custom":
+        tpl = "fakta"
+    try:
+        prompt = scriptgen.build_narration_prompt(p, tpl, secs)
+    except RuntimeError as e:
+        raise HTTPException(409, str(e))
+    return {"prompt": prompt, "words": [wmin, wmax], "duration": secs}
 
 
 # ---------- gerbang Human-in-the-Loop ----------

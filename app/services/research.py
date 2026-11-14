@@ -75,30 +75,67 @@ def autocomplete(keyword: str, lang: str = "id") -> list[str]:
         return []
 
 
-def generate_ideas(pid: str, params: dict, progress) -> dict:
-    p = store.load(pid)
-    keyword = (params.get("keyword") or p["research"].get("keyword") or p["title"]).strip()
-    progress(f"Riset: mencari video populer di YouTube untuk '{keyword}'…")
-    competitors = youtube_search(keyword)
-    if competitors and params.get("trends", True):
-        competitors = enrich_trends(competitors, progress=progress)
-    progress("Riset: mengambil saran pencarian YouTube (yang sedang dicari orang)…")
-    suggestions = autocomplete(keyword, p["language"])
-    progress(f"Riset selesai: {len(competitors)} video pembanding, {len(suggestions)} saran pencarian. "
-             "Menyiapkan bahan untuk AI…" if competitors else
-             "Riset YouTube tidak menemukan hasil — AI menyusun ide tanpa pembanding…")
-    sys_, usr = prompts.ideas(keyword, p["format"], p["language"], competitors, suggestions)
-    res = llm.chat_json(sys_, usr, params.get("provider"))
-    progress(f"Menyimpan {len(res.get('ideas', []))} ide ke proyek…")
+def default_duration(p: dict) -> int:
+    return int(p["research"].get("duration") or (50 if p["format"] == "short" else 480))
 
-    def apply(p):
-        p["research"].update({"keyword": keyword, "competitors": competitors, "suggestions": suggestions,
-                              "insight": res.get("insight", ""), "ideas": res.get("ideas", []),
-                              "selected": None})
-        store.touch_stage(p, "research")
-        store.log(p, f"AI: {len(res.get('ideas', []))} ide untuk '{keyword}'")
+
+def _clean_idea(it: dict) -> dict | None:
+    if not isinstance(it, dict):
+        return None
+    title = str(it.get("judul") or it.get("title") or "").strip()
+    if not title:
+        return None
+    desc = str(it.get("deskripsi") or it.get("description") or it.get("angle") or "").strip()
+    hook = str(it.get("hook") or "").strip().strip('"*')
+    return {"title": title, "description": desc, "hook": hook or title,
+            "keywords": [str(k) for k in (it.get("keywords") or []) if k][:10]}
+
+
+def generate_ideas(pid: str, params: dict, progress) -> dict:
+    """Generator ide gaya tab "Generate Narasi": template prompt yang bisa diedit + {numberOfIdeas},
+    {videoDuration}, {viralTopic}. append=True → "Tambah ide baru" (judul lama dikecualikan)."""
+    p = store.load(pid)
+    r = p["research"]
+    keyword = (params.get("keyword") or r.get("keyword") or p["title"]).strip()
+    count = max(1, min(50, int(params.get("count") or r.get("idea_count") or 20)))
+    duration = int(params.get("duration") or default_duration(p))
+    template = params.get("template") if params.get("template") is not None else r.get("idea_template")
+    append = bool(params.get("append"))
+    trends = params.get("trends", r.get("use_trends", True))
+    old = list(r.get("ideas") or []) if append else []
+    competitors, suggestions = (r.get("competitors") or [], r.get("suggestions") or []) if append else ([], [])
+    if trends and not append:
+        progress(f"Riset: mencari video populer di YouTube untuk '{keyword[:60]}'…")
+        competitors = youtube_search(keyword[:100])
+        if competitors:
+            competitors = enrich_trends(competitors, progress=progress)
+        progress("Riset: mengambil saran pencarian YouTube (yang sedang dicari orang)…")
+        suggestions = autocomplete(keyword[:100], p["language"])
+    progress(f"AI membuat {count} ide{' baru' if append else ''} untuk video {duration} detik…")
+    sys_, usr = prompts.ideas_from_template(template, keyword, count, duration,
+                                            [i.get("title", "") for i in old], competitors if trends else [],
+                                            suggestions if trends else [])
+    res = llm.chat_json(sys_, usr, params.get("provider"), temperature=0.9)
+    raw = res.get("ideas") if isinstance(res, dict) else res
+    new = [x for x in (_clean_idea(i) for i in (raw or [])) if x]
+    if not new:
+        raise RuntimeError("AI tidak mengembalikan ide. Coba lagi atau sederhanakan template prompt.")
+    progress(f"Menyimpan {len(new)} ide ke proyek…")
+
+    def apply(q):
+        rr = q["research"]
+        rr.update({"keyword": keyword, "idea_count": count, "duration": duration, "use_trends": bool(trends)})
+        if params.get("template") is not None:
+            rr["idea_template"] = template
+        if append:
+            rr["ideas"] = (rr.get("ideas") or []) + new
+        else:
+            rr.update({"ideas": new, "selected": None, "competitors": competitors, "suggestions": suggestions,
+                       "insight": res.get("insight", "") if isinstance(res, dict) else ""})
+        store.touch_stage(q, "research")
+        store.log(q, f"AI: {len(new)} ide{' tambahan' if append else ''} untuk '{keyword[:60]}'")
     store.update(pid, apply)
-    return {"count": len(res.get("ideas", []))}
+    return {"count": len(new)}
 
 
 def download_source(pid: str, params: dict, progress) -> dict:

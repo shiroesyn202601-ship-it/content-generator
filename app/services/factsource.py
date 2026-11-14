@@ -40,7 +40,7 @@ def _queries(topic: str, idea: dict) -> dict:
     try:
         res = llm.chat_json(
             "Kamu peneliti yang mencari artikel Wikipedia paling relevan.",
-            f"""Topik video: "{topic}". Ide: {idea.get('title', '')} — {idea.get('angle', '')}
+            f"""Topik video: "{topic}". Ide: {idea.get('title', '')} — {idea.get('description') or idea.get('angle', '')}
 Beri 2 kata kunci pencarian Wikipedia bahasa Indonesia dan 2 bahasa Inggris (nama tempat/tokoh/peristiwa/
 istilah inti, BUKAN kalimat). Balas JSON: {{"id": ["...", "..."], "en": ["...", "..."]}}""", temperature=0.2)
         return {"id": [q for q in res.get("id", []) if isinstance(q, str)][:2],

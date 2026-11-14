@@ -1,4 +1,6 @@
-"""Tahap 2 (scratch): kerangka cerita + naskah per scene dengan penanda emosi."""
+"""Tahap 2 (scratch): narasi (template ala tab Generate Narasi) -> scene dengan penanda emosi."""
+import re
+
 from .. import store
 from ..store import EMOTION_VOICE, MOODS
 from . import factsource, llm, prompts
@@ -57,12 +59,12 @@ VOICE_WPS = {"id-ID-ArdiNeural": 2.5, "id-ID-GadisNeural": 2.0}
 TARGET_SEC = {"short": 50, "long": 480}  # Shorts: sisakan ruang di bawah 60 dtk untuk jeda & ekor
 
 
-def word_budget(p: dict) -> int:
+def word_budget(p: dict, seconds: int | None = None) -> int:
     """Jumlah kata maksimum supaya VO pas target durasi: T = kata/(wps*speed) + (kata/9 kalimat)*jeda."""
     v = p["voice"]
     wps = VOICE_WPS.get(v.get("voice"), 2.2) * float(v.get("speed", 1.0))
     per_word = 1 / wps + (int(v.get("pause_ms", 350)) / 1000) / 9
-    return int(TARGET_SEC[p["format"]] / per_word)
+    return int((seconds or TARGET_SEC[p["format"]]) / per_word)
 
 
 def _count_words(scenes: list[dict]) -> int:
@@ -114,7 +116,7 @@ def factcheck(pid: str, params: dict, progress) -> dict:
     scenes = p["script"].get("scenes") or []
     if not scenes:
         raise RuntimeError("Naskah masih kosong.")
-    idea = p["research"]["ideas"][p["research"]["selected"]] if p["research"].get("selected") is not None else {}
+    idea = _idea(p) if p["research"].get("selected") is not None else {}
     sources = _sources(p, idea, params, progress)
     claims = run_factcheck(scenes, sources, params.get("provider"), progress)
 
@@ -131,54 +133,158 @@ def _claims_summary(claims: list[dict]) -> str:
     return f"{n['didukung']} didukung, {n['tanpa_sumber']} tanpa sumber, {n['bertentangan']} bertentangan"
 
 
-def generate(pid: str, params: dict, progress) -> dict:
+NARR_TEMPLATES = ("fakta", "tragedi", "kisah-hidup", "custom")
+SPLIT_SCHEMA = llm.strict({
+    "title": llm.STR,
+    "framework": llm.strict({k: llm.STR for k in ("hook", "konflik", "eskalasi", "payoff", "cta")}),
+    "scenes": llm.arr(llm.strict({
+        "start": llm.INT, "role": {"type": "string", "enum": list(ROLES)}, "emphasis": llm.arr(llm.STR),
+        "on_screen_text": llm.STR, "emotion": {"type": "string", "enum": list(EMOTION_VOICE)},
+        "mood": {"type": "string", "enum": list(MOODS)}, "visual_query": llm.STR, "sfx": llm.STR,
+        "sources": llm.arr(llm.STR)}))})
+
+
+def _idea(p: dict) -> dict:
+    sel = p["research"].get("selected")
+    ideas = p["research"].get("ideas") or []
+    if sel is None or not (0 <= sel < len(ideas)):
+        raise RuntimeError("Belum ada ide terpilih di tahap 1.")
+    return ideas[sel]
+
+
+def duration_of(p: dict, params: dict | None = None) -> int:
+    d = (params or {}).get("duration") or p["script"].get("narr_duration") or p["research"].get("duration")
+    return int(d or (50 if p["format"] == "short" else 480))
+
+
+def word_range(p: dict, seconds: int) -> tuple[int, int]:
+    """Rentang kata untuk durasi target, dari kecepatan suara proyek (bukan angka tetap 3.5-4.2 kata/dtk,
+    karena Edge-TTS Indonesia hanya +-2-2.5 kata/dtk -> naskah tidak melewati 60 dtk Shorts)."""
+    mx = word_budget(p, seconds)
+    return int(mx * 0.85), mx
+
+
+def build_narration_prompt(p: dict, template: str, seconds: int) -> str:
+    idea = _idea(p)
+    wmin, wmax = word_range(p, seconds)
+    return prompts.narration_prompt(template, idea.get("title", ""), idea.get("description") or idea.get("angle", ""),
+                                    seconds, wmin, wmax)
+
+
+def sentences(text: str) -> list[str]:
+    """Pecah narasi jadi kalimat (paragraf juga jadi batas)."""
+    out = []
+    for para in re.split(r"\n", text or ""):
+        out += [s.strip() for s in re.split(r"(?<=[.!?…])\s+", para.strip()) if s.strip()]
+    return out
+
+
+def _mark(text: str, words: list[str]) -> str:
+    for w in words[:2]:
+        w = (w or "").strip(" *")
+        if not w or f"*{w}" in text:
+            continue
+        m = re.search(r"(?<![\w*])" + re.escape(w) + r"(?![\w*])", text, re.I)
+        if m:
+            text = text[:m.start()] + f"*{m.group(0)}*" + text[m.end():]
+    return text
+
+
+def split(pid: str, params: dict, progress) -> dict:
+    """Aksi 'Pecah jadi scene': narasi (teks utuh) -> scene + emosi/mood/visual/SFX. Teks narasi TIDAK diubah:
+    AI hanya memilih nomor kalimat awal tiap scene, kalimat disusun ulang oleh kode."""
     p = store.load(pid)
-    idea = p["research"]["ideas"][p["research"]["selected"]]
-    budget = word_budget(p)
-    sources = _sources(p, idea, params, progress)
-    src_text = factsource.as_prompt(sources)
-    progress(f"Menulis naskah dari ide '{idea.get('title', '')}' (target ≤{budget} kata"
-             + (f", berdasarkan {len(sources)} sumber)…" if sources else ", tanpa sumber)…"))
-    sys_, usr = prompts.script(idea, p["format"], p["language"], p["voice"]["preset"], budget, src_text)
-    # Temperature rendah: naskah edukasi butuh akurasi, bukan kreativitas liar (mengurangi fakta karangan).
-    res = llm.chat_json(sys_, usr, params.get("provider"), temperature=0.4, schema=SCRIPT_SCHEMA)
-    n = _count_words(res.get("scenes", []))
-    if n < budget * 0.65:
-        progress(f"Naskah hanya {n} kata (target {int(budget * 0.8)}-{budget}) — AI mengembangkan isinya…")
-        sys2, usr2 = prompts.expand_script(res, int(budget * 0.8), budget, src_text)
-        try:
-            longer = llm.chat_json(sys2, usr2, params.get("provider"), temperature=0.4, schema=SCENES_SCHEMA)
-            if longer.get("scenes") and n < _count_words(longer["scenes"]) <= budget * 1.1:
-                res = {**res, **longer}
-                n = _count_words(res["scenes"])
-        except llm.LLMError as e:
-            progress(f"Gagal mengembangkan naskah ({e}) — dipakai apa adanya.")
-    if n > budget * 1.1:
-        progress(f"Naskah {n} kata (> {budget}) — AI memadatkan supaya durasi pas…")
-        sys2, usr2 = prompts.shorten_script(res, budget)
-        try:
-            shorter = llm.chat_json(sys2, usr2, params.get("provider"), temperature=0.3, schema=SCENES_SCHEMA)
-            if shorter.get("scenes") and _count_words(shorter["scenes"]) < n:
-                res = {**res, **shorter}
-        except llm.LLMError as e:
-            progress(f"Gagal memadatkan ({e}) — naskah dipakai apa adanya.")
-    progress("Merapikan naskah menjadi scene…")
-    scenes = normalize_scenes([{**s, "id": f"s{i + 1}"} for i, s in enumerate(res.get("scenes", []))])
+    narr = (p["script"].get("narration") or "").strip()
+    if not narr:
+        raise RuntimeError("Narasi masih kosong.")
+    sents = sentences(narr.replace("*", ""))
+    title = p["script"].get("title") or _idea(p).get("title", p["title"])
+    progress(f"AI memecah narasi ({len(sents)} kalimat) menjadi scene + arahan visual, emosi, musik…")
+    sys_, usr = prompts.split_narration(sents, title, p["format"])
+    res = llm.chat_json(sys_, usr, params.get("provider"), temperature=0.3, schema=SPLIT_SCHEMA)
+    raw = [s for s in (res.get("scenes") or []) if isinstance(s, dict)]
+    # Batas scene: start naik & unik, scene pertama mulai dari kalimat 0, sisa kalimat ikut scene terakhir.
+    marks, seen = [], set()
+    for s in sorted(raw, key=lambda s: int(s.get("start") or 0)):
+        st = max(0, min(len(sents) - 1, int(s.get("start") or 0)))
+        if st not in seen:
+            seen.add(st)
+            marks.append((st, s))
+    if not marks:
+        marks = [(i, {}) for i in range(0, len(sents), 2)]
+    if marks[0][0] != 0:
+        marks[0] = (0, marks[0][1])
+    scenes = []
+    for k, (st, s) in enumerate(marks):
+        en = marks[k + 1][0] if k + 1 < len(marks) else len(sents)
+        text = _mark(" ".join(sents[st:en]), [str(w) for w in (s.get("emphasis") or [])])
+        scenes.append({**{x: s.get(x) for x in ("role", "emotion", "mood", "visual_query", "sfx", "on_screen_text",
+                                                 "sources")}, "id": f"s{k + 1}", "text": text})
+    scenes = normalize_scenes(scenes)
     claims = []
-    if params.get("factcheck", True):
+    sources = (p["research"].get("sources") or []) if p["research"].get("sources_for") == _idea(p).get("title") else []
+    if params.get("factcheck", True) and p["script"].get("narr_template") in ("fakta", "tragedi") and sources:
         try:
             claims = run_factcheck(scenes, sources, params.get("provider"), progress)
         except llm.LLMError as e:
             progress(f"Cek fakta gagal ({e}) — bisa diulang dengan tombol Cek Fakta.")
 
-    def apply(p):
-        p["script"].update({"title": res.get("title") or idea.get("title"),
-                            "framework": res.get("framework", {}), "scenes": scenes,
-                            "claims": claims, "claims_at": store.now_iso()})
-        p["title"] = p["script"]["title"] or p["title"]
-        store.touch_stage(p, "script")
-        store.log(p, f"AI: naskah {len(scenes)} scene, {_count_words(scenes)} kata (target ≤{budget}); "
-                     f"cek fakta: {_claims_summary(claims)}")
+    def apply(q):
+        q["script"].update({"framework": res.get("framework") or {}, "scenes": scenes,
+                            "claims": claims, "claims_at": store.now_iso() if claims else None})
+        store.touch_stage(q, "script")
+        store.log(q, f"AI: narasi dipecah jadi {len(scenes)} scene ({_count_words(scenes)} kata)")
     store.update(pid, apply)
-    return {"scenes": len(scenes), "words": _count_words(scenes), "budget": budget,
-            "sources": len(sources), "factcheck": _claims_summary(claims)}
+    return {"scenes": len(scenes), "words": _count_words(scenes),
+            "factcheck": _claims_summary(claims) if claims else ""}
+
+
+def narrate(pid: str, params: dict, progress) -> dict:
+    """Aksi 'Generate Narasi' (meniru tab Generate Narasi repo referensi): template Fakta Menarik / Tragedi /
+    Kisah Hidup / Custom -> teks narasi + hook thumbnail, lalu otomatis dipecah jadi scene."""
+    p = store.load(pid)
+    idea = _idea(p)
+    template = (params.get("template") or p["script"].get("narr_template")
+                or p["research"].get("narr_template") or "fakta")
+    if template not in NARR_TEMPLATES:
+        template = "fakta"
+    seconds = duration_of(p, params)
+    if template == "custom":
+        prompt = (params.get("custom_prompt") if params.get("custom_prompt") is not None
+                  else p["script"].get("narr_custom") or "").strip()
+        if not prompt:
+            raise RuntimeError("Prompt custom masih kosong.")
+    else:
+        prompt = build_narration_prompt(p, template, seconds)
+    use_src = params.get("use_sources", template in ("fakta", "tragedi"))
+    sources = _sources(p, idea, params, progress) if use_src else []
+    progress(f"AI menulis narasi '{prompts.TEMPLATE_LABEL[template]}' untuk '{idea.get('title', '')}'"
+             + (f" (berdasarkan {len(sources)} sumber)…" if sources else "…"))
+    res = llm.chat_json(prompts.NARRATION_SYSTEM, prompt + prompts.narration_sources(factsource.as_prompt(sources)),
+                        params.get("provider"), temperature=0.7)
+    narr = str(res.get("narasi") or res.get("narration") or "").strip()
+    if not narr:
+        raise RuntimeError("AI tidak mengembalikan narasi. Coba lagi.")
+    hook = str(res.get("hook") or "").strip().strip('"*') or idea.get("hook") or idea.get("title", "")
+    words = len(narr.split())
+    wmin, wmax = word_range(p, seconds)
+
+    def apply(q):
+        q["script"].update({"narration": narr, "hook_text": hook, "narr_template": template,
+                            "narr_duration": seconds, "narr_prompt": prompt,
+                            "title": idea.get("title") or q["script"].get("title")})
+        if template == "custom":
+            q["script"]["narr_custom"] = prompt
+        q["title"] = q["script"]["title"] or q["title"]
+        store.touch_stage(q, "script")
+        store.log(q, f"AI: narasi {prompts.TEMPLATE_LABEL[template]} {words} kata (target {wmin}-{wmax})")
+    store.update(pid, apply)
+    out = {"words": words, "target": [wmin, wmax], "sources": len(sources)}
+    if params.get("split", True):
+        out.update(split(pid, params, progress))
+    return out
+
+
+def generate(pid: str, params: dict, progress) -> dict:
+    """Dipakai produksi massal: narasi (template proyek) + pecah scene."""
+    return narrate(pid, params, progress)

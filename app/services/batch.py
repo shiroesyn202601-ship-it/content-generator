@@ -23,8 +23,8 @@ def produce(pid: str, params: dict, progress) -> dict:
 
         def setup(q, i=i):
             q["voice"] = src["voice"]
-            q["research"].update({k: src["research"].get(k) for k in ("keyword", "competitors", "suggestions",
-                                                                       "insight", "ideas")})
+            q["research"].update({k: src["research"].get(k) for k in (
+                "keyword", "competitors", "suggestions", "insight", "ideas", "duration", "narr_template")})
             q["research"]["selected"] = i
             store.approve(q, "research")  # ide sudah dipilih kreator → langsung ke tahap naskah
             store.log(q, f"Produksi massal dari proyek {pid} (ide {i + 1})")
@@ -34,7 +34,8 @@ def produce(pid: str, params: dict, progress) -> dict:
             progress(f"Proyek {n}/{len(idx)}: {msg}")
         for attempt in range(2):
             try:
-                res = scriptgen.generate(p["id"], {}, sub)
+                res = scriptgen.generate(p["id"], {"template": params.get("template")
+                                                   or src["research"].get("narr_template")}, sub)
                 created.append({"id": p["id"], "title": title, **{k: res.get(k) for k in ("words", "factcheck")}})
                 break
             except Exception as e:  # noqa: BLE001 — satu ide gagal tidak menghentikan yang lain

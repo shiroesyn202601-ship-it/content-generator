@@ -76,7 +76,7 @@ function status(msg) {
 /* Nama aksi yang mudah dipahami untuk bar status & notifikasi. */
 const ACTION_LABEL = {
   'research.ideas': '💡 Membuat ide konten', 'research.download': '⬇ Mengunduh video sumber',
-  'script.generate': '✍ Menulis naskah', 'script.factcheck': '🔍 Cek fakta', 'research.batch': '🏭 Produksi massal',
+  'script.generate': '✍ Menulis naskah', 'script.narrate': '✍ Menulis narasi', 'script.split': '✂ Memecah narasi jadi scene', 'script.factcheck': '🔍 Cek fakta', 'research.batch': '🏭 Produksi massal',
   'publish.thumbs': '🖼 Membuat thumbnail', 'publish.thumbnail': '🖼 Memasang thumbnail',
   'assets.story_setup': '📖 Menyusun karakter & prompt', 'assets.story_chars': '👤 Membuat gambar karakter',
   'assets.story_scenes': '🎨 Membuat gambar scene', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
@@ -360,36 +360,214 @@ async function deleteProject() {
   refreshList();
 }
 
+function copyText(text, msg = 'Disalin.') {
+  if (!text) return;
+  (navigator.clipboard ? navigator.clipboard.writeText(text) : Promise.reject()).then(() => toast(msg), () => toast('Gagal menyalin.', true));
+}
+
+function exportIdeas(d) {
+  // Format sama dengan repo referensi (topic + ideas[nomor, judul, deskripsi, hookText, sudahRelease]) → bisa bolak-balik.
+  const data = { topic: d.keyword || '', ideas: (d.ideas || []).map((it, i) => ({ nomor: i + 1, judul: it.title,
+    deskripsi: it.description || it.angle || '', hookText: it.hook || '', sudahRelease: !!it.released })) };
+  const now = new Date(), p2 = (n) => String(n).padStart(2, '0');
+  const slug = (d.keyword || 'ide').toLowerCase().replace(/[\s,.]+/g, '-').replace(/[^a-z0-9-]/g, '').slice(0, 50);
+  const a = h('a', { href: URL.createObjectURL(new Blob([JSON.stringify(data, null, 2)], { type: 'application/json' })),
+    download: `${p2(now.getDate())}-${p2(now.getMonth() + 1)}-${now.getFullYear()}-${p2(now.getHours())}${p2(now.getMinutes())}-${slug}.json` });
+  a.click(); setTimeout(() => URL.revokeObjectURL(a.href), 1000);
+}
+
+function importIdeas(d, ev) {
+  const file = ev.target.files && ev.target.files[0];
+  if (!file) return;
+  file.text().then((txt) => {
+    const data = JSON.parse(txt);
+    const list = Array.isArray(data) ? data : data.ideas;
+    if (!Array.isArray(list)) throw new Error("Format tidak valid: harus punya 'ideas' (array).");
+    const ideas = list.map((x) => ({ title: x.judul || x.title || '', description: x.deskripsi || x.description || x.angle || '',
+      hook: x.hookText || x.hook || '', released: !!(x.sudahRelease || x.released) })).filter((x) => x.title);
+    const replace = !(d.ideas || []).length || confirm(`Impor ${ideas.length} ide.\nOK = ganti ide yang ada, Batal = tambahkan di belakang.`);
+    if (replace) { d.ideas = ideas; d.selected = null; S.batch.clear(); } else d.ideas = [...d.ideas, ...ideas];
+    if (data.topic && (replace || !d.keyword)) d.keyword = data.topic;
+    markDirty(); render(); toast(`${ideas.length} ide diimpor. Klik Simpan supaya tersimpan.`);
+  }).catch((e) => toast(`Gagal impor: ${e.message}`, true)).finally(() => { ev.target.value = ''; });
+}
+
+// Perkiraan durasi VO dari kecepatan suara (kata/dtk diukur dari edge-tts) + jeda antar-kalimat.
+function voSeconds(words) {
+  const v = S.p.voice || {}, wps = ({ 'id-ID-ArdiNeural': 2.5, 'id-ID-GadisNeural': 2.0 }[v.voice] || 2.2) * (v.speed || 1);
+  return Math.round(words / wps + (words / 9) * ((v.pause_ms || 350) / 1000));
+}
+
+async function showNarrPrompt(d) {
+  const body = $('#modal-body'); body.innerHTML = '';
+  const tpl = d.narr_template === 'custom' ? 'fakta' : d.narr_template;
+  body.append(h('h2', {}, 'Opsi Prompt Cerita'), h('p', { class: 'muted' }, 'Memuat prompt…'));
+  if (!$('#modal').open) $('#modal').showModal();
+  let r;
+  try { r = await api('POST', `/api/projects/${S.p.id}/narration-prompt`, { template: tpl, duration: d.narr_duration }); }
+  catch (e) { body.lastChild.textContent = `Gagal: ${e.message}`; return; }
+  body.innerHTML = '';
+  body.append(h('h2', {}, `Prompt ${(S.meta.narr_templates || {})[tpl] || tpl}`),
+    h('p', { class: 'muted small' }, tpl === 'tragedi' ? 'Tragedi memakai panjang tetap 1.400–1.700 karakter.' :
+      `Durasi ${r.duration} dtk → ${r.words[0]}–${r.words[1]} kata (dihitung dari kecepatan suara proyek).`),
+    h('pre', { style: 'white-space:pre-wrap;max-height:55vh;overflow:auto;font-size:12px' }, r.prompt),
+    h('div', { class: 'row' },
+      btn('📋 Salin prompt', () => copyText(r.prompt, 'Prompt disalin.'), 'small'),
+      btn('✏ Edit sebagai Custom', () => { d.narr_custom = r.prompt; d.narr_template = 'custom'; markDirty(); $('#modal').close(); render(); }, 'small ghost')));
+}
+
+function rNarration(d) {
+  const m = S.meta, short = S.p.format === 'short';
+  if (!d.narr_template) d.narr_template = (S.p.research && S.p.research.narr_template) || 'fakta';
+  if (d.narr_duration == null) d.narr_duration = (S.p.research && S.p.research.duration) || (short ? 50 : 480);
+  if (d.use_sources == null) d.use_sources = true;
+  const tpl = d.narr_template, factual = tpl === 'fakta' || tpl === 'tragedi';
+  const sel = S.p.research && S.p.research.ideas ? S.p.research.ideas[S.p.research.selected] : null;
+  const card = h('div', { class: 'card' });
+  card.append(h('div', { class: 'row between' }, h('b', {}, '📝 Narasi'),
+    sel ? h('span', { class: 'small muted' }, 'Ide: ', h('b', {}, sel.title)) : null));
+  card.append(h('div', { class: 'row', style: 'flex-wrap:wrap' },
+    h('span', { class: 'small muted' }, 'Template:'),
+    h('div', { class: 'seg' }, Object.entries(m.narr_templates || {}).map(([k, l]) =>
+      h('button', { class: tpl === k ? 'on' : '', onclick: () => { d.narr_template = k; markDirty(); render(); } }, l))),
+    tpl !== 'tragedi' && tpl !== 'custom' ? h('label', { class: 'row small' }, 'Durasi video ',
+      h('input', { type: 'number', min: 15, step: 5, value: d.narr_duration, style: 'width:80px',
+        oninput: (e) => { d.narr_duration = +e.target.value || d.narr_duration; markDirty(); } }), ' detik') : null,
+    factual ? field('Pakai sumber Wikipedia + cek fakta', d, 'use_sources', { type: 'checkbox' }) : null));
+  if (tpl === 'custom') {
+    card.append(field('Prompt custom (ditulis apa adanya ke AI)', d, 'narr_custom', { type: 'textarea', rows: 10,
+      placeholder: 'Tulis atau tempel prompt kustom di sini… (atau buka "Lihat prompt" lalu "Edit sebagai Custom")' }));
+  }
+  card.append(h('div', { class: 'row' },
+    btn(d.narration ? '🔄 Generate ulang narasi' : '✨ Generate Narasi', () => {
+      if (d.narration && !confirm('Narasi & scene yang ada akan diganti. Lanjut?')) return;
+      runAction('script.narrate', { template: tpl, duration: d.narr_duration, custom_prompt: tpl === 'custom' ? d.narr_custom : undefined,
+        use_sources: factual ? d.use_sources : false });
+    }, 'primary'),
+    btn('👁 Lihat prompt', () => showNarrPrompt(d), 'ghost')));
+  const words = (d.narration || '').trim() ? d.narration.trim().split(/\s+/).length : 0;
+  const secs = voSeconds(words);
+  const stats = h('span', { class: short && secs > 58 ? 'warn-text small' : 'muted small' },
+    `${words} kata · ${(d.narration || '').length} karakter · ±${secs} dtk VO${short && secs > 58 ? ' — terlalu panjang untuk Shorts!' : ''}`);
+  card.append(field('', d, 'narration', { type: 'textarea', rows: 10, placeholder: 'Narasi hasil AI muncul di sini — boleh diedit langsung.',
+    onchange: (v) => { const w = v.trim() ? v.trim().split(/\s+/).length : 0; const s = voSeconds(w);
+      stats.textContent = `${w} kata · ${v.length} karakter · ±${s} dtk VO${short && s > 58 ? ' — terlalu panjang untuk Shorts!' : ''}`; } }));
+  card.append(h('div', { class: 'row' }, stats, h('div', { class: 'grow' }),
+    btn('📋 Salin narasi', () => copyText(d.narration, 'Narasi disalin.'), 'small ghost')));
+  card.append(h('div', { class: 'row' }, h('div', { class: 'grow' }, field('Hook text (thumbnail, 7-10 kata)', d, 'hook_text')),
+    btn('📋', () => copyText(d.hook_text, 'Hook disalin.'), 'small ghost')));
+  // Narasi diedit setelah dipecah → scene tidak lagi cocok.
+  const joined = (d.scenes || []).map((s) => s.text.replace(/\*/g, '')).join(' ').replace(/\s+/g, ' ').trim();
+  const differs = d.narration && joined && joined !== d.narration.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+  card.append(h('div', { class: 'row' },
+    d.narration ? btn('✂ Pecah jadi scene (AI)', () => {
+      if ((d.scenes || []).length && !confirm('Scene yang ada (termasuk edit manual per scene) akan diganti dari narasi. Lanjut?')) return;
+      runAction('script.split');
+    }, differs ? 'primary' : '') : null,
+    differs ? h('span', { class: 'warn-text small' }, 'Narasi berbeda dari scene di bawah — klik "Pecah jadi scene" supaya VO memakai narasi terbaru (atau abaikan bila sengaja edit per scene).') : null));
+  return card;
+}
+
 // ================================================================ TAHAP 1
 function rResearch() {
   const d = S.draft, box = h('div');
   if (S.p.mode === 'scratch') {
+    // ---- Generator ide (meniru tab "Generate Narasi" repo test-google-ai-studio)
+    const m = S.meta, short = S.p.format === 'short';
+    if (d.idea_count == null) d.idea_count = 20;
+    if (d.duration == null) d.duration = short ? 50 : 480;
+    if (d.use_trends == null) d.use_trends = true;
+    if (!d.idea_template) d.idea_template = m.idea_template || '';
+    if (!d.narr_template) d.narr_template = 'fakta';
+    const tplBox = field('', d, 'idea_template', { type: 'textarea', rows: 10 });
+    box.append(h('div', { class: 'card' },
+      h('b', {}, '💡 Generator Ide Konten Viral'),
+      h('div', { class: 'muted small' }, 'Temukan ide judul & tema video berdasarkan topik pilihan Anda.'),
+      h('div', { class: 'grid2' },
+        field('Jumlah ide konten', d, 'idea_count', { type: 'number', min: 1, max: 50 }),
+        field('Target durasi video (detik)', d, 'duration', { type: 'number', min: 15, step: 5 })),
+      h('details', {}, h('summary', {}, 'Template prompt ide (bisa diedit)'),
+        h('div', { class: 'row between' }, h('span', { class: 'small muted' }, 'Variabel: {numberOfIdeas}, {videoDuration}, {viralTopic}'),
+          btn('Reset ke default', () => { d.idea_template = m.idea_template; markDirty(); render(); }, 'small ghost')),
+        tplBox),
+      field('Riset tren YouTube sebagai konteks (video populer, views/hari, saran pencarian)', d, 'use_trends', { type: 'checkbox' })));
+    box.append(field('Masukkan topik utama', d, 'keyword', { type: 'textarea', rows: 3,
+      placeholder: 'mis. sejarah konflik, sejarah berdirinya, sejarah runtuhnya, fakta yang jarang diketahui seputar …' }));
+    const fileIn = h('input', { type: 'file', accept: 'application/json,.json', style: 'display:none', onchange: (e) => importIdeas(d, e) });
     box.append(h('div', { class: 'row' },
-      h('div', { class: 'grow' }, field('Niche / kata kunci', d, 'keyword', { placeholder: 'mis. misteri sejarah nusantara' })),
-      btn('🔎 Riset & Generate Ide (AI)', () => runAction('research.ideas', { keyword: d.keyword }), 'primary')));
-    box.append(hint('AI membaca video populer di YouTube untuk topik ini (judul, views, umur → views/hari untuk melihat topik yang sedang naik) dan saran pencarian YouTube, lalu mencari celah/angle baru. Pilih satu ide; semua field bisa diedit. Centang beberapa ide lalu "Produksi massal" untuk membuat banyak proyek sekaligus.'));
-    if (d.insight) box.append(h('div', { class: 'card' }, h('b', {}, 'Insight riset: '), d.insight));
-    (d.ideas || []).forEach((it, i) => {
-      box.append(h('div', { class: `card ${d.selected === i ? 'selected' : ''}` },
-        h('label', { class: 'row' }, h('input', { type: 'radio', name: 'idea', checked: d.selected === i,
-          onchange: () => { d.selected = i; markDirty(); render(); } }), h('b', {}, `Ide ${i + 1}`),
-          h('span', { class: 'badge' }, `potensi ${it.potential ?? '?'}/10`),
-          h('label', { class: 'small muted', style: 'margin-left:auto', onclick: (e) => e.stopPropagation() },
-            h('input', { type: 'checkbox', checked: S.batch.has(i), onchange: (e) => { e.target.checked ? S.batch.add(i) : S.batch.delete(i); render(); } }),
-            ' produksi massal')),
-        field('Judul', it, 'title'),
-        h('div', { class: 'grid2' }, field('Angle', it, 'angle', { type: 'textarea', rows: 2 }), field('Hook 3 detik', it, 'hook', { type: 'textarea', rows: 2 })),
-        h('div', { class: 'grid2' }, field('Kata kunci SEO', it, 'keywords', { type: 'csv' }), field('Target penonton', it, 'target_audience'))));
-    });
-    box.append(h('div', { class: 'row' },
-      btn('+ Tambah ide manual', () => { d.ideas = d.ideas || []; d.ideas.push({ title: '', angle: '', hook: '', keywords: [] }); markDirty(); render(); }, 'ghost'),
-      S.batch.size ? btn(`🏭 Produksi massal (${S.batch.size} ide)`, async () => {
-        if (!confirm(`Buat ${S.batch.size} proyek baru dari ide yang dicentang? AI akan riset fakta & menulis naskah tiap proyek satu per satu (±1 menit per proyek). Setelah itu cek & setujui naskah masing-masing.`)) return;
-        const res = await runAction('research.batch', { indexes: [...S.batch].sort((a, b) => a - b) });
+      btn('✨ Generate Ide', () => {
+        if (!(d.keyword || '').trim()) return toast('Topik tidak boleh kosong.', true);
+        if ((d.ideas || []).length && !confirm('Ide yang ada akan diganti dengan hasil baru. Lanjut? (Pakai "Tambah ide baru" di bawah untuk menambah.)')) return;
         S.batch.clear();
-        if (res) toast(`${res.created.length} proyek dibuat. Lihat daftar Proyek di kiri.`);
-        refreshList();
-      }, 'primary') : null));
+        runAction('research.ideas', { keyword: d.keyword, count: d.idea_count, duration: d.duration, template: d.idea_template, trends: d.use_trends });
+      }, 'primary'),
+      btn('📥 Impor JSON', () => fileIn.click(), 'ghost'),
+      (d.ideas || []).length ? btn('⬇ Unduh JSON', () => exportIdeas(d), 'ghost') : null, fileIn));
+    if (d.insight) box.append(h('div', { class: 'card' }, h('b', {}, 'Insight riset: '), d.insight));
+    const ideas = d.ideas || [];
+    if (ideas.length) {
+      S.ideaView = S.ideaView || 'normal'; S.ideaFilter = S.ideaFilter || 'all';
+      const shown = ideas.map((it, i) => [it, i]).filter(([it]) =>
+        S.ideaFilter === 'all' || (S.ideaFilter === 'released' ? it.released : !it.released));
+      const seg = (cur, opts, onPick) => h('div', { class: 'seg' }, opts.map(([v, l]) =>
+        h('button', { class: cur === v ? 'on' : '', onclick: () => onPick(v) }, l)));
+      box.append(h('div', { class: 'row', style: 'flex-wrap:wrap;margin-top:12px' },
+        h('b', {}, `Hasil ${ideas.length} ide untuk: `, h('span', { class: 'muted' }, (d.keyword || '').slice(0, 80))),
+        h('div', { class: 'grow' }),
+        seg(S.ideaFilter, [['all', 'Semua'], ['unreleased', 'Belum release'], ['released', 'Sudah release']], (v) => { S.ideaFilter = v; render(); }),
+        seg(S.ideaView, [['normal', 'Tampilan normal'], ['excel', 'Tampilan Excel']], (v) => { S.ideaView = v; render(); })));
+      box.append(h('div', { class: 'row', style: 'flex-wrap:wrap' }, h('span', { class: 'small muted' }, 'Template narasi (tahap 2 & produksi massal):'),
+        seg(d.narr_template, ['fakta', 'tragedi', 'kisah-hidup'].map((k) => [k, (m.narr_templates || {})[k] || k]),
+          (v) => { d.narr_template = v; markDirty(); render(); })));
+      if (S.ideaView === 'excel') {
+        const tsv = () => [['No.', 'Judul', 'Deskripsi', 'Hook'].join('\t'), ...shown.map(([it, i]) =>
+          [i + 1, it.title, it.description || it.angle || '', it.hook || ''].map((x) => String(x).replace(/[\t\n]+/g, ' ')).join('\t'))].join('\n');
+        box.append(h('div', { class: 'row between' }, h('span', { class: 'small muted' }, 'Pilih sel lalu Ctrl+C, atau salin semua (bisa ditempel ke Excel / Google Sheets).'),
+          btn('📋 Salin semua', () => copyText(tsv(), 'Tabel ide disalin (TSV).'), 'small')),
+          h('div', { class: 'scroll' }, h('table', {}, h('tr', {}, ['No.', 'Judul', 'Deskripsi', 'Hook'].map((x) => h('th', {}, x))),
+            shown.map(([it, i]) => h('tr', {}, h('td', {}, String(i + 1)), h('td', {}, it.title), h('td', {}, it.description || it.angle || ''), h('td', {}, it.hook || ''))))));
+      } else {
+        shown.forEach(([it, i]) => {
+          if (it.description == null && it.angle) it.description = it.angle;
+          box.append(h('div', { class: `card ${d.selected === i ? 'selected' : ''}` },
+            h('div', { class: 'row' },
+              h('label', { class: 'row' }, h('input', { type: 'radio', name: 'idea', checked: d.selected === i,
+                onchange: () => { d.selected = i; markDirty(); render(); } }), h('b', {}, `#${i + 1}`), h('span', { class: 'small muted' }, 'pakai untuk proyek ini')),
+              it.released ? h('span', { class: 'badge' }, '✓ sudah release') : null,
+              h('div', { class: 'grow' }),
+              h('label', { class: 'small muted' }, h('input', { type: 'checkbox', checked: !!it.released, onchange: (e) => { it.released = e.target.checked; markDirty(); render(); } }), ' sudah release'),
+              h('label', { class: 'small muted' }, h('input', { type: 'checkbox', checked: S.batch.has(i), onchange: (e) => { e.target.checked ? S.batch.add(i) : S.batch.delete(i); render(); } }), ' pilih')),
+            h('div', { class: 'row' }, h('div', { class: 'grow' }, field('Judul', it, 'title')),
+              btn('📋', () => copyText(it.title, 'Judul disalin.'), 'small ghost')),
+            field('Deskripsi', it, 'description', { type: 'textarea', rows: 2 }),
+            h('div', { class: 'row' }, h('div', { class: 'grow' }, field('Hook text (thumbnail)', it, 'hook')),
+              btn('📋', () => copyText(it.hook || '', 'Hook disalin.'), 'small ghost'))));
+        });
+      }
+      const allSel = shown.length && shown.every(([, i]) => S.batch.has(i));
+      S.moreIdeas = S.moreIdeas || 10;
+      box.append(h('div', { class: 'row', style: 'flex-wrap:wrap' },
+        btn(allSel ? 'Batal pilih semua' : 'Pilih semua', () => { shown.forEach(([, i]) => (allSel ? S.batch.delete(i) : S.batch.add(i))); render(); }, 'small ghost'),
+        S.batch.size ? btn(`🏭 Produksi massal (${S.batch.size} ide)`, async () => {
+          if (!confirm(`Buat ${S.batch.size} proyek baru dari ide terpilih? AI menulis narasi "${(m.narr_templates || {})[d.narr_template]}" lalu memecahnya jadi scene untuk tiap proyek satu per satu (±1 menit per proyek). Setelah itu cek & setujui naskah masing-masing.`)) return;
+          const res = await runAction('research.batch', { indexes: [...S.batch].sort((a, b) => a - b), template: d.narr_template });
+          S.batch.clear();
+          if (res) toast(`${res.created.length} proyek dibuat. Lihat daftar Proyek di kiri.`);
+          refreshList();
+        }, 'primary') : null,
+        S.batch.size ? btn(`🗑 Hapus (${S.batch.size})`, () => {
+          if (!confirm(`Hapus ${S.batch.size} ide terpilih? Tidak bisa diurungkan setelah disimpan.`)) return;
+          const keep = d.selected != null ? d.ideas[d.selected] : null;
+          d.ideas = d.ideas.filter((_, i) => !S.batch.has(i));
+          d.selected = keep && d.ideas.includes(keep) ? d.ideas.indexOf(keep) : null;
+          S.batch.clear(); markDirty(); render();
+        }, 'ghost danger') : null,
+        h('div', { class: 'grow' }),
+        h('span', { class: 'small muted' }, 'Tambah ide baru:'),
+        h('input', { type: 'number', min: 1, max: 50, value: S.moreIdeas, style: 'width:70px', oninput: (e) => { S.moreIdeas = +e.target.value || 10; } }),
+        btn('➕ Generate tambahan', () => runAction('research.ideas', { keyword: d.keyword, count: S.moreIdeas, duration: d.duration, template: d.idea_template, append: true }), 'small'),
+        btn('+ Ide manual', () => { d.ideas.push({ title: '', description: '', hook: '' }); markDirty(); render(); }, 'small ghost')));
+    }
     if ((d.competitors || []).length) {
       const comp = [...d.competitors].sort((a, b) => (b.views_per_day || -1) - (a.views_per_day || -1));
       box.append(h('details', {}, h('summary', {}, `Data riset YouTube (${d.competitors.length} video · urut views/hari)`),
@@ -428,12 +606,11 @@ function rScriptScratch() {
   d.scenes = d.scenes || [];
   const words = d.scenes.reduce((a, s) => a + (s.text.trim() ? s.text.replace(/\*/g, '').trim().split(/\s+/).length : 0), 0);
   // Perkiraan durasi VO dari kecepatan suara (kata/dtk diukur dari edge-tts) + jeda antar-kalimat.
-  const v = S.p.voice || {}, wps = ({ 'id-ID-ArdiNeural': 2.5, 'id-ID-GadisNeural': 2.0 }[v.voice] || 2.2) * (v.speed || 1);
-  const secs = Math.round(words / wps + (words / 9) * ((v.pause_ms || 350) / 1000));
+  const secs = voSeconds(words);
   const over = S.p.format === 'short' && secs > 58;
-  box.append(h('div', { class: 'row' },
-    btn('✍ Generate Kerangka & Naskah (AI)', () => runAction('script.generate'), 'primary'),
-    d.scenes.length ? btn('🔍 Cek Fakta', () => runAction('script.factcheck'), 'small') : null,
+  box.append(rNarration(d));
+  if (d.scenes.length) box.append(h('div', { class: 'row' }, h('b', {}, '🎬 Scene'),
+    btn('🔍 Cek Fakta', () => runAction('script.factcheck'), 'small'),
     h('span', { class: over ? 'warn-text' : 'muted' }, `${d.scenes.length} scene · ${words} kata · ±${secs} detik${over ? ' — terlalu panjang untuk Shorts (maks 60 dtk)!' : ''}`)));
   // --- hasil riset sumber & cek fakta
   const sources = (S.p.research && S.p.research.sources) || [];
