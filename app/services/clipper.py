@@ -63,25 +63,78 @@ def _all_words(segments: list[dict]) -> list[dict]:
     return [w for s in segments for w in s.get("words", [])]
 
 
-def snap(segments: list[dict], start: float, end: float) -> tuple[float, float]:
-    """Geser start/end ke batas kalimat (segmen Whisper) terdekat, lalu beri padding kecil
-    yang tidak pernah masuk ke kata sebelum/sesudahnya — kata tidak akan terpotong."""
-    if not segments:
-        return start, end
-    s_seg = min(segments, key=lambda s: abs(s["start"] - start))
-    e_cands = [s for s in segments if s["end"] > s_seg["start"]] or segments
-    e_seg = min(e_cands, key=lambda s: abs(s["end"] - end))
-    st, en = s_seg["start"], e_seg["end"]
-    words = _all_words(segments)
-    prev_end = max([w["end"] for w in words if w["end"] <= st + 0.01] or [0.0])
-    next_start = min([w["start"] for w in words if w["start"] >= en - 0.01] or [en + 1.0])
-    st = max(0.0, st - min(0.25, (st - prev_end) / 2))
-    en = en + min(0.35, (next_start - en) / 2)
+_END = (".", "?", "!", "…")
+GAP_SENT = 0.8      # jeda bicara (dtk) yang dianggap akhir kalimat walau tanpa tanda baca
+MAX_SENT = 20.0     # kalimat lebih panjang dari ini dipecah di jeda/koma terdekat
+PAD_IN, PAD_OUT = 0.35, 0.45  # napas sebelum kalimat pertama & sesudah kalimat terakhir (hanya di area hening)
+
+
+def _norm(s: str) -> str:
+    return "".join(ch for ch in s.lower() if ch.isalnum())
+
+
+def _punct_words(seg: dict) -> list[dict]:
+    """Kata Whisper Groq tidak membawa tanda baca → salin dari teks segmen dengan penyejajaran difflib."""
+    import difflib
+    words = [dict(w) for w in seg.get("words", [])]
+    toks = seg.get("text", "").split()
+    a, b = [_norm(w["text"]) for w in words], [_norm(t) for t in toks]
+    for blk in difflib.SequenceMatcher(None, a, b, autojunk=False).get_matching_blocks():
+        for k in range(blk.size):
+            tok = toks[blk.b + k].rstrip("\"'”’)]")
+            words[blk.a + k]["_end"] = tok.endswith(_END)
+            words[blk.a + k]["_comma"] = tok.endswith((",", ";", ":"))
+    if words:
+        words[-1]["_seg_end"] = True
+    return words
+
+
+def sentences(segments: list[dict]) -> list[dict]:
+    """Satuan kalimat dari kata ber-timestamp: putus di . ? ! atau jeda ≥0.8 dtk; kalimat sangat panjang dipecah
+    di koma/jeda terdekat. Inilah satuan yang dipilih AI, sehingga klip selalu mulai & berakhir di batas kalimat.
+    [{start, end, text}]; transkrip tanpa timestamp kata memakai segmen apa adanya."""
+    words = [w for s in segments for w in _punct_words(s)]
+    if not words:
+        return [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in segments]
+    out, cur = [], []
+    for i, w in enumerate(words):
+        cur.append(w)
+        nxt = words[i + 1] if i + 1 < len(words) else None
+        gap = (nxt["start"] - w["end"]) if nxt else 99.0
+        long_ = cur[-1]["end"] - cur[0]["start"] > MAX_SENT
+        if w.get("_end") or gap >= GAP_SENT or (long_ and (w.get("_comma") or w.get("_seg_end") or gap >= 0.3)):
+            out.append({"start": cur[0]["start"], "end": cur[-1]["end"], "text": " ".join(x["text"] for x in cur)})
+            cur = []
+    if cur:
+        out.append({"start": cur[0]["start"], "end": cur[-1]["end"], "text": " ".join(x["text"] for x in cur)})
+    return out
+
+
+def _pad(words: list[dict], st: float, en: float) -> tuple[float, float]:
+    """Tambah napas di awal/akhir tanpa pernah masuk ke kata sebelum/sesudahnya."""
+    prev_end = max([w["end"] for w in words if w["end"] <= st + 0.01] or [max(0.0, st - PAD_IN * 2)])
+    next_start = min([w["start"] for w in words if w["start"] >= en - 0.01] or [en + PAD_OUT * 2])
+    st = max(0.0, st - min(PAD_IN, max(0.0, st - prev_end) * 0.6))
+    en = en + min(PAD_OUT, max(0.0, next_start - en) * 0.6)
     return round(st, 3), round(en, 3)
 
 
+def snap(segments: list[dict], start: float, end: float) -> tuple[float, float]:
+    """Geser start/end ke awal/akhir kalimat terdekat, lalu beri jeda napas — kata tidak akan terpotong."""
+    if not segments:
+        return start, end
+    sents = sentences(segments)
+    s0 = min(sents, key=lambda s: abs(s["start"] - start))
+    e_cands = [s for s in sents if s["end"] > s0["start"]] or sents
+    e0 = min(e_cands, key=lambda s: abs(s["end"] - end))
+    return _pad(_all_words(segments), s0["start"], e0["end"])
+
+
 CLIP_LIMITS = {"short": (20, 59), "long": (90, 600)}
-WINDOW_CHARS = 9000  # transkrip panjang dipecah per jendela agar tidak melewati batas token LLM gratis
+WINDOW_CHARS = 9000   # transkrip panjang dipecah per jendela agar tidak melewati batas token LLM gratis
+WINDOW_OVERLAP = 1500  # jendela bertumpuk supaya momen di perbatasan jendela tidak hilang
+# Bobot rubrik (diadaptasi dari Anil-matcha & openshorts): hook paling menentukan retensi Shorts.
+WEIGHTS = {"hook": 0.35, "alur": 0.25, "nilai": 0.25, "bagikan": 0.15}
 
 
 def _num(v, default: float = 0.0) -> float:
@@ -94,25 +147,47 @@ def _num(v, default: float = 0.0) -> float:
         return default
 
 
-def _fit_range(segs: list[dict], a: int, b: int, lo: float, hi: float) -> tuple[int, int]:
-    """Perlebar/persempit rentang segmen supaya durasi klip masuk batas format."""
-    while segs[b]["end"] - segs[a]["start"] < lo and b + 1 < len(segs) \
-            and segs[b + 1]["end"] - segs[a]["start"] <= hi:
+def _fit_range(units: list[dict], a: int, b: int, lo: float, hi: float) -> tuple[int, int]:
+    """Perlebar/persempit rentang kalimat supaya durasi klip masuk batas format."""
+    while units[b]["end"] - units[a]["start"] < lo and b + 1 < len(units) \
+            and units[b + 1]["end"] - units[a]["start"] <= hi:
         b += 1
-    while segs[b]["end"] - segs[a]["start"] > hi and b > a:
+    while units[b]["end"] - units[a]["start"] > hi and b > a:
         b -= 1
     return a, b
 
 
-def _windows(segs: list[dict]) -> list[tuple[int, int]]:
-    out, start, size = [], 0, 0
-    for i, s in enumerate(segs):
-        size += len(s["text"]) + 20
-        if size > WINDOW_CHARS and i > start:
-            out.append((start, i))
-            start, size = i, len(s["text"]) + 20
-    out.append((start, len(segs)))
+def _windows(units: list[dict]) -> list[tuple[int, int]]:
+    """Jendela [awal, akhir) berukuran ±WINDOW_CHARS yang saling tumpang ±WINDOW_OVERLAP karakter."""
+    sizes = [len(u["text"]) + 20 for u in units]
+    out, start = [], 0
+    while start < len(units):
+        end, size = start, 0
+        while end < len(units) and (size + sizes[end] <= WINDOW_CHARS or end == start):
+            size += sizes[end]
+            end += 1
+        out.append((start, end))
+        if end >= len(units):
+            break
+        back, nxt = 0, end
+        while nxt > start + 1 and back + sizes[nxt - 1] <= WINDOW_OVERLAP:
+            nxt -= 1
+            back += sizes[nxt]
+        start = nxt
     return out
+
+
+def _overlap(a: dict, b: dict) -> float:
+    """Porsi tumpang-tindih terhadap klip yang lebih pendek (0..1)."""
+    inter = min(a["end"], b["end"]) - max(a["start"], b["start"])
+    return max(0.0, inter) / max(0.1, min(a["end"] - a["start"], b["end"] - b["start"]))
+
+
+def _schema() -> dict:
+    sub = llm.strict({k: llm.INT for k in WEIGHTS})
+    clip = llm.strict({"start_unit": llm.INT, "end_unit": llm.INT, "title": llm.STR, "hook": llm.STR,
+                       "reason": llm.STR, "scores": sub, "keywords": llm.arr(llm.STR)})
+    return llm.strict({"clips": llm.arr(clip)})
 
 
 def find_clips(pid: str, params: dict, progress) -> dict:
@@ -122,40 +197,51 @@ def find_clips(pid: str, params: dict, progress) -> dict:
         raise RuntimeError("Transkrip kosong — jalankan Transkrip dulu.")
     lo, hi = CLIP_LIMITS[p["format"]]
     title = p["research"]["source"].get("title", "")
-    wins = _windows(segs)
+    units = sentences(segs)
+    words = _all_words(segs)
+    dur = units[-1]["end"] - units[0]["start"]
+    want = max(3, min(10, int(dur // 90) + 2))  # jumlah klip wajar sesuai panjang video
+    wins = _windows(units)
+    per_win = max(3, min(6, -(-want * 2 // len(wins))))
     raw = []
     for k, (ws, we) in enumerate(wins):
-        progress("AI mencari momen viral…" if len(wins) == 1 else f"AI mencari momen viral (bagian {k + 1}/{len(wins)})…")
-        sys_, usr = prompts.viral_clips(segs[ws:we], p["format"], p["language"], title, offset=ws)
-        raw += llm.chat_json(sys_, usr, params.get("provider"), temperature=0.5).get("clips", [])
+        progress("AI menilai momen viral…" if len(wins) == 1 else f"AI menilai momen viral (bagian {k + 1}/{len(wins)})…")
+        sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
+                                        count=per_win, direction=params.get("direction") or p["script"].get("direction") or "")
+        raw += llm.chat_json(sys_, usr, params.get("provider"), temperature=0.4, schema=_schema()).get("clips", [])
 
-    progress("Merapikan kandidat klip (durasi & tumpang-tindih)…")
+    progress("Merapikan kandidat klip (batas kalimat, durasi & tumpang-tindih)…")
     cands = []
     for c in raw:
-        a = int(max(0, min(_num(c.get("start_seg")), len(segs) - 1)))
-        b = int(max(a, min(_num(c.get("end_seg"), a), len(segs) - 1)))
-        a, b = _fit_range(segs, a, b, lo, hi)
-        st, en = snap(segs, segs[a]["start"], segs[b]["end"])
+        a = int(max(0, min(_num(c.get("start_unit", c.get("start_seg"))), len(units) - 1)))
+        b = int(max(a, min(_num(c.get("end_unit", c.get("end_seg")), a), len(units) - 1)))
+        a, b = _fit_range(units, a, b, lo, hi)
+        st, en = _pad(words, units[a]["start"], units[b]["end"])
         if not (lo * 0.75 <= en - st <= hi + 1):
             continue  # tetap terlalu pendek/panjang (mis. sisa video tidak cukup)
+        sc = c.get("scores") if isinstance(c.get("scores"), dict) else {}
+        subs = {k: int(max(0, min(100, _num(sc.get(k), _num(c.get("score")) * 10)))) for k in WEIGHTS}
+        total = int(round(sum(subs[k] * w for k, w in WEIGHTS.items())))
         cands.append({"start": st, "end": en, "title": str(c.get("title") or ""),
                       "hook": str(c.get("hook") or ""), "reason": str(c.get("reason") or ""),
-                      "score": int(round(max(0.0, min(10.0, _num(c.get("score")))))),
+                      "score": total, "scores": subs,
                       "keywords": [str(x) for x in c.get("keywords") or [] if x]})
     cands.sort(key=lambda c: -c["score"])
     clips = []
-    for c in cands:  # buang klip yang >50% tumpang-tindih dengan klip berskor lebih tinggi
-        if all(min(c["end"], o["end"]) - max(c["start"], o["start"]) <= 0.5 * (c["end"] - c["start"]) for o in clips):
+    for c in cands:  # klip yang tumpang-tindih ≥25% dengan klip berskor lebih tinggi dibuang
+        if all(_overlap(c, o) < 0.25 for o in clips):
             clips.append(c)
-    clips = [{"id": f"c{i + 1}", **c} for i, c in enumerate(clips[:8])]
+    clips = [{"id": f"c{i + 1}", **c} for i, c in enumerate(clips[:want])]
     if not clips:
         raise RuntimeError(f"AI tidak menemukan klip berdurasi {lo}-{hi} dtk. Coba lagi, atau pilih manual.")
 
     def apply(p):
         p["script"]["clips"] = clips
         p["script"]["selected_clip"] = None
+        if params.get("direction") is not None:
+            p["script"]["direction"] = params["direction"]
         store.touch_stage(p, "script")
-        store.log(p, f"AI: {len(clips)} kandidat klip")
+        store.log(p, f"AI: {len(clips)} kandidat klip dari {len(units)} kalimat")
     store.update(pid, apply)
     return {"count": len(clips)}
 
@@ -172,17 +258,15 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
     if mode == "face":
         from . import reframe
         src = d / p["research"]["source"]["path"]
-        progress("Auto-reframe: mendeteksi wajah & pergantian shot…")
-        shots = reframe.track(src, clip["start"], clip["end"], progress)
-        vs = next(s for s in ff.probe(src)["streams"] if s.get("codec_type") == "video")
-        face_vf = reframe.crop_filter(shots, int(vs["width"]), int(vs["height"]), w, h)
-        n_face = sum(s["cx"] is not None for s in shots)
-        if face_vf:
-            fit = face_vf
-            progress(f"Auto-reframe: {len(shots)} shot, {n_face} dengan wajah — bingkai mengikuti wajah")
+        progress("Auto-reframe: mendeteksi wajah & potongan scene…")
+        pl, reframe_info = reframe.track(src, clip["start"], clip["end"], w, h, progress)
+        if pl:
+            reframe.write_cmds(pl, d / "assets" / "reframe.cmd")
+            fit = reframe.crop_filter(pl, "assets/reframe.cmd", reframe_info["src_h"], w, h)
+            progress(f"Auto-reframe ({reframe_info['engine']}): {reframe_info['shots']} shot, wajah di "
+                     f"{reframe_info['face_ratio'] * 100:.0f}% sampel — kamera mengikuti wajah")
         else:
             progress("Auto-reframe: tidak ada wajah terdeteksi — memakai mode latar blur")
-        reframe_info = {"shots": shots, "faces": n_face}
     progress(f"Memotong {clip['start']:.1f}s - {clip['end']:.1f}s ({mode})...")
     vf = f"{fit},fps={config.FPS},format=yuv420p"
     ff.run(["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", p["research"]["source"]["path"],

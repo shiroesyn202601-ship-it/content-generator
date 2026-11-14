@@ -126,7 +126,7 @@ def new_project(mode: str, fmt: str, title: str, keyword: str = "", language: st
         "voice": {"preset": preset, **VOICE_PRESETS[preset], "emphasis_boost": True},
         "research": {"keyword": keyword, "ideas": [], "selected": None, "source": None},
         "script": {"scenes": [], "transcript": None, "clips": [], "selected_clip": None},
-        "assets": {"scenes": {}, "clip_path": None, "crop_mode": "blur" if fmt == "short" else "none"},
+        "assets": {"scenes": {}, "clip_path": None, "crop_mode": ("face" if mode == "clipper" else "blur") if fmt == "short" else "none"},
         "audio": {"pronunciation": {}, "vo_path": None, "words": [], "sentences": [],
                   "scene_timings": [], "music": {"enabled": mode == "scratch", "file": None,
                   "volume": 0.12, "mood": None}, "sfx": [], "duration": 0},

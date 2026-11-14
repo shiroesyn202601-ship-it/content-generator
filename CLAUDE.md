@@ -143,6 +143,19 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     ringkasan jadwal di halaman awal tab). Tahap internal `publish` tetap ada (indeks 6). Link `/#publish/<id>`.
     Juga ikut: mode visual **Cerita AI** (`story.py`, karakter konsisten via Pollinations) + transisi antar-scene.
 
+12. **14 Nov 2026 — Clipper versi riset GitHub** (openshorts MIT, Anil-matcha MIT, hotclip AGPL = ide saja):
+    - `reframe.py` ditulis ulang: wajah **YuNet** (`cv2.FaceDetectorYN`, model ONNX diunduh ke `data/models`,
+      cadangan Haar), potongan scene ala ContentDetector (selisih HSV adaptif, tanpa paket tambahan),
+      "kamera" per shot (zona mati 25%, konfirmasi 3 deteksi, kecepatan dibatasi, kunci bila semua wajah muat,
+      lompat di potongan) → jalur x per frame lewat `sendcmd` + `crop@rf`. Default crop Clipper Short = `face`.
+    - `clipper.sentences()`: satuan kalimat dari kata Whisper (tanda baca disalin dari teks segmen via difflib,
+      putus di . ? ! / jeda ≥0.8 dtk); AI memilih nomor kalimat; jeda napas masuk 0.35 / keluar 0.45 dtk.
+    - Rubrik skor 0-100 (hook/alur/nilai/bagikan, bobot `clipper.WEIGHTS`) dengan schema strict, jendela
+      bertumpuk, jumlah klip `max(3, min(10, durasi//90+2))`, buang tumpang-tindih ≥25%, kolom **Arahan AI**.
+    - **PySceneDetect sengaja tidak dipakai:** `pip install scenedetect` menarik opencv-python 5 → cv2 diblokir
+      Smart App Control. Cek Kesiapan kini punya baris "Auto-reframe" untuk mendeteksi hal ini.
+    - Belum: deteksi pembicara aktif + layout split, sinyal audio lokal, subtitle YouTube sebagai transkrip.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

@@ -59,6 +59,17 @@ def check(ping_llm: bool = False) -> list[dict]:
     else:
         out.append(_item("Sistem", "Transkrip (Whisper)", "fail", f"Whisper lokal gagal: {why[:120]}",
                          "Isi GROQ_API_KEY agar transkrip memakai Whisper Groq"))
+    try:  # OpenCV 5 (mis. ikut terpasang oleh paket lain) diblokir Smart App Control → reframe mati
+        import cv2
+        yn = hasattr(cv2, "FaceDetectorYN")
+        model = (config.DATA_DIR / "models" / "face_detection_yunet_2023mar.onnx").is_file()
+        out.append(_item("Sistem", "Auto-reframe (Clipper)", "ok" if yn else "warn",
+                         f"OpenCV {cv2.__version__} · {'YuNet' if yn else 'Haar (lama)'}"
+                         + ("" if model or not yn else " · model wajah diunduh otomatis saat pertama dipakai")))
+    except Exception as e:
+        out.append(_item("Sistem", "Auto-reframe (Clipper)", "warn", f"OpenCV tidak bisa dimuat: {str(e)[:100]}",
+                         'python -m pip uninstall -y opencv-python && python -m pip install --force-reinstall '
+                         '"opencv-python-headless>=4.8,<5" — jangan pasang paket yang menarik OpenCV 5'))
     for pkg in ("edge-tts", "yt-dlp"):
         ver = _ver(pkg)
         out.append(_item("Sistem", pkg, "ok" if ver else "fail", ver or "belum terpasang",

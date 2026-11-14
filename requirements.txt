@@ -17,5 +17,7 @@ google-auth-httplib2>=0.2
 
 # Gambar (lembar kontak thumbnail untuk juri visual AI)
 pillow>=10.0
-# Auto-reframe Clipper (deteksi wajah, CPU)
-opencv-python-headless>=4.8,<5  # OpenCV 5 menghapus CascadeClassifier
+# Auto-reframe Clipper (wajah YuNet + deteksi potongan scene, CPU)
+# Tetap 4.x: OpenCV 5 diblokir Smart App Control di laptop & menghapus CascadeClassifier.
+# JANGAN pasang scenedetect / paket lain yang menarik opencv-python 5 (menimpa cv2).
+opencv-python-headless>=4.8,<5

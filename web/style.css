@@ -172,3 +172,7 @@ body.mode-publish .brand b, body.mode-publish a { color: #2dd4bf; }
 tr.clickable { cursor: pointer; }
 tr.clickable:hover td { background: var(--panel2); }
 .hint.ok { border-color: var(--accent2); }
+.badge.score.hi { color: var(--accent2); border-color: var(--accent2); }
+.badge.score.mid { color: var(--warn); border-color: var(--warn); }
+.subscore { color: var(--muted); padding: 1px 8px; border: 1px solid var(--line); border-radius: 99px; }
+.subscore b { color: var(--text); }

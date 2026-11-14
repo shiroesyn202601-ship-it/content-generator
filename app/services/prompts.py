@@ -219,21 +219,34 @@ Balas JSON: {{"picks": [{{"id": "s1", "index": 0, "fit": "cocok", "reason": "...
     return system, user
 
 
-def viral_clips(segments: list[dict], fmt: str, lang: str, title: str, offset: int = 0) -> tuple[str, str]:
+def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int = 0, count: int = 5,
+                direction: str = "") -> tuple[str, str]:
+    """Rubrik penilaian klip (diadaptasi dari Anil-matcha & openshorts). Satuan = kalimat bernomor,
+    jadi AI memilih nomor kalimat, bukan menebak detik."""
     lo, hi = (20, 59) if fmt == "short" else (90, 600)
-    lines = "\n".join(f"[{i + offset}] {s['start']:.1f}-{s['end']:.1f}: {s['text']}" for i, s in enumerate(segments))
-    system = "Kamu editor klip viral profesional. Kamu memilih momen paling menarik dari transkrip."
-    user = f"""Video sumber: "{title}". Transkrip bernomor (detik):
+    lines = "\n".join(f"[{i + offset}] {s['start']:.1f}-{s['end']:.1f}: {s['text']}" for i, s in enumerate(units))
+    system = ("Kamu editor klip viral profesional untuk YouTube Shorts/TikTok. Kamu jujur menilai: "
+              "kebanyakan bagian video BIASA saja, hanya sedikit yang benar-benar layak diklip.")
+    arah = f"\nARAHAN KREATOR (utamakan ini): {direction.strip()}\n" if direction.strip() else ""
+    user = f"""Video sumber: "{title}". Transkrip per KALIMAT bernomor (detik):
 {lines}
+{arah}
+Pilih sampai {count} momen terbaik. Setiap klip:
+- mulai di kalimat "start_unit" dan berakhir di kalimat "end_unit" (nomor di kurung siku), durasi {lo}-{hi} detik;
+- kalimat PERTAMA harus bisa dipahami tanpa konteks sebelumnya (jangan mulai dengan "jadi", "nah itu", "makanya",
+  "dia" yang merujuk hal sebelumnya) dan langsung memancing rasa penasaran;
+- kalimat TERAKHIR terasa tuntas (punchline, kesimpulan, jawaban) — jangan berhenti di tengah cerita.
 
-Pilih 3-6 momen paling berpotensi viral. Setiap klip HARUS:
-- dimulai di awal segmen dan berakhir di akhir segmen (pakai nomor segmen, jangan memotong kalimat),
-- berdurasi {lo}-{hi} detik, punya hook di awal dan terasa selesai di akhir.
-Balas JSON:
-{{"clips": [{{"start_seg": 0, "end_seg": 5, "title": "judul klip", "hook": "teks hook di layar",
-             "reason": "kenapa menarik", "score": 8, "keywords": ["kata kunci untuk ditekankan"]}}]}}
-"start_seg"/"end_seg" = nomor segmen di dalam kurung siku. "score" = angka bulat 1-10.
-Bahasa judul/hook: {LANG_NAME.get(lang, lang)}."""
+Nilai tiap klip 0-100 (jujur; 80+ hanya untuk yang benar-benar kuat):
+- "hook": seberapa kuat 3 detik pertama menahan penonton (pertanyaan, klaim mengejutkan, konflik, emosi);
+- "alur": cerita utuh — ada awal, puncak, dan akhir yang tuntas;
+- "nilai": puncak emosi, opini tajam, pengungkapan, humor, kalimat yang layak dikutip, atau tips praktis;
+- "bagikan": seberapa besar orang ingin mengomentari / membagikan / relevan dengan tren.
+"title": judul klip menarik (maks 60 karakter). "hook": teks pendek di layar untuk 2 detik pertama (maks 8 kata).
+"reason": 1 kalimat kenapa klip ini kuat. "keywords": 2-5 kata yang diucapkan di klip untuk ditekankan di subtitle.
+Bahasa judul/hook/alasan: {LANG_NAME.get(lang, lang)}.
+Balas JSON: {{"clips": [{{"start_unit": 0, "end_unit": 5, "title": "...", "hook": "...", "reason": "...",
+  "scores": {{"hook": 70, "alur": 60, "nilai": 65, "bagikan": 55}}, "keywords": ["..."]}}]}}"""
     return system, user
 
 

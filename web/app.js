@@ -481,15 +481,24 @@ function rScriptScratch() {
   return box;
 }
 
+const SUB_LABEL = { hook: 'Hook', alur: 'Alur', nilai: 'Nilai', bagikan: 'Dibagikan' };
+function scoreBadge(c) {
+  if (c.score === undefined || c.score === null) return null;
+  const outOf = c.scores ? 100 : 10;               // proyek lama: skor 1-10
+  const pct = c.score / outOf;
+  return h('span', { class: `badge score ${pct >= 0.75 ? 'hi' : pct >= 0.55 ? 'mid' : 'lo'}` }, `skor ${c.score}/${outOf}`);
+}
+
 function rScriptClipper() {
   const d = S.draft, box = h('div');
   const src = S.p.research.source || {};
   const vid = h('video', { class: 'preview-v', src: media(src.path), controls: true, preload: 'metadata' });
   box.append(h('div', { class: 'row' },
     btn('1 · Transkrip (Whisper)', () => runAction('script.transcribe'), d.transcript ? '' : 'primary'),
-    btn('2 · Cari Segmen Viral (AI)', () => runAction('script.find_clips'), d.transcript ? 'primary' : ''),
+    btn('2 · Cari Momen Viral (AI)', () => runAction('script.find_clips', { direction: d.direction || '' }), d.transcript ? 'primary' : ''),
     btn('+ Klip manual', () => { d.clips = d.clips || []; const t = vid.currentTime || 0; d.clips.push({ id: `m${Date.now().toString(36)}`, start: t, end: t + 30, title: 'Klip manual', hook: '', reason: '', score: 0, keywords: [] }); markDirty(); render(); }, 'ghost')));
-  box.append(hint('Batas klip otomatis "di-snap" ke awal/akhir kalimat dari transkrip Whisper, jadi tidak ada kata yang terpotong. Setelah mengubah waktu manual, klik "Snap".'));
+  box.append(field('Arahan AI (opsional)', d, 'direction', { placeholder: 'mis. cari momen lucu / fokus ke tips praktis / bagian tentang modal usaha' }));
+  box.append(hint('AI menilai tiap momen 0-100 dari hook, alur, nilai, dan potensi dibagikan. Klip selalu mulai & berakhir di batas kalimat (ditambah jeda napas), jadi tidak ada kata yang terpotong. Setelah mengubah waktu manual, klik "Snap".'));
   box.append(vid);
   const sel = d.selected_clip;
   (d.clips || []).forEach((c, i) => {
@@ -497,7 +506,7 @@ function rScriptClipper() {
     box.append(h('div', { class: `card ${sel === i ? 'selected' : ''}` },
       h('div', { class: 'row between' },
         h('label', { class: 'row' }, h('input', { type: 'radio', name: 'clip', checked: sel === i, onchange: () => { d.selected_clip = i; markDirty(); render(); } }),
-          h('b', {}, c.title || c.id), durEl, h('span', { class: 'badge' }, `skor ${c.score ?? '-'}`)),
+          h('b', {}, c.title || c.id), durEl, scoreBadge(c)),
         h('div', { class: 'row' },
           btn('▶ Putar', () => playSegment(vid, c.start, c.end), 'small'),
           btn('🧲 Snap ke kalimat', async () => {
@@ -515,6 +524,7 @@ function rScriptClipper() {
         field('Selesai (dtk)', c, 'end', { type: 'number', step: 0.1, onchange: () => (durEl.textContent = `${(c.end - c.start).toFixed(1)} dtk`) }),
         field('Judul', c, 'title'), field('Hook', c, 'hook')),
       field('Kata kunci ditekankan', c, 'keywords', { type: 'csv' }),
+      c.scores ? h('div', { class: 'row small' }, Object.entries(SUB_LABEL).map(([k, l]) => h('span', { class: 'subscore' }, `${l} `, h('b', {}, c.scores[k] ?? '-')))) : null,
       c.reason ? h('div', { class: 'muted small' }, 'Alasan AI: ', c.reason) : null));
   });
   if (d.transcript) {
