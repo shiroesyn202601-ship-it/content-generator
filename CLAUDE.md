@@ -225,6 +225,13 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     Variasi gaya per klip `enhance.vary_style`. Rencana bisa diedit di Mode lanjutan lalu diterapkan tanpa AI.
     Juga: logo/overlay global (`brand.py`, data/brand.json) + aksi `research.rebrand`.
 
+17. **15 Nov 2026 — tab Upload per proyek + upload lintas proyek:** sidebar Upload = folder proyek (video hasil
+    Clipper ikut proyek sumbernya, `pubRoot`/`pubFolders` di app.js) → klik proyek = galeri video (filter
+    Siap/Terjadwal/Terunggah) → klik video = editor judul/jadwal (breadcrumb + ‹ › antar video). Centang ☑ video dari
+    proyek mana pun (`S.pubSel`, localStorage `pubSel`) → bar "Pilihan" → modal jadwal bergiliran (mulai + jarak,
+    urutan bisa diubah, judul AI untuk yang kosong) → `POST /api/publish/bulk` (`youtube.bulk`, job berurutan;
+    `upload:false` = simpan jadwal saja). Jadwal masa lalu ditolak di awal sebelum ada yang terunggah.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

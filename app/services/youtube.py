@@ -152,3 +152,67 @@ def upload(pid: str, params: dict, progress) -> dict:
     except Exception as e:
         print("Sheets schedule:", e)
     return {"video_id": vid, "url": url, "status": sched}
+
+
+def bulk(_pid: str, params: dict, progress) -> dict:
+    """Jadwalkan / unggah banyak video sekaligus, boleh lintas proyek (tab Upload → "Pilihan").
+
+    params: items=[{id, publish_at}] (urutan = urutan tayang), privacy, gen_meta (buat judul AI bila kosong),
+    upload (False = hanya simpan jadwal & privasi tanpa mengunggah). Satu video gagal tidak menghentikan yang lain.
+    Berurutan supaya tidak menabrak batas per menit LLM gratis & kuota upload YouTube."""
+    items = [it for it in params.get("items") or [] if it.get("id")]
+    if not items:
+        raise RuntimeError("Belum ada video yang dipilih.")
+    do_upload = bool(params.get("upload", True))
+    if do_upload and not config.google_enabled():
+        raise RuntimeError("Google belum terhubung (python run.py --setup-google).")
+    for it in items:  # cek semua jadwal dulu — jangan sampai separuh terunggah lalu sisanya gagal karena jam lewat
+        if it.get("publish_at"):
+            to_rfc3339_utc(it["publish_at"])
+    done, failed, skipped = [], [], []
+    n = len(items)
+    for k, it in enumerate(items, 1):
+        pid = it["id"]
+        tag = f"[{k}/{n}]"
+        try:
+            p = store.load(pid)
+            name = p["publish"].get("title") or p["title"]
+            if p["current_stage"] < store.STAGES.index("publish"):
+                raise RuntimeError("belum selesai render (belum masuk tahap Upload)")
+            if p["publish"].get("video_id"):
+                skipped.append({"id": pid, "title": name, "why": "sudah diunggah"})
+                continue
+            if params.get("gen_meta") and not (p["publish"].get("title") or "").strip():
+                progress(f"{tag} AI menulis judul & deskripsi: {name[:50]}")
+                for attempt in range(2):
+                    try:
+                        gen_metadata(pid, {}, lambda m: None)
+                        break
+                    except Exception as e:  # noqa: BLE001
+                        if attempt == 0 and "429" in str(e):
+                            for left in range(65, 0, -5):
+                                progress(f"{tag} batas per menit AI tercapai — menunggu {left} dtk…")
+                                time.sleep(5)
+                            continue
+                        raise
+
+            def setp(q, it=it):
+                pub = q["publish"]
+                if "publish_at" in it:
+                    pub["publish_at"] = it.get("publish_at") or ""
+                if params.get("privacy"):
+                    pub["privacy"] = params["privacy"]
+                store.log(q, "Jadwal massal: " + (pub["publish_at"] or pub.get("privacy") or ""))
+            store.update(pid, setp)
+            name = store.load(pid)["publish"].get("title") or name
+            if do_upload:
+                res = upload(pid, {}, lambda m, tag=tag, name=name: progress(f"{tag} {name[:50]} — {m}"))
+                done.append({"id": pid, "title": name, **res})
+            else:
+                done.append({"id": pid, "title": name, "publish_at": it.get("publish_at") or ""})
+            progress(f"{tag} selesai: {name[:50]}")
+        except Exception as e:  # noqa: BLE001
+            if type(e).__name__ == "JobCancelled":
+                raise
+            failed.append({"id": pid, "title": it.get("title") or pid, "error": str(e)[:300]})
+    return {"done": done, "failed": failed, "skipped": skipped}

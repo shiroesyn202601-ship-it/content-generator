@@ -386,6 +386,28 @@ def library_file(source: str, ref: str, name: str = ""):
     return FileResponse(path)
 
 
+@app.post("/api/publish/bulk")
+def publish_bulk(body: dict = Body(...)):
+    """Upload / jadwal massal lintas proyek. Job dicatat di proyek pertama (untuk bar status)."""
+    items = [it for it in body.get("items") or [] if isinstance(it, dict) and it.get("id")]
+    if not items:
+        raise HTTPException(400, "Belum ada video yang dipilih.")
+    for it in items:
+        _load(it["id"])
+    busy = [it["id"] for it in items if any(j["kind"] in ("publish.upload", "render.run", "publish.bulk")
+                                            for j in jobs.active_for(it["id"]))]
+    if busy:
+        raise HTTPException(409, f"{len(busy)} video masih diproses (render/upload). Tunggu sampai selesai.")
+    if body.get("upload", True):
+        try:
+            for it in items:
+                if it.get("publish_at"):
+                    youtube.to_rfc3339_utc(it["publish_at"])
+        except ValueError as e:
+            raise HTTPException(400, str(e))
+    return {"job": jobs.submit(items[0]["id"], "publish.bulk", youtube.bulk, items[0]["id"], {**body, "items": items})}
+
+
 @app.get("/api/schedule")
 def schedule():
     out = []
