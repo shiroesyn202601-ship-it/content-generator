@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, clipper, fonts, prompts, render, research, scriptgen, story,
+from .services import (assets, audio_lib, batch, brand, clipper, fonts, prompts, render, research, scriptgen, story,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
@@ -78,6 +78,7 @@ ACTIONS = {
     "assets.cut_clip":     (clipper.cut_clip, "script", True),   # Clipper: tahap Momen & Potong (gabungan)
     "script.produce_clips": (clipper.produce_clips, "script", True),
     "research.auto_clip":  (clipper.auto_clip, "research", True),
+    "research.rebrand":    (clipper.rebrand, "research", True),   # Clipper: render ulang semua klip (logo/overlay)
     "assets.story_setup":  (story.setup, "assets", True),
     "assets.story_chars":  (story.characters, "assets", True),
     "assets.story_scenes": (story.scenes, "assets", True),
@@ -463,6 +464,42 @@ def font_file(name: str):
     if not f or not f.is_file():
         raise HTTPException(404)
     return FileResponse(f, headers={"Cache-Control": "max-age=86400"})
+
+
+# ---------- branding Clipper (logo + overlay global, berlaku untuk semua video hasil) ----------
+@app.get("/api/brand")
+def brand_get():
+    return brand.load()
+
+
+@app.put("/api/brand")
+def brand_put(body: dict = Body(...)):
+    return brand.save(body)
+
+
+@app.post("/api/brand/{slot}")
+def brand_upload(slot: str, file: UploadFile = File(...)):
+    try:
+        return brand.store_file(slot, file.filename or "", file.file)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/brand/{slot}")
+def brand_delete(slot: str):
+    try:
+        return brand.remove_file(slot)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/brand/{name}")
+def brand_file(name: str):
+    b = brand.load()
+    files = {b[s]["file"] for s in brand.SLOTS if b[s]["file"]}
+    if name not in files:
+        raise HTTPException(404)
+    return FileResponse(brand.DIR / name, headers={"Cache-Control": "no-cache"})
 
 
 # ---------- file media proyek (preview video/audio di UI) ----------

@@ -1596,6 +1596,9 @@ function clipOptionsView(o, rerender) {
     h('div', { class: 'ch-opt' }, h('b', {}, 'Gaya subtitle'),
       h('div', { class: 'tpl-row' }, Object.entries(tpls).filter(([k]) => k !== 'klasik').map(([k, t]) =>
         tplCard(k, t, o.template === k, () => { o.template = k; upd(); })))),
+    h('details', { class: 'ch-more', open: !!S.brandOpen, ontoggle: (e) => { S.brandOpen = e.target.open; } },
+      h('summary', {}, '🏷 Logo & overlay (semua klip)'),
+      brandPanel({ format: o.format })),
     h('details', { class: 'ch-more' }, h('summary', {}, 'Opsi lain'),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Bingkai'),
         seg(o, 'crop_mode', [['face', 'Ikuti wajah'], ['blur', 'Latar blur'], ['center', 'Crop tengah']], upd)),
@@ -1604,6 +1607,115 @@ function clipOptionsView(o, rerender) {
       h('div', { class: 'ch-opt' }, h('b', {}, 'Arahan AI (opsional)'),
         h('input', { value: o.direction || '', placeholder: 'mis. cari momen lucu / fokus ke tips praktis',
           oninput: (e) => { o.direction = e.target.value; saveClipOpts(o); } }))));
+}
+
+// ---------------------------------------------------------------- branding Clipper (logo + overlay)
+/* Pengaturan global (data/brand.json di backend) → otomatis dipakai SEMUA video hasil Clipper,
+   termasuk klip dari video sumber lain. Disimpan otomatis setiap kali diubah. */
+const BRAND_POS = [['tl', '↖'], ['tc', '↑'], ['tr', '↗'], ['ml', '←'], ['c', '•'], ['mr', '→'], ['bl', '↙'], ['bc', '↓'], ['br', '↘']];
+let brandSaveT = null;
+
+async function loadBrand() {
+  try { S.brand = await api('GET', '/api/brand'); } catch (e) { toast(e.message, true); S.brand = null; }
+  return S.brand;
+}
+
+function brandPanel(sample) {
+  const box = h('div', { class: 'brand-panel' });
+  const draw = () => {
+    box.innerHTML = '';
+    const b = S.brand;
+    if (!b) { box.append(h('div', { class: 'muted small' }, 'Memuat pengaturan…')); loadBrand().then((x) => x && draw()); return; }
+    const save = (redraw = true) => {
+      if (redraw) draw();
+      clearTimeout(brandSaveT);
+      brandSaveT = setTimeout(async () => {
+        try { S.brand = await api('PUT', '/api/brand', { enabled: b.enabled, logo: b.logo, overlay: b.overlay }); } catch (e) { toast(e.message, true); }
+      }, 400);
+    };
+    const pick = (slot, accept) => {
+      const inp = h('input', { type: 'file', accept });
+      inp.onchange = async () => {
+        if (!inp.files[0]) return;
+        const fd = new FormData(); fd.append('file', inp.files[0]);
+        try { S.brand = await api('POST', `/api/brand/${slot}`, fd); S.brandVer = Date.now(); toast('Tersimpan ✓'); draw(); } catch (e) { toast(e.message, true); }
+      };
+      inp.click();
+    };
+    const drop = async (slot) => { try { S.brand = await api('DELETE', `/api/brand/${slot}`); draw(); } catch (e) { toast(e.message, true); } };
+    const url = (f) => U(`/brand/${f}?v=${S.brandVer || 0}`);
+    const isVid = (f) => /\.(mp4|webm|mov)$/i.test(f || '');
+    const slider = (it, key, min, max, step, label, fmt) => {
+      const out = h('span', { class: 'muted small' }, fmt(it[key]));
+      return h('label', { class: 'bp-slider' }, h('span', {}, label),
+        h('input', { type: 'range', min, max, step, value: it[key], oninput: (e) => { it[key] = +e.target.value; out.textContent = fmt(it[key]); prevDraw(); save(false); } }),
+        out);
+    };
+    const posGrid = (it, full) => h('div', { class: 'bp-pos' },
+      full ? h('button', { class: `bp-full ${it.pos === 'full' ? 'on' : ''}`, onclick: () => { it.pos = 'full'; save(); } }, 'Layar penuh') : null,
+      h('div', { class: 'bp-grid' }, BRAND_POS.map(([v, l]) => h('button', { class: it.pos === v ? 'on' : '', title: v, onclick: () => { it.pos = v; save(); } }, l))));
+    const fileRow = (slot, it, accept, hint) => h('div', { class: 'row' },
+      it.file ? h('span', { class: 'badge' }, it.file) : h('span', { class: 'muted small' }, hint),
+      h('button', { class: 'small', onclick: () => pick(slot, accept) }, it.file ? 'Ganti' : '📁 Pilih file'),
+      it.file ? h('button', { class: 'small ghost danger', onclick: () => drop(slot) }, 'Hapus') : null);
+
+    // pratinjau (perkiraan CSS; hasil akhir dirender FFmpeg dengan posisi/ukuran yang sama)
+    const fmt = (sample && sample.format) || 'short';
+    const PW = fmt === 'short' ? 180 : 300, PH = fmt === 'short' ? 320 : 169;
+    const prev = h('div', { class: 'bp-prev', style: `width:${PW}px;height:${PH}px` });
+    const place = (el, it) => {
+      if (it.pos === 'full') { el.style.cssText = 'left:0;top:0;width:100%;height:100%;object-fit:fill'; }
+      else {
+        const m = PW * it.margin / 100, p = it.pos, w = PW * it.size / 100;
+        let css = `width:${w}px;`;
+        css += p === 'c' || p[1] === 'c' ? `left:${(PW - w) / 2}px;` : p[1] === 'l' ? `left:${m}px;` : `right:${m}px;`;
+        css += p === 'c' || p[0] === 'm' ? 'top:50%;transform:translateY(-50%);' : p[0] === 't' ? `top:${m}px;` : `bottom:${m}px;`;
+        el.style.cssText = css;
+      }
+      el.style.opacity = it.opacity;
+      if (it.chroma) el.style.mixBlendMode = 'screen';
+    };
+    const prevDraw = () => {
+      prev.innerHTML = '';
+      if (sample && sample.thumb) prev.append(h('img', { class: 'bp-bg', src: sample.thumb }));
+      if (!b.enabled) return;
+      if (b.overlay.file) {
+        const el = isVid(b.overlay.file) ? h('video', { src: url(b.overlay.file), autoplay: true, muted: true, loop: true, playsInline: true }) : h('img', { src: url(b.overlay.file) });
+        el.className = 'bp-layer'; place(el, b.overlay); prev.append(el);
+      }
+      if (b.logo.file) { const el = h('img', { class: 'bp-layer', src: url(b.logo.file) }); place(el, b.logo); prev.append(el); }
+      prev.append(h('div', { class: 'bp-sub' }, 'SUBTITLE'));
+    };
+    prevDraw();
+
+    const L = b.logo, O = b.overlay;
+    box.append(
+      h('label', { class: 'row' }, h('input', { type: 'checkbox', checked: b.enabled, onchange: (e) => { b.enabled = e.target.checked; save(); } }),
+        h('b', {}, 'Pasang logo & overlay di semua video hasil Clipper')),
+      h('div', { class: 'bp-body' }, prev,
+        h('div', { class: 'bp-cols' },
+          h('div', { class: 'bp-col' }, h('h3', {}, '🏷 Logo'),
+            fileRow('logo', L, 'image/png,image/jpeg,image/webp', 'PNG transparan disarankan'),
+            L.file ? [posGrid(L, false),
+              slider(L, 'size', 5, 50, 1, 'Ukuran', (v) => `${v}% lebar`),
+              slider(L, 'opacity', 0.1, 1, 0.05, 'Transparansi', (v) => `${Math.round(v * 100)}%`),
+              slider(L, 'margin', 0, 15, 0.5, 'Jarak tepi', (v) => `${v}%`)] : null),
+          h('div', { class: 'bp-col' }, h('h3', {}, '🎞 Overlay'),
+            fileRow('overlay', O, 'image/*,video/mp4,video/webm,video/quicktime,.gif,.mov', 'Bingkai PNG / animasi (mp4, webm, gif)'),
+            O.file ? [posGrid(O, true),
+              O.pos !== 'full' ? slider(O, 'size', 5, 100, 1, 'Ukuran', (v) => `${v}% lebar`) : null,
+              O.pos !== 'full' ? slider(O, 'margin', 0, 15, 0.5, 'Jarak tepi', (v) => `${v}%`) : null,
+              slider(O, 'opacity', 0.1, 1, 0.05, 'Transparansi', (v) => `${Math.round(v * 100)}%`),
+              h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: O.chroma, onchange: (e) => { O.chroma = e.target.checked; save(); } }),
+                'Buang latar hijau (green screen)'),
+              h('div', { class: 'bp-slider' }, h('span', {}, 'Tampil'),
+                seg(O, 'show', [['always', 'Sepanjang video'], ['first', 'Awal'], ['last', 'Akhir']], () => save())),
+              O.show !== 'always' ? slider(O, 'secs', 1, 15, 1, 'Durasi', (v) => `${v} dtk ${O.show === 'first' ? 'pertama' : 'terakhir'}`) : null] : null))),
+      h('div', { class: 'muted small' }, 'Tersimpan otomatis & dipakai untuk semua klip berikutnya (juga dari video lain). Lapisan: video → overlay → logo → subtitle. ',
+        fmt === 'short' ? 'Shorts: hindari sisi kanan & bawah (tertutup tombol YouTube).' : ''));
+  };
+  draw();
+  return box;
 }
 
 function clipHome() {
@@ -1665,7 +1777,7 @@ function renderClipSource() {
   applyTheme('clipper');
   const src = (p.research || {}).source || {};
   const kids = (S.all || []).filter((c) => c.parent === p.id);
-  const running = S.clipRun === p.id || (p._jobs || []).some((j) => j.kind === 'research.auto_clip' || j.kind === 'script.produce_clips');
+  const running = S.clipRun === p.id || (p._jobs || []).some((j) => ['research.auto_clip', 'script.produce_clips', 'research.rebrand'].includes(j.kind));
   main.append(h('div', { class: 'row between' },
     h('div', {}, h('h1', {}, p.title || 'Video baru'),
       h('div', { class: 'muted small' }, [src.channel, src.duration ? fmtT(src.duration) : '', src.url ? h('a', { href: src.url, target: '_blank' }, 'sumber') : null]
@@ -1702,6 +1814,20 @@ function renderClipSource() {
     kids.sort((a, b) => ((b.clip || {}).score || 0) - ((a.clip || {}).score || 0));
     main.append(h('div', { class: 'row between', style: 'margin-top:14px' }, h('h2', {}, `🎬 ${kids.length} klip jadi`),
       h('span', { class: 'muted small' }, 'Klik video untuk memutar. Skor = potensi viral menurut AI.')));
+    const top = kids.find((c) => c.thumb);
+    main.append(h('details', { class: 'ch-more', open: !!S.brandOpen, ontoggle: (e) => { S.brandOpen = e.target.open; } },
+      h('summary', {}, '🏷 Logo & overlay (berlaku untuk semua klip)'),
+      brandPanel({ format: p.format, thumb: top ? U(`/media/${top.id}/${top.thumb}`) : null }),
+      h('div', { class: 'row', style: 'margin-top:8px' },
+        btn(`↻ Terapkan ke ${kids.length} klip ini (render ulang)`, async () => {
+          if (!confirm(`Render ulang ${kids.length} klip dengan logo/overlay terbaru? Klip yang sudah terunggah ke YouTube dilewati.`)) return;
+          S.clipRun = p.id; render();
+          const r = await runAction('research.rebrand', {});
+          S.clipRun = null;
+          if (r) toast(`${r.done.length} klip diperbarui ✓${r.failed.length ? ` (${r.failed.length} gagal)` : ''}${r.skipped_uploaded ? ` · ${r.skipped_uploaded} sudah terunggah, dilewati` : ''}`);
+          await refreshList(); render();
+        }, 'primary small'),
+        h('span', { class: 'muted small' }, 'Klip baru otomatis memakai pengaturan ini — tombol ini hanya untuk klip yang sudah jadi.'))));
     main.append(h('div', { class: 'clip-grid' }, kids.map((c) => clipCard(c))));
   }
   // --- momen lain yang belum dibuat

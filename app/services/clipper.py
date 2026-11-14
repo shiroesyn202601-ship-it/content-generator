@@ -480,6 +480,32 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
     return {"created": created, "failed": failed}
 
 
+def rebrand(pid: str, params: dict, progress) -> dict:
+    """Render ulang semua video hasil proyek sumber ini supaya logo/overlay terbaru ikut terpasang.
+    Status tahap (Thumbnail/Upload) dikembalikan seperti semula — ganti logo tidak membuat thumbnail
+    atau jadwal usang. Video yang sudah terunggah ke YouTube dilewati (file di YouTube tidak berubah)."""
+    from . import render
+    kids = [q for q in store.list_projects() if q.get("parent") == pid and q.get("output")]
+    todo = [q for q in kids if not (q.get("publish") or {}).get("video_id")]
+    if not todo:
+        raise RuntimeError("Belum ada video hasil yang bisa dirender ulang.")
+    done, failed = [], []
+    for n, q in enumerate(todo, 1):
+        tag = f"Video {n}/{len(todo)}"
+        before = store.load(q["id"])
+        keep = {"stage_status": dict(before["stage_status"]), "current_stage": before["current_stage"]}
+        try:
+            render.run(q["id"], {"drive_background": True}, lambda m, tag=tag: progress(f"{tag}: {m}"))
+            store.update(q["id"], lambda p: (p.update(keep), store.log(p, "Render ulang: logo/overlay diperbarui")))
+            done.append(q["id"])
+        except Exception as e:  # noqa: BLE001
+            from .. import jobs
+            if isinstance(e, jobs.JobCancelled):
+                raise
+            failed.append({"id": q["id"], "error": str(e)[:200]})
+    return {"done": done, "failed": failed, "skipped_uploaded": len(kids) - len(todo)}
+
+
 # ---------------- satu tombol ala 2short.ai ----------------
 
 DURATIONS = {"auto": None, "pendek": (15, 30), "sedang": (30, 60), "panjang": (60, 90)}

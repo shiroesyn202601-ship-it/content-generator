@@ -478,7 +478,7 @@ def preview_frame(p: dict, style: dict, t: float) -> bytes:
     else:
         src = ["-ss", f"{max(0.0, bg_t):.3f}", "-i", bg]
     cmd = [config.FFMPEG, "-v", "error", "-y", *src, "-frames:v", "1",
-           "-vf", f"{cover},setpts=PTS-STARTPTS+{t:.3f}/TB,ass=render/preview.ass:fontsdir=../../fonts",
+           "-vf", f"{cover},setpts=PTS-STARTPTS+{t:.3f}/TB,ass=render/preview.ass:fontsdir={store.fonts_rel(d)}",
            "-f", "image2pipe", "-vcodec", "png", "-"]
     r = subprocess.run(cmd, cwd=d, capture_output=True, timeout=60)
     if r.returncode != 0 or not r.stdout:

@@ -8,7 +8,7 @@ clipper : clip.mp4 (audio asli) + musik opsional (ducking) + SFX -> burn-in subt
 from pathlib import Path
 
 from .. import config, store
-from . import audio_lib, fonts, subtitles
+from . import audio_lib, brand, fonts, subtitles
 from . import ffmpeg_utils as ff
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
@@ -192,7 +192,7 @@ def run(pid: str, params: dict, progress) -> dict:
     (d / "render").mkdir(exist_ok=True)
     progress("Menulis subtitle...")
     subtitles.export(p)
-    font_dir = "../../fonts"  # data/fonts relatif dari folder proyek
+    font_dir = store.fonts_rel(d)  # data/fonts relatif dari folder proyek
     if p["subtitles"].get("burn", True):
         progress("Memeriksa font subtitle…")
         warn = fonts.ensure(p["subtitles"].get("style", {}).get("font", ""))
@@ -251,9 +251,14 @@ def run(pid: str, params: dict, progress) -> dict:
             base_graph, base = [], "[0:a]"
         else:
             base_graph, base = [f"anullsrc=r=48000:cl=stereo,atrim=0:{total:.3f}[silent]"], "[silent]"
-        graph = [f"[0:v]{sub_filter}[vout]"] + base_graph + _audio_graph(base, 1, music, sfx, total)
+        # Branding global (logo + overlay, data/brand.json) — dipasang di bawah subtitle.
+        n_in = 1 + extra.count("-i")
+        b_args, b_lines, vlabel = brand.graph(n_in, "[0:v]", W, H, total) if p["render"].get("brand", True) else ([], [], "[0:v]")
+        if b_lines:
+            progress("Memasang logo/overlay…")
+        graph = b_lines + [f"{vlabel}{sub_filter}[vout]"] + base_graph + _audio_graph(base, 1, music, sfx, total)
         progress(f"Mixing audio + burn-in subtitle ({ff.video_encoder()})…")
-        enc = ff.run_encode(["-i", clip, *extra, "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]"],
+        enc = ff.run_encode(["-i", clip, *extra, *b_args, "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]"],
                             [*ff.AUDIO_ARGS, "-t", f"{total:.3f}", "-movflags", "+faststart", "render/final.mp4"], cwd=d)
 
     drive_id = None

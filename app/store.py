@@ -126,6 +126,12 @@ def project_dir(pid: str, create: bool = False, parent: str | None = None) -> Pa
     return d
 
 
+def fonts_rel(d: Path) -> str:
+    """data/fonts relatif dari folder proyek (untuk fontsdir= libass; video hasil Clipper lebih dalam)."""
+    import os
+    return os.path.relpath(config.DATA_DIR / "fonts", d).replace("\\", "/")
+
+
 def source_file(p: dict) -> Path | None:
     """Path absolut video sumber Clipper. Video hasil membaca file milik proyek sumbernya."""
     rel = (p["research"].get("source") or {}).get("path")
