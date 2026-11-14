@@ -250,6 +250,8 @@ tr.clickable:hover td { background: var(--panel2); }
 .clip-card { background: var(--panel); border: 1px solid var(--line); border-radius: 12px; overflow: hidden; display: grid; }
 .cc-media { position: relative; aspect-ratio: 9 / 16; background: #000; }
 .cc-media video { width: 100%; height: 100%; object-fit: cover; display: block; cursor: pointer; }
+/* Layar penuh: tampilkan utuh 9:16 (bar hitam di kiri-kanan), jangan di-crop seperti di kartu */
+video:fullscreen, video:-webkit-full-screen { object-fit: contain !important; background: #000; }
 .cc-score, .cc-dur, .cc-up { position: absolute; font-size: 12px; font-weight: 700; padding: 2px 8px; border-radius: 99px; background: rgba(0,0,0,.65); }
 .cc-score { top: 8px; left: 8px; } .cc-score.hi { color: #4ade80; } .cc-score.mid { color: #fbbf24; } .cc-score.lo { color: #e5e7eb; }
 .cc-dur { bottom: 8px; right: 8px; color: #fff; } .cc-up { top: 8px; right: 8px; color: #4ade80; }
