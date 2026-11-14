@@ -71,6 +71,9 @@ def _find_bin(name: str, configured: str) -> str:
 
 # Mode tablet/LAN (HOST=0.0.0.0): perangkat lain wajib PIN. Kosong + HOST non-lokal → PIN acak tiap start.
 APP_PIN = _env("APP_PIN")
+# Mode "Cerita AI": key gratis dari https://enter.pollinations.ai → gambar scene memakai referensi karakter
+POLLINATIONS_KEY = _env("POLLINATIONS_KEY")
+STORY_IMAGE_MODEL = _env("STORY_IMAGE_MODEL", "black-forest-labs/flux.2-klein-4b")
 VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")
 # Transkrip: auto = Whisper lokal, bila diblokir/tidak ada → Whisper Groq | local | groq
 STT_PROVIDER = _env("STT_PROVIDER", "auto")  # auto | libx264 | h264_nvenc | h264_qsv | h264_amf

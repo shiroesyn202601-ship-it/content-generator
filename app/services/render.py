@@ -59,7 +59,7 @@ def _scene_segment(d: Path, asset_rel: str | None, frames: int, out_rel: str, W:
         else:
             z, x = "1.15", f"(iw-iw/zoom)*(1-on/{n})"
         zoom = (f"zoompan=z='{z}':d={frames}:x='{x}':y='ih/2-(ih/zoom/2)'"
-                f":s={W}x{H}:fps={config.FPS},format=yuv420p")
+                f":s={W}x{H}:fps={config.FPS},setsar=1,format=yuv420p")
         ff.run(["-i", asset_rel, "-filter_complex", f"[0:v]{ff.fit_filter(W * 2, H * 2, fit)},{zoom}[v]",
                 "-map", "[v]", *enc], cwd=d)
     else:
@@ -74,6 +74,34 @@ def _scene_segment(d: Path, asset_rel: str | None, frames: int, out_rel: str, W:
         seek = ["-ss", f"{offset:.3f}"] if offset > 0.05 else []
         ff.run(["-stream_loop", "-1", *seek, "-i", asset_rel, "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]",
                 *enc], cwd=d)
+
+
+TRANS_FRAMES = 9  # 0.3 dtk
+TRANSITIONS = {"fade": "fade", "geser": "slideleft", "zoom": "zoomin", "hitam": "fadeblack", "lingkaran": "circleopen"}
+
+
+def _join_with_transitions(d: Path, shots: list[dict], extras: list[int], kind: str) -> None:
+    """Gabungkan shot: xfade di pergantian scene (extras[j] > 0), sambung biasa di tempat lain.
+    Offset xfade = jumlah durasi persis shot sebelumnya → visual tetap sinkron dengan VO."""
+    fps = config.FPS
+    inputs, parts = [], []
+    for j in range(len(shots)):
+        inputs += ["-i", f"render/seg_{j:03d}.mp4"]
+        # xfade mensyaratkan timebase & frame rate identik di kedua input
+        parts.append(f"[{j}:v]fps={fps},setpts=PTS-STARTPTS,settb=1/{fps},setsar=1[s{j}]")
+    acc, acc_frames = "[s0]", shots[0]["frames"]
+    for j in range(1, len(shots)):
+        out = f"[v{j}]"
+        tf = extras[j - 1]
+        if tf:
+            parts.append(f"{acc}[s{j}]xfade=transition={kind}:duration={tf / fps:.4f}:offset={acc_frames / fps:.4f}{out}")
+        else:
+            # concat mengubah timebase → kembalikan ke 1/fps supaya xfade berikutnya mau menerima
+            parts.append(f"{acc}[s{j}]concat=n=2:v=1:a=0,settb=1/{fps}{out}")
+        acc, acc_frames = out, acc_frames + shots[j]["frames"]
+    parts.append(f"{acc}format=yuv420p,settb=1/{fps},fps={fps}[vout]")
+    ff.run([*inputs, "-filter_complex", ";".join(parts), "-map", "[vout]", "-c:v", "libx264", "-preset", "veryfast",
+            "-crf", "18", "render/visual.mp4"], cwd=d)
 
 
 def _plan_shots(scenes: list[dict], timings: dict, sentences: list[dict], total: float,
@@ -186,6 +214,12 @@ def run(pid: str, params: dict, progress) -> dict:
         cut = p["render"].get("cut_style") or ("dinamis" if p["format"] == "short" else "statis")
         shots = _plan_shots(scenes, timings, p["audio"].get("sentences") or [], total,
                             4.0 if p["format"] == "short" else 7.0, cut == "dinamis")
+        # Transisi antar-scene (ala CapCut). Shot terakhir sebelum pergantian scene dirender lebih panjang
+        # sebanyak durasi transisi, lalu xfade tumpang-tindih → total durasi tetap = durasi VO.
+        trans = p["render"].get("transition") or ("fade" if cut == "dinamis" else "none")
+        tf = TRANS_FRAMES if trans in TRANSITIONS else 0
+        extras = [tf if tf and j + 1 < len(shots) and shots[j + 1]["scene"] != sh["scene"]
+                  and min(sh["frames"], shots[j + 1]["frames"]) > tf * 2 else 0 for j, sh in enumerate(shots)]
         for j, sh in enumerate(shots):
             s = scenes[sh["scene"]]
             slot = p["assets"]["scenes"].get(s["id"]) or {}
@@ -194,11 +228,15 @@ def run(pid: str, params: dict, progress) -> dict:
             out = f"render/seg_{j:03d}.mp4"
             progress(f"Shot {j + 1}/{len(shots)} · scene {sh['scene'] + 1} ({sh['frames'] / config.FPS:.1f}s)"
                      + ("" if asset else " — tanpa visual, memakai latar polos"))
-            _scene_segment(d, asset, sh["frames"], out, W, H, slot.get("fit") or "auto", sh["shot"], sh["offset"])
+            _scene_segment(d, asset, sh["frames"] + extras[j], out, W, H, slot.get("fit") or "auto", sh["shot"],
+                           sh["offset"])
             concat.append(f"file 'seg_{j:03d}.mp4'")
-        (d / "render" / "concat.txt").write_text("\n".join(concat), encoding="utf-8")
-        progress("Menggabungkan scene...")
-        ff.run(["-f", "concat", "-safe", "0", "-i", "render/concat.txt", "-c", "copy", "render/visual.mp4"], cwd=d)
+        progress("Menggabungkan scene" + (f" + transisi {trans}…" if any(extras) else "…"))
+        if any(extras):
+            _join_with_transitions(d, shots, extras, TRANSITIONS[trans])
+        else:
+            (d / "render" / "concat.txt").write_text("\n".join(concat), encoding="utf-8")
+            ff.run(["-f", "concat", "-safe", "0", "-i", "render/concat.txt", "-c", "copy", "render/visual.mp4"], cwd=d)
         extra, music, sfx = _extra_audio_inputs(p, 2)
         graph = [f"[0:v]{sub_filter}[vout]"] + _audio_graph("[1:a]", 2, music, sfx, total)
         progress(f"Mixing audio + burn-in subtitle ({ff.video_encoder()})…")

@@ -127,8 +127,22 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     tidak bisa jalan. Dibuat `stt.py`: lokal → otomatis **Whisper Groq** (`whisper-large-v3-turbo`, gratis,
     timestamp kata). Jangan sarankan mematikan Smart App Control (tidak bisa dinyalakan lagi).
 
+11. **Mode "Cerita AI"** (permintaan user: hasil seperti CapCut, gambar AI dengan karakter konsisten):
+    `story.py` — buku karakter (LLM, strict schema) → gambar referensi per karakter → gambar tiap scene via
+    Pollinations `/v1/images/edits` dengan referensi karakter (base64) + seed tetap, model
+    `black-forest-labs/flux.2-klein-4b` (butuh `POLLINATIONS_KEY` gratis dari enter.pollinations.ai). Tanpa key:
+    teks→gambar FLUX klasik (konsistensi lemah, ±1 gambar/40 dtk, 402/503 sering). Gemini image TIDAK ada di
+    free tier key user. Render: transisi antar-scene xfade (`render._join_with_transitions`, `render.transition`).
+
+11. **14 Nov 2026 — ruang kerja terpisah:** sidebar punya tab **🎬 Dari Nol** / **✂ Clipper** (aksen ungu/oranye),
+    masing-masing dengan form proyek baru sendiri (Clipper: tempel link → langsung unduh, atau unggah file),
+    daftar proyek terfilter, nama tahap sendiri (`store.STAGE_LABELS_CLIPPER`), penjelasan tahap
+    (`store.STAGE_HELP`), dan layar sambutan. Link langsung `/#clipper`. Tahap internal tetap sama (7 kunci).
+    Juga ikut: mode visual **Cerita AI** (`story.py`, karakter konsisten via Pollinations) + transisi antar-scene.
+
 ## 5. Status & langkah berikutnya
-- Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**.
+- Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
+  untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).
 - [ ] `python run.py --setup-google`, isi library musik/SFX per mood di Drive, lalu uji satu upload
       (+ pasang thumbnail; channel perlu verifikasi nomor HP untuk thumbnail kustom).
 - Ide lanjutan: diarization pembicara Clipper, beat-sync potongan ke musik, importer musik Freesound,

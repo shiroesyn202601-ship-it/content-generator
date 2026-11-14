@@ -35,6 +35,36 @@ STAGE_LABELS = {
     "render": "6. Render Video",
     "publish": "7. Upload & Jadwal",
 }
+# Jalur Clipper memakai tahap internal yang sama, tetapi isinya beda → nama & penjelasan sendiri.
+STAGE_LABELS_CLIPPER = {
+    "research": "1. Video Sumber",
+    "script": "2. Transkrip & Momen",
+    "assets": "3. Potong & Bingkai",
+    "audio": "4. Musik & SFX",
+    "subtitles": "5. Subtitle",
+    "render": "6. Render Klip",
+    "publish": "7. Upload & Jadwal",
+}
+STAGE_HELP = {
+    "scratch": {
+        "research": "Cari ide dari tren YouTube, pilih satu angle.",
+        "script": "AI menulis naskah per scene berdasar sumber fakta; cek fakta & edit.",
+        "assets": "Pilih footage stok / foto / gambar AI untuk tiap scene.",
+        "audio": "Buat voice over, atur ritme, kamus pelafalan, musik & SFX.",
+        "subtitles": "Subtitle per kata dengan penekanan kata kunci.",
+        "render": "Gabungkan visual + suara + subtitle jadi video final.",
+        "publish": "Judul, deskripsi, tag, thumbnail, lalu upload / jadwalkan.",
+    },
+    "clipper": {
+        "research": "Tempel link YouTube atau unggah video yang punya izin.",
+        "script": "Transkrip per kata, lalu AI mencari momen viral tanpa memotong kalimat.",
+        "assets": "Potong klip terpilih dan atur bingkai 9:16 (ikuti wajah / blur / crop).",
+        "audio": "Audio asli dipakai; tambahkan musik latar (auto-ducking) & SFX bila perlu.",
+        "subtitles": "Subtitle dari transkrip asli; rapikan kata yang salah dengar.",
+        "render": "Gabungkan klip + subtitle + musik jadi video final.",
+        "publish": "Judul, deskripsi (cantumkan kredit sumber), thumbnail, upload / jadwal.",
+    },
+}
 
 VOICE_PRESETS = {
     # karakter suara -> parameter dasar Edge-TTS

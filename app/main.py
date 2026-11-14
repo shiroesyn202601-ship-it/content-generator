@@ -7,8 +7,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, clipper, render, research, scriptgen, subtitles, sync, thumbs,
-                       tts, youtube)
+from .services import (assets, audio_lib, batch, clipper, render, research, scriptgen, story, subtitles, sync,
+                       thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
 WEB = config.ROOT / "web"
@@ -73,6 +73,9 @@ ACTIONS = {
     "assets.select":       (assets.select_candidate, "assets", True),
     "assets.auto_all":     (assets.auto_all, "assets", True),
     "assets.cut_clip":     (clipper.cut_clip, "assets", True),
+    "assets.story_setup":  (story.setup, "assets", True),
+    "assets.story_chars":  (story.characters, "assets", True),
+    "assets.story_scenes": (story.scenes, "assets", True),
     "audio.render_vo":     (tts.render_vo, "audio", True),
     "audio.auto_plan":     (audio_lib.auto_plan, "audio", True),
     "subtitles.build":     (subtitles.build, "subtitles", True),
@@ -95,11 +98,15 @@ def _load(pid: str) -> dict:
 
 @app.get("/api/meta")
 def meta():
-    return {"stages": store.STAGES, "labels": store.STAGE_LABELS, "voice_presets": store.VOICE_PRESETS,
+    return {"stages": store.STAGES, "labels": store.STAGE_LABELS,
+            "labels_by_mode": {"scratch": store.STAGE_LABELS, "clipper": store.STAGE_LABELS_CLIPPER},
+            "stage_help": store.STAGE_HELP, "voice_presets": store.VOICE_PRESETS,
             "emotions": list(store.EMOTION_VOICE), "moods": store.MOODS, "google": config.google_enabled(),
             "sub_presets": store.SUB_PRESETS,
             "llm": config.LLM_PROVIDER,
-            "keys": {"pexels": bool(config.PEXELS_API_KEY), "pixabay": bool(config.PIXABAY_API_KEY)}}
+            "keys": {"pexels": bool(config.PEXELS_API_KEY), "pixabay": bool(config.PIXABAY_API_KEY),
+                     "pollinations": bool(config.POLLINATIONS_KEY)},
+            "story_styles": story.STYLE_LABEL}
 
 
 @app.get("/api/health")
@@ -269,6 +276,16 @@ def upload_asset(pid: str, sid: str, file: UploadFile = File(...)):
         return assets.save_upload(pid, sid, file.filename or "asset.mp4", file.file)
     except ValueError as e:
         raise HTTPException(400, str(e))
+
+
+@app.post("/api/projects/{pid}/story/char/{cid}/upload")
+def upload_char(pid: str, cid: str, file: UploadFile = File(...)):
+    """Unggah gambar referensi karakter sendiri (mis. foto/ilustrasi tokoh yang sudah jadi)."""
+    _load(pid)
+    try:
+        return story.save_char_upload(pid, cid, file.file)
+    except Exception as e:  # noqa: BLE001 — format gambar tidak dikenal, karakter tidak ada
+        raise HTTPException(400, f"Gagal memakai gambar: {e}")
 
 
 @app.get("/api/projects/{pid}/snap")

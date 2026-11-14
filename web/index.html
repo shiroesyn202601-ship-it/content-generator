@@ -12,25 +12,11 @@
     <div id="sysinfo" class="muted small"></div>
     <section id="backend" class="box" hidden></section>
 
-    <section class="box">
-      <h3>Proyek baru</h3>
-      <label class="field"><span>Jalur</span>
-        <select id="np-mode">
-          <option value="scratch">1 · Konten dari nol</option>
-          <option value="clipper">2 · Clipper (video / link YouTube)</option>
-        </select>
-      </label>
-      <label class="field"><span>Format</span>
-        <select id="np-format">
-          <option value="short">Short (9:16, ≤60 dtk)</option>
-          <option value="long">Long (16:9)</option>
-        </select>
-      </label>
-      <label class="field"><span>Kata kunci / judul kerja</span>
-        <input id="np-title" placeholder="mis. misteri sejarah nusantara">
-      </label>
-      <button id="np-create" class="primary">+ Buat proyek</button>
-    </section>
+    <nav id="tabs" class="tabs">
+      <button data-mode="scratch">🎬 Dari Nol <span class="cnt"></span></button>
+      <button data-mode="clipper">✂ Clipper <span class="cnt"></span></button>
+    </nav>
+    <section id="newproj" class="box"></section>
 
     <div class="row between">
       <h3>Proyek</h3>
@@ -45,8 +31,7 @@
   <main id="main">
     <div class="empty">
       <h1>Selamat datang 👋</h1>
-      <p>Buat proyek baru di kiri, lalu ikuti 7 tahap. Di setiap tahap Anda bisa
-        menjalankan AI, <b>mengedit manual</b>, lalu <b>Setujui &amp; Lanjut</b>.</p>
+      <p>Memuat…</p>
     </div>
   </main>
 

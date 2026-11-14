@@ -89,7 +89,11 @@ def check(ping_llm: bool = False) -> list[dict]:
     out.append(_item("Aset", "Pixabay", "ok" if config.PIXABAY_API_KEY else "fail",
                      "API key terisi" if config.PIXABAY_API_KEY else "API key kosong",
                      "" if config.PIXABAY_API_KEY else "Daftar gratis di pixabay.com/api/docs → isi PIXABAY_API_KEY"))
-    out.append(_item("Aset", "Pexels", "ok" if config.PEXELS_API_KEY else "warn",
+    out.append(_item("Aset", "Cerita AI (Pollinations)", "ok" if config.POLLINATIONS_KEY else "warn",
+                     f"key terisi · model {config.STORY_IMAGE_MODEL}" if config.POLLINATIONS_KEY
+                     else "tanpa key: karakter kurang konsisten & ±1 gambar/40 dtk",
+                     "" if config.POLLINATIONS_KEY else "Daftar gratis di enter.pollinations.ai → isi POLLINATIONS_KEY di .env"))
+    out.append(_item("Aset", "Pexels","ok" if config.PEXELS_API_KEY else "warn",
                      "API key terisi" if config.PEXELS_API_KEY else "kosong (opsional; key baru sedang ditutup Pexels)"))
     missing = [n.title() for n in fonts.CATALOG if not fonts.available(n)]
     out.append(_item("Aset", "Font subtitle", "ok" if not missing else "warn",
