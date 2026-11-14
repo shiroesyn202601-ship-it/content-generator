@@ -49,7 +49,7 @@ def check(ping_llm: bool = False) -> list[dict]:
     out.append(_item("Sistem", "Ruang disk", "ok" if free_gb > 5 else "warn", f"{free_gb:.1f} GB kosong",
                      "" if free_gb > 5 else "Kosongkan disk: render & footage butuh beberapa GB"))
     from . import stt
-    ok_local, why = stt.local_available()
+    ok_local, why = stt.local_available(probe=False)  # tanpa impor → tidak memicu notifikasi Windows
     if ok_local:
         out.append(_item("Sistem", "Transkrip (Whisper)", "ok", "Whisper lokal siap"))
     elif config.GROQ_API_KEY:

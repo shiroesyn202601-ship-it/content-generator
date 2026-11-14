@@ -17,24 +17,54 @@ GROQ_STT_URL = "https://api.groq.com/openai/v1/audio/transcriptions"
 GROQ_STT_MODEL = "whisper-large-v3-turbo"
 CHUNK_SEC = 30 * 60          # potongan audio untuk Groq (batas file gratis 25 MB)
 _local_error: str | None = None
+# Hasil "diblokir" disimpan permanen: setiap percobaan memuat DLL ctranslate2 yang diblokir Smart App Control
+# memunculkan notifikasi Windows "Part of this app has been blocked". Server sering restart (auto-reload),
+# jadi tanpa catatan ini notifikasi muncul berulang. Hapus file ini untuk mencoba Whisper lokal lagi.
+BLOCK_FILE = config.DATA_DIR / "stt_local_blocked.json"
 
 
-def local_available() -> tuple[bool, str]:
+def local_blocked() -> str:
+    """Pesan error yang tercatat bila Whisper lokal pernah gagal dimuat ("" = belum pernah / tidak diblokir)."""
+    try:
+        import json
+        return json.loads(BLOCK_FILE.read_text(encoding="utf-8")).get("error", "diblokir")
+    except (OSError, ValueError):
+        return ""
+
+
+def local_available(probe: bool = True) -> tuple[bool, str]:
+    """probe=False: jangan pernah mencoba impor (mis. Cek Kesiapan) — hanya pakai status yang tercatat."""
     global _local_error
     if _local_error is None:
-        try:
-            import ctranslate2  # noqa: F401
-            import faster_whisper  # noqa: F401
-            _local_error = ""
-        except Exception as e:  # noqa: BLE001 — termasuk DLL diblokir kebijakan Windows
-            _local_error = str(e)
+        if (config.STT_PROVIDER or "auto").lower() == "groq":
+            return False, "STT_PROVIDER=groq (Whisper lokal tidak dipakai)"
+        blocked = local_blocked()
+        if blocked and (config.STT_PROVIDER or "auto").lower() != "local":
+            _local_error = blocked
+        elif not probe:
+            return False, "belum dicek"
+        else:
+            try:
+                import ctranslate2  # noqa: F401
+                import faster_whisper  # noqa: F401
+                _local_error = ""
+            except Exception as e:  # noqa: BLE001 — termasuk DLL diblokir kebijakan Windows
+                _local_error = str(e) or type(e).__name__
+                try:
+                    import json
+                    import time
+                    BLOCK_FILE.parent.mkdir(parents=True, exist_ok=True)
+                    BLOCK_FILE.write_text(json.dumps({"error": _local_error[:500], "at": time.strftime("%Y-%m-%d %H:%M")}),
+                                          encoding="utf-8")
+                except OSError:
+                    pass
     return (not _local_error, _local_error)
 
 
 def transcribe(path: Path, language: str | None, progress=lambda m: None, total: float = 0) -> dict:
     """{"language", "segments": [{start, end, text, words: [{text, start, end}]}]}"""
     pref = (config.STT_PROVIDER or "auto").lower()
-    ok, why = local_available()
+    ok, why = local_available() if pref != "groq" else (False, "")
     if pref == "local" or (pref == "auto" and ok):
         if not ok:
             raise RuntimeError(f"Whisper lokal tidak bisa dimuat: {why}")

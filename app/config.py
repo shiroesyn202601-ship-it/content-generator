@@ -76,7 +76,7 @@ POLLINATIONS_KEY = _env("POLLINATIONS_KEY")
 STORY_IMAGE_MODEL = _env("STORY_IMAGE_MODEL", "black-forest-labs/flux.2-klein-4b")
 VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")
 # Transkrip: auto = Whisper lokal, bila diblokir/tidak ada → Whisper Groq | local | groq
-STT_PROVIDER = _env("STT_PROVIDER", "auto")  # auto | libx264 | h264_nvenc | h264_qsv | h264_amf
+STT_PROVIDER = _env("STT_PROVIDER", "auto")  # auto | local | groq (groq = tidak pernah memuat Whisper lokal)
 FFMPEG = _find_bin("ffmpeg", _env("FFMPEG_BIN", "ffmpeg"))
 FFPROBE = _find_bin("ffprobe", _env("FFPROBE_BIN", "ffprobe"))
 
