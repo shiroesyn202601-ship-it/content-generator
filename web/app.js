@@ -148,7 +148,8 @@ async function loadProject(pid, keepView = false, tab = null) {
   S.voiceDraft = clone(S.p.voice);
   S.dirty = false; S.voiceDirty = false;
   lsSet('lastProject', pid); lsSet(`lastProject_${S.tab}`, pid);
-  render(); refreshList();
+  await refreshList().catch(() => {});  // daftar dulu: header & Momen butuh S.all (proyek sumber/video hasil)
+  render();
   resumeJobs();
 }
 
@@ -318,16 +319,23 @@ function render() {
   const st = stageKey(), locked = S.view > p.current_stage, L = labelsFor(p.mode);
   applyTheme(p.mode);
 
+  const parent = p.parent ? (S.all || []).find((q) => q.id === p.parent) : null;
+  const container = isContainer(p);
+  if (parent) main.append(h('div', { class: 'row small' },
+    h('a', { href: '#', onclick: (e) => { e.preventDefault(); openProject(parent.id); } }, `← 📁 ${parent.title}`),
+    h('span', { class: 'muted' }, ` · video hasil ke-${kidsOf(parent.id).findIndex((q) => q.id === p.id) + 1} dari ${kidsOf(parent.id).length}`)));
   main.append(h('div', { class: 'row between' },
     h('div', {},
-      h('h1', {}, p.title),
+      h('h1', {}, container ? `📁 ${p.title}` : p.title),
       h('div', { class: 'row' },
-        h('span', { class: 'badge' }, p.mode === 'scratch' ? 'Jalur 1 · Dari nol' : 'Jalur 2 · Clipper'),
+        h('span', { class: 'badge' }, p.mode === 'scratch' ? 'Jalur 1 · Dari nol' : parent ? '🎞 Video hasil Clipper' : 'Jalur 2 · Clipper · video sumber'),
         h('span', { class: 'badge' }, p.format === 'short' ? 'Short 9:16' : 'Long 16:9'),
+        container ? h('span', { class: 'badge' }, `${kidsOf(p.id).length} video hasil`) : null,
         h('span', { class: 'badge' }, p.id))),
-    h('button', { class: 'ghost danger small', onclick: deleteProject }, 'Hapus proyek')));
+    h('button', { class: 'ghost danger small', onclick: deleteProject }, parent ? 'Hapus video ini' : 'Hapus proyek')));
 
-  main.append(h('div', { class: 'stepper' }, wizardStages(p.mode).map(([k, i]) => h('div', {
+  // Proyek sumber Clipper hanya punya tahap Video Sumber & Momen; tahap berikutnya dikerjakan per video hasil.
+  main.append(h('div', { class: 'stepper' }, wizardStages(p.mode).filter(([k]) => !container || k === 'research' || k === 'script').map(([k, i]) => h('div', {
     class: `step s-${p.stage_status[k]} ${i === S.view ? 'current' : ''} ${i > p.current_stage ? 'locked' : ''}`,
     onclick: () => setView(i),
   }, L[k], h('span', { class: 'st' }, statusLabel(p.stage_status[k]))))));
@@ -338,9 +346,10 @@ function render() {
     h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: S.raw, onchange: (e) => { S.raw = e.target.checked; render(); } }), 'Edit Manual (JSON mentah)'),
     h('button', { id: 'btn-save', onclick: () => saveDraft().catch((e) => toast(e.message, true)), disabled: locked || S.busy },
       S.dirty ? '💾 Simpan Edit Manual *' : '💾 Simpan Edit Manual'),
-    h('button', { class: 'success', onclick: approve, disabled: locked || S.busy }, '✓ Setujui & Lanjut')));
+    container && st === 'script' ? null : h('button', { class: 'success', onclick: approve, disabled: locked || S.busy }, '✓ Setujui & Lanjut')));
 
-  if (helpFor(p.mode, st)) panel.append(h('div', { class: 'muted small stage-help' }, helpFor(p.mode, st)));
+  if (container && st === 'script') panel.append(h('div', { class: 'muted small stage-help' }, 'Tiap klip pilihan dijadikan video sendiri di dalam proyek ini — otomatis sekaligus (🏭) atau satu per satu (🎬) untuk diedit manual per tahap.'));
+  else if (helpFor(p.mode, st)) panel.append(h('div', { class: 'muted small stage-help' }, helpFor(p.mode, st)));
   if (st === 'render' && readyForUpload(p)) panel.append(h('div', { class: 'hint ok row' },
     h('span', { class: 'grow' }, '✅ Video sudah disetujui dan masuk antrean upload.'),
     h('button', { class: 'small primary', onclick: () => loadProject(p.id, false, 'publish') }, '📅 Buka di Upload & Jadwal')));
@@ -367,9 +376,21 @@ function rawEditor() {
   return h('div', {}, hint('Kontrol penuh: semua data tahap ini bisa diubah langsung. Format mengikuti skema kanonik (lihat docs/ARCHITECTURE.md).'), ta, err);
 }
 
+// ---- Clipper: 1 video sumber = 1 proyek (wadah); tiap video hasil = proyek anak (field parent).
+const isContainer = (p) => !!p && p.mode === 'clipper' && !p.parent && (p.current_stage || 0) <= 1;
+const kidsOf = (pid) => (S.all || []).filter((q) => q.parent === pid).sort((a, b) => a.id.localeCompare(b.id));
+const kidStatus = (q) => (readyForUpload(q) ? (q.publish.video_id ? '✅ sudah diunggah' : '📅 siap upload')
+  : `✎ ${labelsFor('clipper')[S.meta.stages[q.current_stage]] || ''}`);
+function openProject(id, tab = null) {
+  if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
+  loadProject(id, false, tab);
+}
+
 async function deleteProject() {
-  if (!confirm(`Hapus proyek "${S.p.title}" beserta semua file lokalnya? (Backup di Google Drive tidak ikut terhapus)`)) return;
-  await api('DELETE', `/api/projects/${S.p.id}`);
+  if (!confirm(`Hapus ${S.p.parent ? 'video' : 'proyek'} "${S.p.title}" beserta semua file lokalnya? (Backup di Google Drive tidak ikut terhapus)`)) return;
+  const kids = kidsOf(S.p.id).length;
+  const withKids = kids > 0 && confirm(`Proyek ini punya ${kids} video hasil.\nOK = hapus juga semua video hasil.\nBatal = video hasil tetap disimpan (jadi proyek mandiri).`);
+  await api('DELETE', `/api/projects/${S.p.id}${withKids ? '?with_children=true' : ''}`);
   lsSet(`lastProject_${S.p.mode}`, null); lsSet('lastProject_publish', null); S.p = null; lsSet('lastProject', null);
   renderWelcome(S.tab);
   refreshList();
@@ -710,7 +731,7 @@ function producePanel(d) {
       h('span', { class: 'row small' },
         btn('Centang semua', () => { d.clips.forEach((c) => set.add(c.id)); render(); }, 'small ghost'),
         btn('Kosongkan', () => { set.clear(); render(); }, 'small ghost'))),
-    h('div', { class: 'muted small' }, 'Tiap klip yang dicentang (☑) → proyek sendiri → dipotong & dibingkai → subtitle → render → 3 thumbnail. Hasilnya masuk tab 📅 Upload untuk dicek sebelum diunggah; tiap video tetap bisa dibuka & diedit per tahap.'),
+    h('div', { class: 'muted small' }, 'Tiap klip yang dicentang (☑) → video hasil di proyek ini → dipotong & dibingkai → subtitle → render → 3 thumbnail. Hasilnya masuk tab 📅 Upload untuk dicek sebelum diunggah; tiap video tetap bisa dibuka & diedit per tahap.'),
     h('div', { class: 'grid' },
       field('Bingkai 9:16', opt, 'crop_mode', { type: 'select', dirty: () => {}, options: [
         ['face', 'Ikuti wajah (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] }),
@@ -723,7 +744,7 @@ function producePanel(d) {
         if (!confirm(`Buat ${n} video sekaligus? Tiap video dipotong, diberi subtitle, dirender, dan dibuatkan thumbnail (±1-2 menit per video). Bisa ditinggal — progres terlihat di bar bawah.`)) return;
         const indexes = d.clips.map((c, i) => (set.has(c.id) ? i : -1)).filter((i) => i >= 0);
         const r = await runAction('script.produce_clips', { indexes, crop_mode: opt.crop_mode, sub_style: templateStyle(opt.template), music: opt.music, mood: opt.mood });
-        if (r) { S.lastProduce = { pid: S.p.id, res: r }; toast(`${r.created.length} video jadi${r.failed.length ? `, ${r.failed.length} perlu dicek` : ''} — lihat tab 📅 Upload`); render(); refreshList(); }
+        if (r) { S.lastProduce = { pid: S.p.id, res: r }; toast(`${r.created.length} video jadi${r.failed.length ? `, ${r.failed.length} perlu dicek` : ''} — lihat daftar Video hasil & tab 📅 Upload`); await refreshList(); render(); }
       }, 'primary'),
       h('span', { class: 'muted small' }, `${n} dari ${d.clips.length} klip dicentang`)),
     res ? h('div', { class: 'produce-res' },
@@ -753,37 +774,52 @@ function rScriptClipper() {
   const d = S.draft, box = h('div');
   const src = S.p.research.source || {};
   const vid = h('video', { class: 'preview-v', src: media(src.path), controls: true, preload: 'metadata' });
-  box.append(h('div', { class: 'row' },
+  // Video hasil (proyek anak): hanya klip miliknya. Proyek sumber (wadah): semua klip → banyak video.
+  const child = !!S.p.parent, container = isContainer(S.p), kids = kidsOf(S.p.id);
+  const kidFor = (c) => kids.find((q) => q.clip_id === c.id);
+  if (child) {
+    box.append(hint('Ini satu video hasil dari proyek sumber. Atur waktu & bingkai klip ini, potong, lalu "Setujui & Lanjut". Klip lain & video baru dibuat di proyek sumber (link ← di atas).'));
+  } else box.append(h('div', { class: 'row' },
     btn('1 · Transkrip (Whisper)', () => runAction('script.transcribe'), d.transcript ? '' : 'primary'),
     btn('2 · Cari Momen Viral (AI)', () => runAction('script.find_clips', { direction: d.direction || '' }), d.transcript ? 'primary' : ''),
     btn('+ Klip manual', () => { d.clips = d.clips || []; const t = vid.currentTime || 0; d.clips.push({ id: `m${Date.now().toString(36)}`, start: t, end: t + 30, title: 'Klip manual', hook: '', reason: '', score: 0, keywords: [] }); markDirty(); render(); }, 'ghost')));
-  box.append(field('Arahan AI (opsional)', d, 'direction', { placeholder: 'mis. cari momen lucu / fokus ke tips praktis / bagian tentang modal usaha' }));
-  box.append(hint('AI menilai tiap momen 0-100 dari hook, alur, nilai, dan potensi dibagikan. Klip selalu mulai & berakhir di batas kalimat (ditambah jeda napas), jadi tidak ada kata yang terpotong. Setelah mengubah waktu manual, klik "Snap".'));
-  if (d.clip_note) box.append(hint(`⚠ ${d.clip_note}`, 'warn'));
+  if (!child) box.append(field('Arahan AI (opsional)', d, 'direction', { placeholder: 'mis. cari momen lucu / fokus ke tips praktis / bagian tentang modal usaha' }));
+  if (!child) box.append(hint('AI menilai tiap momen 0-100 dari hook, alur, nilai, dan potensi dibagikan. Klip selalu mulai & berakhir di batas kalimat (ditambah jeda napas), jadi tidak ada kata yang terpotong. Setelah mengubah waktu manual, klik "Snap".'));
+  if (d.clip_note && !child) box.append(hint(`⚠ ${d.clip_note}`, 'warn'));
   box.append(vid);
   const sel = d.selected_clip;
-  if ((d.clips || []).length) box.append(producePanel(d));
+  if (!child && kids.length) box.append(h('div', { class: 'card' },
+    h('b', {}, `🎞 Video hasil dari proyek ini (${kids.length})`),
+    kids.map((q, n) => h('div', { class: 'row small' }, `${n + 1}. `,
+      h('a', { href: '#', onclick: (e) => { e.preventDefault(); openProject(q.id); } }, q.title),
+      h('span', { class: 'muted' }, kidStatus(q)),
+      readyForUpload(q) ? h('a', { href: '#', onclick: (e) => { e.preventDefault(); openProject(q.id, 'publish'); } }, '📅 Upload') : null))));
+  if (!child && (d.clips || []).length) box.append(producePanel(d));
   (d.clips || []).forEach((c, i) => {
+    if (child && i !== sel) return;
+    const kid = container || !child ? kidFor(c) : null;
     const durEl = h('span', { class: 'badge' }, `${(c.end - c.start).toFixed(1)} dtk`);
     box.append(h('div', { class: `card ${sel === i ? 'selected' : ''}` },
       h('div', { class: 'row between' },
         h('label', { class: 'row' },
-          h('input', { type: 'checkbox', title: 'Ikut produksi massal', checked: picks().has(c.id),
+          child ? null : h('input', { type: 'checkbox', title: 'Ikut produksi massal', checked: picks().has(c.id),
             onchange: (e) => { e.target.checked ? picks().add(c.id) : picks().delete(c.id); render(); } }),
-          h('input', { type: 'radio', name: 'clip', title: 'Kerjakan di proyek ini', checked: sel === i, onchange: () => { d.selected_clip = i; markDirty(); render(); } }),
-          h('b', {}, c.title || c.id), durEl, scoreBadge(c)),
+          child ? null : h('input', { type: 'radio', name: 'clip', title: container ? 'Klip aktif (untuk ⇤ awal / ⇥ akhir di transkrip)' : 'Kerjakan di proyek ini', checked: sel === i, onchange: () => { d.selected_clip = i; markDirty(); render(); } }),
+          h('b', {}, c.title || c.id), durEl, scoreBadge(c),
+          kid ? h('span', { class: 'badge' }, '🎞 sudah jadi video') : null),
         h('div', { class: 'row' },
           btn('▶ Putar', () => playSegment(vid, c.start, c.end), 'small'),
           btn('🧲 Snap ke kalimat', async () => {
             const r = await api('GET', `/api/projects/${S.p.id}/snap?start=${c.start}&end=${c.end}`);
             c.start = r.start; c.end = r.end; markDirty(); render();
           }, 'small'),
-          btn('⑂ Jadikan proyek baru', async () => {
+          child ? null : kid ? btn('🎞 Buka video', () => openProject(kid.id), 'small') : btn('🎬 Jadikan video', async () => {
             if (S.dirty) await saveDraft(true);
             const np = await api('POST', `/api/projects/${S.p.id}/fork`, { clip_index: i });
-            toast(`Proyek baru dibuat: ${np.title}`); refreshList();
+            toast(`Video dibuat di proyek ini: ${np.title} — atur & potong, lalu lanjut per tahap.`);
+            await refreshList(); openProject(np.id);
           }, 'small ghost'),
-          btn('✕', () => { d.clips.splice(i, 1); if (d.selected_clip === i) d.selected_clip = null; markDirty(); render(); }, 'small ghost danger'))),
+          child ? null : btn('✕', () => { d.clips.splice(i, 1); if (d.selected_clip === i) d.selected_clip = null; markDirty(); render(); }, 'small ghost danger'))),
       h('div', { class: 'grid' },
         field('Mulai (dtk)', c, 'start', { type: 'number', step: 0.1, onchange: () => (durEl.textContent = `${(c.end - c.start).toFixed(1)} dtk`) }),
         field('Selesai (dtk)', c, 'end', { type: 'number', step: 0.1, onchange: () => (durEl.textContent = `${(c.end - c.start).toFixed(1)} dtk`) }),
@@ -791,7 +827,7 @@ function rScriptClipper() {
       field('Kata kunci ditekankan', c, 'keywords', { type: 'csv' }),
       c.scores ? h('div', { class: 'row small' }, Object.entries(SUB_LABEL).map(([k, l]) => h('span', { class: 'subscore' }, `${l} `, h('b', {}, c.scores[k] ?? '-')))) : null,
       c.reason ? h('div', { class: 'muted small' }, 'Alasan AI: ', c.reason) : null,
-      sel === i ? cutPanel(c) : null));
+      sel === i && !container ? cutPanel(c) : null));
   });
   if (d.transcript) {
     const segs = d.transcript.segments || [];
@@ -1482,24 +1518,30 @@ async function refreshList() {
   S.all = all;
   S.counts = { scratch: 0, clipper: 0, publish: 0 };
   all.forEach((p) => {
-    S.counts[p.mode] = (S.counts[p.mode] || 0) + 1;
+    S.counts[p.mode] = (S.counts[p.mode] || 0) + (p.parent ? 0 : 1);  // video hasil Clipper ikut proyek sumbernya
     if (readyForUpload(p) && !p.publish.video_id) S.counts.publish += 1;  // yang belum diunggah
   });
   document.querySelectorAll('#tabs button').forEach((b) => { $('.cnt', b).textContent = S.counts[b.dataset.mode] || ''; });
   const ul = $('#project-list'); ul.innerHTML = '';
   if (S.tab === 'publish') return publishList(all, ul);
-  const list = all.filter((p) => p.mode === S.tab);
+  // Clipper: video hasil (proyek anak) tampil bersarang di bawah proyek sumbernya, bukan sejajar.
+  const ids = new Set(all.map((p) => p.id));
+  const list = all.filter((p) => p.mode === S.tab && !(p.parent && ids.has(p.parent)));
   if (!list.length) ul.append(h('li', { class: 'muted small', style: 'cursor:default' },
     S.tab === 'clipper' ? 'Belum ada proyek clipper.' : 'Belum ada proyek dari nol.'));
   list.forEach((p) => {
     const done = Object.values(p.stage_status).filter((s) => s === 'approved').length;
-    ul.append(h('li', { class: S.p && S.p.id === p.id ? 'active' : '', onclick: () => {
-      if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
-      loadProject(p.id);
-    } },
-      h('div', {}, p.title),
-      h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'} · ${readyForUpload(p) ? (p.publish.video_id ? '✅ sudah diunggah' : '📅 siap upload') : labelsFor(p.mode)[S.meta.stages[p.current_stage]]}`),
-      h('div', { class: 'pbar' }, h('i', { style: `width:${Math.min(done, PUB) / PUB * 100}%` }))));
+    const kids = kidsOf(p.id);
+    const openGroup = S.p && (S.p.id === p.id || S.p.parent === p.id);
+    const status = kids.length && isContainer(p)
+      ? `🎞 ${kids.length} video · ${kids.filter((q) => readyForUpload(q)).length} siap upload`
+      : readyForUpload(p) ? (p.publish.video_id ? '✅ sudah diunggah' : '📅 siap upload') : labelsFor(p.mode)[S.meta.stages[p.current_stage]];
+    ul.append(h('li', { class: S.p && S.p.id === p.id ? 'active' : '', onclick: () => openProject(p.id) },
+      h('div', {}, p.mode === 'clipper' && kids.length ? `📁 ${p.title}` : p.title),
+      h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'} · ${status}`),
+      kids.length && isContainer(p) ? null : h('div', { class: 'pbar' }, h('i', { style: `width:${Math.min(done, PUB) / PUB * 100}%` }))));
+    if (openGroup) kids.forEach((q, n) => ul.append(h('li', { class: `child ${S.p.id === q.id ? 'active' : ''}`, onclick: () => openProject(q.id) },
+      h('div', { class: 'small' }, `↳ ${n + 1}. ${q.title}`), h('div', { class: 'muted small' }, kidStatus(q)))));
   });
 }
 
@@ -1529,6 +1571,7 @@ function publishList(all, ul) {
     } },
       h('div', {}, p.mode === 'clipper' ? '✂ ' : '🎬 ', p.publish.title || p.title),
       h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'}`,
+        p.parent ? ` · 📁 ${((all.find((q) => q.id === p.parent) || {}).title || '').slice(0, 30)}` : '',
         p.publish.publish_at ? ` · tayang ${fmtWhen(p.publish.publish_at)}` : p.publish.video_id ? ` · ${p.publish.privacy || ''}` : ''))));
   });
   const wip = all.length - ready.length;

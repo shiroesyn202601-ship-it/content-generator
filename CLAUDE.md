@@ -191,6 +191,15 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       stiker panah/lingkaran; pratinjau live `/thumbnail/preview`; variasi untuk A/B; dipasang via `publish.thumbnail`.
     - Catatan: render otomatis ikut mengunggah ke Google Drive bila Google terhubung (juga saat produksi massal).
 
+15. **15 Nov 2026 — Clipper: 1 video sumber = 1 proyek, banyak video hasil** (permintaan user). Data tetap: tiap video
+    hasil = proyek anak (`parent` = proyek sumber, dibuat `clipper.fork_clip`), jadi pipeline per tahap tidak berubah.
+    Yang berubah tampilan & aturan: proyek sumber (`isContainer` di app.js: clipper, tanpa parent, current_stage ≤ 1)
+    hanya punya tahap Video Sumber & Momen (tanpa Setujui di Momen); tiap klip "🎬 Jadikan video" / "🎞 Buka video";
+    kartu "Video hasil". Sidebar: video hasil bersarang di bawah proyek sumbernya (`li.child`), hitungan tab hanya
+    proyek sumber. Video hasil: link ← ke sumber, hanya klipnya sendiri yang tampil. `list_projects` memuat
+    `parent` & `clip_id`. Hapus sumber: `?with_children=true` ikut hapus, kalau tidak anak dilepas jadi mandiri.
+    Proyek lama yang sumbernya sudah jadi video sendiri (current_stage > 1) tetap berperilaku lama + anak bersarang.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

@@ -62,7 +62,7 @@ STAGE_HELP = {
     },
     "clipper": {
         "research": "Tempel link YouTube atau unggah video yang punya izin.",
-        "script": "Transkrip, AI mencari momen viral, lalu potong satu klip — atau produksi banyak klip sekaligus.",
+        "script": "Transkrip, AI mencari momen viral, lalu jadikan klip pilihan video hasil (banyak sekaligus atau satu per satu).",
         "assets": "Potong klip terpilih dan atur bingkai 9:16 (ikuti wajah / blur / crop).",
         "audio": "Audio asli dipakai; tambahkan musik latar (auto-ducking) & SFX bila perlu.",
         "subtitles": "Subtitle dari transkrip asli: pilih template atau atur gaya, warna, animasi & posisi.",
@@ -306,6 +306,12 @@ def list_projects() -> list[dict]:
             pub, rnd = p.get("publish") or {}, p.get("render") or {}
             item["rendered"] = bool(rnd.get("output_path"))
             item["publish"] = {k: pub.get(k) for k in ("title", "publish_at", "privacy", "video_id", "url", "status")}
+            # Clipper: 1 video sumber = 1 proyek; tiap video hasil = proyek anak (parent = proyek sumber).
+            if p.get("parent"):
+                sc = p.get("script") or {}
+                clips, sel = sc.get("clips") or [], sc.get("selected_clip")
+                item["parent"] = p["parent"]
+                item["clip_id"] = clips[sel].get("id") if sel is not None and 0 <= sel < len(clips) else None
             out.append(item)
         except Exception:
             continue

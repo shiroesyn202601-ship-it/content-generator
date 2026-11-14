@@ -150,10 +150,17 @@ def get_project(pid: str):
 
 
 @app.delete("/api/projects/{pid}")
-def delete_project(pid: str):
+def delete_project(pid: str, with_children: bool = False):
+    """with_children: Clipper — ikut hapus video hasil (proyek anak). Tanpa itu anak jadi proyek mandiri."""
     _load(pid)
+    kids = [q["id"] for q in store.list_projects() if q.get("parent") == pid]
     shutil.rmtree(store.project_dir(pid), ignore_errors=True)
-    return {"ok": True}
+    for k in kids:
+        if with_children:
+            shutil.rmtree(store.project_dir(k), ignore_errors=True)
+        else:
+            store.update(k, lambda q: (q.pop("parent", None), store.log(q, f"Proyek sumber {pid} dihapus")))
+    return {"ok": True, "children": len(kids), "deleted_children": with_children}
 
 
 @app.post("/api/projects/{pid}/fork")

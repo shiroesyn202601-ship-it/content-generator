@@ -42,6 +42,8 @@ textarea { resize: vertical; }
 #project-list li { padding: 8px 10px; border-radius: 8px; cursor: pointer; margin-bottom: 4px; border: 1px solid transparent; }
 #project-list li:hover { background: var(--panel2); }
 #project-list li.active { border-color: var(--accent); background: var(--panel2); }
+#project-list li.child { margin-left: 14px; padding: 5px 10px; border-left: 2px solid var(--line); border-radius: 0 8px 8px 0; }
+#project-list li.child.active { border-color: var(--accent); }
 .pbar { height: 4px; background: var(--line); border-radius: 2px; margin-top: 4px; }
 .pbar > i { display: block; height: 100%; background: var(--accent2); border-radius: 2px; }
 
