@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, brand, clipper, fonts, prompts, render, research, scriptgen, story,
+from .services import (assets, audio_lib, batch, brand, enhance, clipper, fonts, prompts, render, research, scriptgen, story,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
@@ -78,6 +78,7 @@ ACTIONS = {
     "assets.cut_clip":     (clipper.cut_clip, "script", True),   # Clipper: tahap Momen & Potong (gabungan)
     "script.produce_clips": (clipper.produce_clips, "script", True),
     "research.auto_clip":  (clipper.auto_clip, "research", True),
+    "assets.enhance":     (enhance.run, "script", True),     # Clipper: komentar, konteks, fakta, B-roll, dll.
     "research.rebrand":    (clipper.rebrand, "research", True),   # Clipper: render ulang semua klip (logo/overlay)
     "assets.story_setup":  (story.setup, "assets", True),
     "assets.story_chars":  (story.characters, "assets", True),
@@ -148,6 +149,8 @@ def create(body: dict = Body(...)):
 def get_project(pid: str):
     p = _load(pid)
     p["_jobs"] = jobs.active_for(pid)
+    if p.get("mode") == "clipper" and p.get("enhance"):
+        p["_enh_valid"] = enhance.valid(p)
     p["_interrupted"] = jobs.recent_interrupted(pid)
     return p
 

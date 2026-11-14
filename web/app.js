@@ -775,7 +775,8 @@ function cutPanel(c) {
         runAction('assets.cut_clip', { crop_mode: opt.crop_mode }, true);
       }, cutOk ? 'small' : 'small primary'),
       h('span', { class: 'muted small' }, cutOk ? '✓ Sudah dipotong — cek hasilnya, lalu "Setujui & Lanjut".' : 'Potong dulu sebelum Setujui.')),
-    cutOk ? h('video', { class: 'preview-v small-v', src: media(a.clip_path), controls: true, preload: 'metadata' }) : null);
+    cutOk ? h('video', { class: 'preview-v small-v', src: media(a.clip_path), controls: true, preload: 'metadata' }) : null,
+    cutOk ? enhancePanel() : null);
 }
 
 function rScriptClipper() {
@@ -1599,6 +1600,8 @@ function clipOptionsView(o, rerender) {
     h('details', { class: 'ch-more', open: !!S.brandOpen, ontoggle: (e) => { S.brandOpen = e.target.open; } },
       h('summary', {}, '🏷 Logo & overlay (semua klip)'),
       brandPanel({ format: o.format })),
+    h('details', { class: 'ch-more', open: o._enhOpen !== false, ontoggle: (ev) => { o._enhOpen = ev.target.open; saveClipOpts(o); } },
+      h('summary', {}, '✨ Nilai tambah (komentar, konteks, B-roll…)'), enhanceOptsView(o, rerender)),
     h('details', { class: 'ch-more' }, h('summary', {}, 'Opsi lain'),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Bingkai'),
         seg(o, 'crop_mode', [['face', 'Ikuti wajah'], ['blur', 'Latar blur'], ['center', 'Crop tengah']], upd)),
@@ -1678,13 +1681,15 @@ function brandPanel(sample) {
     const prevDraw = () => {
       prev.innerHTML = '';
       if (sample && sample.thumb) prev.append(h('img', { class: 'bp-bg', src: sample.thumb }));
-      if (!b.enabled) return;
+      // lapisan tetap ditampilkan walau nonaktif (diredupkan) supaya file yang diunggah kelihatan
+      const dim = (el) => { if (!b.enabled) el.style.filter = 'grayscale(1) brightness(.6)'; };
       if (b.overlay.file) {
         const el = isVid(b.overlay.file) ? h('video', { src: url(b.overlay.file), autoplay: true, muted: true, loop: true, playsInline: true }) : h('img', { src: url(b.overlay.file) });
-        el.className = 'bp-layer'; place(el, b.overlay); prev.append(el);
+        el.className = 'bp-layer'; place(el, b.overlay); dim(el); prev.append(el);
       }
-      if (b.logo.file) { const el = h('img', { class: 'bp-layer', src: url(b.logo.file) }); place(el, b.logo); prev.append(el); }
+      if (b.logo.file) { const el = h('img', { class: 'bp-layer', src: url(b.logo.file) }); place(el, b.logo); dim(el); prev.append(el); }
       prev.append(h('div', { class: 'bp-sub' }, 'SUBTITLE'));
+      if (!b.enabled && (b.logo.file || b.overlay.file)) prev.append(h('div', { class: 'bp-off' }, 'NONAKTIF — centang di atas'));
     };
     prevDraw();
 
@@ -1715,6 +1720,76 @@ function brandPanel(sample) {
         fmt === 'short' ? 'Shorts: hindari sisi kanan & bawah (tertutup tombol YouTube).' : ''));
   };
   draw();
+  return box;
+}
+
+// ---------------------------------------------------------------- nilai tambah Clipper
+/* Supaya klip bukan sekadar "potong + subtitle": komentar kreator (TTS), kartu konteks & fakta,
+   B-roll, rapatkan jeda, punch-in, emoji & SFX, variasi gaya per klip. Default semua aktif. */
+const ENH_DEF = { commentary: 'both', persona: '', creator: 'Shiroe Syn', context: true, facts: true, broll: true,
+  tighten: true, punch: true, emoji: true, sfx: true, vary: true };
+const ENH_FLAGS = [
+  ['context', 'Kartu konteks', '"Siapa dia" diambil dari Wikipedia'],
+  ['facts', 'Kartu fakta', 'klaim dicek ke Wikipedia; hanya yang terbukti ditampilkan'],
+  ['broll', 'B-roll otomatis', 'gambar saat narasumber menyebut sesuatu'],
+  ['tighten', 'Rapatkan jeda', 'buang jeda panjang & "eh/anu"'],
+  ['punch', 'Punch-in', 'zoom bergantian per kalimat'],
+  ['emoji', 'Emoji', 'di kata penting'],
+  ['sfx', 'SFX', 'whoosh/pop'],
+  ['vary', 'Variasi gaya', 'warna & animasi subtitle beda tiap klip (anti "template massal")']];
+
+function enhanceOptsView(o, upd) {
+  o.enhance = { ...ENH_DEF, ...(o.enhance || {}) };
+  const e = o.enhance;
+  const save = () => { saveClipOpts(o); };
+  return h('div', { class: 'enh-opts' },
+    h('div', { class: 'ch-opt' }, h('b', {}, 'Komentar kreator (suara AI)'),
+      seg(e, 'commentary', [['both', 'Pembuka + penutup'], ['intro', 'Pembuka'], ['outro', 'Penutup'], ['off', 'Tidak']], () => { save(); upd(); })),
+    e.commentary !== 'off' ? h('div', { class: 'row' },
+      h('input', { value: e.creator || '', placeholder: 'Nama di layar (mis. Shiroe Syn)', style: 'max-width:200px',
+        oninput: (ev) => { e.creator = ev.target.value; save(); } }),
+      h('input', { value: e.persona || '', placeholder: 'Gaya bicara: santai, kritis, sedikit humor…', class: 'grow',
+        oninput: (ev) => { e.persona = ev.target.value; save(); } })) : null,
+    h('div', { class: 'enh-flags' }, ENH_FLAGS.map(([k, label, hint]) => h('label', { class: 'enh-flag', title: hint },
+      h('input', { type: 'checkbox', checked: !!e[k], onchange: (ev) => { e[k] = ev.target.checked; save(); } }),
+      h('span', {}, label), h('small', { class: 'muted' }, hint)))),
+    h('div', { class: 'muted small' }, 'YouTube (2025–2026) tidak lagi menghitung potong + subtitle sebagai nilai tambah. Komentar, konteks & fakta membuat klip "transformatif" untuk monetisasi & jangkauan.'));
+}
+
+/* Mode lanjutan: lihat & edit rencana AI lalu terapkan ulang (tanpa memanggil AI lagi). */
+function enhancePanel() {
+  const p = S.p, e = p.enhance;
+  const opts = { ...ENH_DEF, ...((e && e.opts) || clipOpts().enhance || {}) };
+  const box = h('div', { class: 'card enh-panel' });
+  const head = h('div', { class: 'row between' }, h('h3', {}, '✨ Nilai tambah'),
+    e ? h('span', { class: `badge ${p._enh_valid ? 'ok' : 'warn'}` }, p._enh_valid ? 'terpasang' : 'perlu diterapkan ulang (klip dipotong ulang)') : null);
+  box.append(head);
+  if (!e) {
+    box.append(h('p', { class: 'muted small' }, 'Tambahkan komentar kreator, kartu konteks/fakta, B-roll, emoji & SFX ke klip ini.'),
+      btn('✨ Buat nilai tambah', () => runAction('assets.enhance', { opts }, true), 'primary small'));
+    return box;
+  }
+  const plan = clone(e.plan || {});
+  const dirty = () => { applyBtn.disabled = false; applyBtn.classList.add('primary'); };
+  const ta = (obj, key, ph) => h('textarea', { rows: 2, placeholder: ph, oninput: (ev) => { obj[key] = ev.target.value; dirty(); } }, obj[key] || '');
+  const list = (arr, render) => h('div', { class: 'enh-list' }, arr.map((x, i) => h('div', { class: 'row' }, render(x),
+    h('button', { class: 'ghost small danger', onclick: (ev) => { arr.splice(i, 1); ev.target.closest('.row').remove(); dirty(); } }, '✕'))));
+  const inp = (obj, key, w) => h('input', { value: obj[key] || '', style: w ? `width:${w}` : '', class: w ? '' : 'grow', oninput: (ev) => { obj[key] = ev.target.value; dirty(); } });
+  box.append(
+    h('div', { class: 'muted small' }, `Durasi ${fmtT(e.duration)} · jeda dibuang ${e.removed} dtk · ${e.shots} potongan · ${(e.broll || []).length} B-roll · ${(e.emoji || []).length} emoji · ${(e.cards || []).filter((c) => c.kind !== 'voice').length} kartu`),
+    h('label', {}, h('b', {}, 'Komentar pembuka'), ta(plan, 'intro', 'kosongkan = tanpa pembuka')),
+    h('label', {}, h('b', {}, 'Komentar penutup'), ta(plan, 'outro', 'kosongkan = tanpa penutup')));
+  if (plan.context) box.append(h('div', {}, h('b', {}, 'Kartu konteks'), h('div', { class: 'row' }, inp(plan.context, 'name', '180px'), inp(plan.context, 'role'),
+    h('button', { class: 'ghost small danger', onclick: () => { plan.context = null; dirty(); applyBtn.click(); } }, '✕'))));
+  if ((plan.facts || []).length) box.append(h('b', {}, 'Kartu fakta'), list(plan.facts, (f) => [h('span', { class: `badge ${f.verdict === 'didukung' ? 'ok' : 'warn'}` }, f.verdict === 'didukung' ? 'FAKTA' : 'KONTEKS'), inp(f, 'text')]));
+  if ((plan.broll || []).length) box.append(h('b', {}, 'B-roll (kata → pencarian foto)'), list(plan.broll, (b) => [h('span', { class: 'muted small', style: 'width:110px' }, b.word), inp(b, 'query_en')]));
+  if ((plan.emoji || []).length) box.append(h('b', {}, 'Emoji'), list(plan.emoji, (x) => [h('span', { style: 'font-size:20px' }, x.emoji), h('span', { class: 'muted small grow' }, x.word)]));
+  const applyBtn = btn('↻ Terapkan suntingan', () => runAction('assets.enhance', { opts, plan }, true), 'small');
+  applyBtn.disabled = p._enh_valid;
+  box.append(h('div', { class: 'row', style: 'margin-top:8px' }, applyBtn,
+    btn('✨ Buat ulang dengan AI', () => runAction('assets.enhance', { opts, plan: null, reuse_plan: false }, true), 'small ghost'),
+    p._enh_valid ? h('video', { class: 'preview-v small-v', src: media(e.path), controls: true, preload: 'metadata' }) : null),
+    h('div', { class: 'muted small' }, 'Setelah mengubah, subtitle & render perlu dibuat ulang (tahap berikutnya otomatis ditandai).'));
   return box;
 }
 
@@ -1756,7 +1831,7 @@ async function startAutoClip(extra = {}) {
   S.clipRun = S.p.id;
   render();
   const r = await runAction('research.auto_clip', { ...extra, duration: o.duration, count: o.count, template: o.template,
-    crop_mode: o.crop_mode, music: o.music, direction: o.direction });
+    crop_mode: o.crop_mode, music: o.music, direction: o.direction, enhance: { ...ENH_DEF, ...(o.enhance || {}) } });
   S.clipRun = null;
   if (r) toast(`${r.created.length} klip jadi 🎉${r.failed.length ? ` (${r.failed.length} gagal)` : ''}`);
   await refreshList(); render();
@@ -1842,7 +1917,7 @@ function renderClipSource() {
         btn('✨ Buat klip ini', async () => {
           const o = clipOpts(); S.clipRun = p.id; render();
           const tpl = (S.meta.sub_user_templates || {})[o.template] || (S.meta.sub_templates || {})[o.template];
-          await runAction('script.produce_clips', { indexes: [i], crop_mode: o.crop_mode, music: o.music,
+          await runAction('script.produce_clips', { indexes: [i], crop_mode: o.crop_mode, music: o.music, enhance: { ...ENH_DEF, ...(o.enhance || {}) },
             sub_style: tpl ? { ...S.meta.sub_defaults, ...tpl.style, template: o.template } : null });
           S.clipRun = null; await refreshList(); render();
         }, 'small')))));

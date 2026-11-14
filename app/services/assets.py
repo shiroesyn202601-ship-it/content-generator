@@ -182,7 +182,9 @@ def credits(p: dict) -> str:
                 line += f" — {sel['page_url']}"
             if line not in lines:
                 lines.append(line)
-    return ("Kredit visual (Wikimedia Commons):\n" + "\n".join(lines)) if lines else ""
+    from . import enhance
+    lines += [x for x in enhance.credits(p) if x not in lines]
+    return ("Kredit visual & sumber:\n" + "\n".join(lines)) if lines else ""
 
 
 def search(p: dict, query: str, provider: str = "all", n: int = 8) -> list[dict]:

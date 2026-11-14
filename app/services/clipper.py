@@ -430,6 +430,8 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
     crop = params.get("crop_mode") or src["assets"].get("crop_mode") or "face"
     style = params.get("sub_style") or src["subtitles"].get("style")
     music = bool(params.get("music"))
+    from . import enhance
+    eopts = enhance.options(params.get("enhance")) if params.get("enhance") is not False else None
 
     def save_src(q):
         q["assets"]["crop_mode"] = crop
@@ -451,6 +453,17 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
             store.update(qid, lambda q: store.approve(q, "script"))
             step = "potong"
             cut_clip(qid, {"crop_mode": crop}, sub)
+            if eopts and (eopts["commentary"] != "off" or any(eopts[k] for k in
+                                                              ("context", "facts", "broll", "tighten", "punch", "emoji"))):
+                step = "nilai tambah"
+                try:
+                    enhance.run(qid, {"opts": eopts, "seed": f"{qid}{n}"}, sub)
+                except Exception as e:  # noqa: BLE001 — gagal nilai tambah: klip tetap jadi versi biasa
+                    from .. import jobs
+                    if isinstance(e, jobs.JobCancelled):
+                        raise
+                    sub(f"Nilai tambah dilewati: {str(e)[:120]}")
+                    store.update(qid, lambda q, e=e: store.log(q, f"Nilai tambah gagal: {e}"))
             store.update(qid, lambda q: store.approve(q, "assets"))
             step = "musik"
             if music:
@@ -459,7 +472,8 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
             store.update(qid, lambda q: store.approve(q, "audio"))
             step = "subtitle"
             if style:
-                store.update(qid, lambda q: q["subtitles"].update({"style": dict(style)}))
+                st = enhance.vary_style(style, hash(qid)) if eopts and eopts.get("vary") else dict(style)
+                store.update(qid, lambda q, st=st: q["subtitles"].update({"style": st}))
             subtitles.build(qid, {}, sub)
             store.update(qid, lambda q: store.approve(q, "subtitles"))
             step = "render"
@@ -552,7 +566,8 @@ def auto_clip(pid: str, params: dict, progress) -> dict:
             style = {**t["style"], "template": opts["template"]} if t else None
         res = produce_clips(pid, {"indexes": sorted(idx), "crop_mode": opts.get("crop_mode") or "face",
                                   "sub_style": style, "music": bool(opts.get("music")),
-                                  "mood": opts.get("mood") or "santai"}, step(4, "Membuat klip"))
+                                  "mood": opts.get("mood") or "santai",
+                                  "enhance": opts.get("enhance", {})}, step(4, "Membuat klip"))
     except Exception as e:
         store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"status": "error", "error": str(e)[:300]}))
         raise

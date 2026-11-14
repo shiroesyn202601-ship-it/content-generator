@@ -244,7 +244,8 @@ def run(pid: str, params: dict, progress) -> dict:
                              "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]"],
                             [*ff.AUDIO_ARGS, "-t", f"{total:.3f}", "-movflags", "+faststart", "render/final.mp4"], cwd=d)
     else:
-        clip = p["assets"]["clip_path"]
+        from . import enhance
+        clip = enhance.video_path(p)  # versi nilai tambah (komentar, B-roll, dll.) bila ada & masih cocok
         total = ff.duration(d / clip)
         extra, music, sfx = _extra_audio_inputs(p, 1)
         if ff.has_audio(d / clip):

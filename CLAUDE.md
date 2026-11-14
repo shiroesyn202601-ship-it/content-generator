@@ -212,6 +212,19 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     (`S.adv`). Dibangun di atas wadah sumber/anak dari commit 221f62f (sesi lain). Upload Drive saat produksi
     massal berjalan di latar belakang (`render.run` param `drive_background`). Uji nyata: video 59 dtk → 2 klip, 76 dtk.
 
+16. **15 Nov 2026 — Clipper bernilai tambah** (riset: kebijakan YouTube reused/inauthentic content + pembaruan
+    jangkauan Shorts 1 Okt 2026 — potong+subtitle/edit teknis/template massal TIDAK dihitung nilai tambah; yang
+    dihitung komentar, konteks, framing edukatif). Modul `enhance.py`, dijalankan setelah potong (di
+    `produce_clips` & aksi `assets.enhance`): 1 panggilan LLM → rencana (intro ≤16 kata, outro ≤30 kata opini +
+    pertanyaan, people, claims, broll, emoji) → konteks narasumber dari Wikipedia (`_wiki_role`), cek klaim ke
+    Wikipedia (hanya didukung/bertentangan yang tampil) → `assets/clip_enh.mp4` = intro TTS (frame blur) + klip
+    dirapatkan (jeda >0.45 dtk & "eh/anu" dibuang) dengan punch-in bergantian per kalimat + outro TTS, B-roll layar
+    penuh (Commons/Pixabay foto), emoji Noto (fonts.gstatic.com, cadangan Twemoji), SFX (library user atau sintetis
+    FFmpeg). Kartu konteks/fakta/label "KOMENTAR · <nama>" = event ASS (`enhance.ass_parts` → `to_ass(extra=)`).
+    `p.enhance.words` = timeline baru untuk subtitle; `enhance.valid()` cek mtime clip.mp4 (potong ulang → basi).
+    Variasi gaya per klip `enhance.vary_style`. Rencana bisa diedit di Mode lanjutan lalu diterapkan tanpa AI.
+    Juga: logo/overlay global (`brand.py`, data/brand.json) + aksi `research.rebrand`.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

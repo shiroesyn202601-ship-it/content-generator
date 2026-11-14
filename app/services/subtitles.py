@@ -66,7 +66,13 @@ def _line(words: list[dict], i0: int, i1: int) -> dict:
 
 def build(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
-    words = [dict(w) for w in p["audio"]["words"]] if p["mode"] == "scratch" else _clip_words(p)
+    from . import enhance
+    if p["mode"] == "scratch":
+        words = [dict(w) for w in p["audio"]["words"]]
+    elif enhance.valid(p):  # klip + komentar kreator: timeline baru dari tahap nilai tambah
+        words = [dict(w) for w in p["enhance"]["words"]]
+    else:
+        words = _clip_words(p)
     if not words:
         raise RuntimeError("Tidak ada kata bertimestamp. Render VO (scratch) / transkrip (clipper) dulu.")
     style = p["subtitles"].get("style") or store.default_sub_style(p["format"])
@@ -280,7 +286,8 @@ def _hook_events(hook: str, style: dict, fmt: str) -> str:
             f"{{\\an8\\pos({W // 2},{y})\\fad(120,250)\\fscx80\\fscy80\\t(0,160,\\fscx100\\fscy100)}}{txt}\n")
 
 
-def to_ass(words: list[dict], lines: list[dict], style: dict, fmt: str, hook: str = "") -> str:
+def to_ass(words: list[dict], lines: list[dict], style: dict, fmt: str, hook: str = "",
+           extra: tuple[str, str] = ("", "")) -> str:
     W, H = config.RESOLUTIONS[fmt]
     s = normalize_style(style, fmt)
     X, Y = int(W * s["pos_x"] / 100), int(H * s["pos_y"] / 100)
@@ -310,6 +317,7 @@ ScaledBorderAndShadow: yes
 Format: Name, Fontname, Fontsize, PrimaryColour, SecondaryColour, OutlineColour, BackColour, Bold, Italic, Underline, StrikeOut, ScaleX, ScaleY, Spacing, Angle, BorderStyle, Outline, Shadow, Alignment, MarginL, MarginR, MarginV, Encoding
 {main_style}
 {hook_style}
+{extra[0]}
 
 [Events]
 Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
@@ -417,7 +425,7 @@ Format: Layer, Start, End, Style, Name, MarginL, MarginR, MarginV, Effect, Text
                        f"{{\\bord{s['glow_w']}\\blur8\\3c{_ass_color(s['glow'])}\\shad0}}"
                        + txt.replace("\\alpha&H00&", "\\1a&HFF&\\3a&H40&"))
         out.append(f"Dialogue: 2,{_t(st)},{_t(en)},Main,,0,0,0,,{txt}")
-    return head + _hook_events(hook, s, fmt) + "\n".join(out) + "\n"
+    return head + _hook_events(hook, s, fmt) + extra[1] + "\n".join(out) + "\n"
 
 
 def hook_text(p: dict) -> str:
@@ -440,7 +448,9 @@ def to_srt(lines: list[dict]) -> str:
 def export(p: dict) -> None:
     d = store.project_dir(p["id"])
     s = p["subtitles"]
-    (d / "subs.ass").write_text(to_ass(s["words"], s["lines"], s["style"], p["format"], hook_text(p)),
+    from . import enhance
+    extra = enhance.ass_parts(p, normalize_style(s["style"], p["format"]))
+    (d / "subs.ass").write_text(to_ass(s["words"], s["lines"], s["style"], p["format"], hook_text(p), extra),
                                 encoding="utf-8")
     (d / "subs.srt").write_text(to_srt(s["lines"]), encoding="utf-8")
 
@@ -457,11 +467,14 @@ def preview_frame(p: dict, style: dict, t: float) -> bytes:
     s = p["subtitles"]
     words, lines = s.get("words") or [], s.get("lines") or []
     fonts.ensure(normalize_style(style, p["format"])["font"])
-    (d / "render" / "preview.ass").write_text(to_ass(words, lines, style, p["format"], hook_text(p)), encoding="utf-8")
+    from . import enhance
+    extra = enhance.ass_parts(p, normalize_style(style, p["format"]))
+    (d / "render" / "preview.ass").write_text(to_ass(words, lines, style, p["format"], hook_text(p), extra), encoding="utf-8")
     # latar
     bg, bg_t = None, 0.0
-    if p["mode"] == "clipper" and p["assets"].get("clip_path") and (d / p["assets"]["clip_path"]).is_file():
-        bg, bg_t = p["assets"]["clip_path"], t
+    vp = enhance.video_path(p) if p["mode"] == "clipper" else None
+    if vp and (d / vp).is_file():
+        bg, bg_t = vp, t
     else:
         sid = None
         for tm in p["audio"].get("scene_timings") or []:
