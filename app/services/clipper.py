@@ -355,3 +355,97 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
         store.log(p, f"Klip dipotong ({mode})")
     store.update(pid, apply)
     return {"path": "assets/clip.mp4"}
+
+
+# ---------------- satu video sumber → banyak video sekaligus ----------------
+
+def fork_clip(src_pid: str, idx: int) -> dict:
+    """Jadikan satu kandidat klip proyek baru (sumber & transkrip ikut disalin). Proyek mulai di tahap Momen."""
+    import shutil
+    src = store.load(src_pid)
+    clip = src["script"]["clips"][idx]
+    p = store.new_project("clipper", src["format"], "", language=src["language"])
+
+    def link_or_copy(a, b):
+        # Hardlink: video sumber (bisa ratusan MB) dipakai bersama tanpa memakan ruang disk lagi.
+        import os
+        try:
+            os.link(a, b)
+        except OSError:
+            shutil.copy2(a, b)
+    shutil.copytree(store.project_dir(src_pid) / "source", store.project_dir(p["id"]) / "source",
+                    dirs_exist_ok=True, copy_function=link_or_copy)
+    p.update({"title": clip.get("title") or src["title"], "current_stage": 1, "voice": src["voice"]})
+    p["research"] = src["research"]
+    p["script"] = {**src["script"], "selected_clip": idx, "clip_cache": {}}
+    p["subtitles"]["style"] = dict(src["subtitles"].get("style") or p["subtitles"]["style"])
+    p["assets"]["crop_mode"] = src["assets"].get("crop_mode") or p["assets"]["crop_mode"]
+    p["stage_status"].update({"research": "approved", "script": "draft"})
+    p["parent"] = src_pid
+    store.log(p, f"Dari proyek {src_pid}, klip {clip['id']}")
+    return store.save(p)
+
+
+def produce_clips(pid: str, params: dict, progress) -> dict:
+    """Produksi massal Clipper: tiap klip yang dicentang → proyek sendiri → potong + reframe → subtitle →
+    (musik) → render → thumbnail. Hasil masuk tab Upload & Jadwal untuk dicek sebelum diunggah —
+    gerbang manusia tetap ada di sana (dan tiap proyek tetap bisa dibuka & diedit per tahap).
+    Berurutan (render berat). Satu klip gagal tidak menghentikan yang lain."""
+    from . import audio_lib, render, subtitles, thumbs
+
+    src = store.load(pid)
+    clips = src["script"].get("clips") or []
+    idx = [int(i) for i in params.get("indexes") or [] if 0 <= int(i) < len(clips)]
+    if not idx:
+        raise RuntimeError("Centang minimal satu klip.")
+    crop = params.get("crop_mode") or src["assets"].get("crop_mode") or "face"
+    style = params.get("sub_style") or src["subtitles"].get("style")
+    music = bool(params.get("music"))
+
+    def save_src(q):
+        q["assets"]["crop_mode"] = crop
+        if style:
+            q["subtitles"]["style"] = style
+    store.update(pid, save_src)
+    created, failed = [], []
+    for n, i in enumerate(idx, 1):
+        clip = clips[i]
+        tag = f"Video {n}/{len(idx)}"
+        progress(f"{tag}: menyiapkan proyek '{clip.get('title', '')[:40]}'…")
+        p = fork_clip(pid, i)
+        qid = p["id"]
+        step = "persiapan"
+
+        def sub(msg, tag=tag):
+            progress(f"{tag}: {msg}")
+        try:
+            store.update(qid, lambda q: store.approve(q, "script"))
+            step = "potong"
+            cut_clip(qid, {"crop_mode": crop}, sub)
+            store.update(qid, lambda q: store.approve(q, "assets"))
+            step = "musik"
+            if music:
+                store.update(qid, lambda q: q["audio"]["music"].update({"enabled": True}))
+                audio_lib.auto_plan(qid, {"mood": params.get("mood") or "santai"}, sub)
+            store.update(qid, lambda q: store.approve(q, "audio"))
+            step = "subtitle"
+            if style:
+                store.update(qid, lambda q: q["subtitles"].update({"style": dict(style)}))
+            subtitles.build(qid, {}, sub)
+            store.update(qid, lambda q: store.approve(q, "subtitles"))
+            step = "render"
+            render.run(qid, {}, sub)
+            store.update(qid, lambda q: store.approve(q, "render"))
+            step = "thumbnail"
+            thumbs.auto(qid, {}, sub)
+            store.update(qid, lambda q: store.approve(q, "thumbnail"))
+            created.append({"id": qid, "title": p["title"], "score": clip.get("score")})
+        except Exception as e:  # noqa: BLE001
+            from .. import jobs
+            if isinstance(e, jobs.JobCancelled):
+                raise
+            failed.append({"id": qid, "title": p["title"], "step": step, "error": str(e)[:200]})
+            store.update(qid, lambda q, e=e, step=step: store.log(q, f"Produksi massal berhenti di tahap {step}: {e}"))
+    store.update(pid, lambda q: store.log(q, f"Produksi massal: {len(created)} video jadi"
+                                             + (f", {len(failed)} perlu dicek manual" if failed else "")))
+    return {"created": created, "failed": failed}

@@ -16,7 +16,17 @@ CATALOG = {
     "anton": "https://raw.githubusercontent.com/google/fonts/main/ofl/anton/Anton-Regular.ttf",
     "poppins extrabold": "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-ExtraBold.ttf",
     "bebas neue": "https://raw.githubusercontent.com/google/fonts/main/ofl/bebasneue/BebasNeue-Regular.ttf",
+    "montserrat black": "https://raw.githubusercontent.com/JulietaUla/Montserrat/master/fonts/ttf/Montserrat-Black.ttf",
+    "bangers": "https://raw.githubusercontent.com/google/fonts/main/ofl/bangers/Bangers-Regular.ttf",
+    "luckiest guy": "https://raw.githubusercontent.com/google/fonts/main/apache/luckiestguy/LuckiestGuy-Regular.ttf",
+    "poppins bold": "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-Bold.ttf",
+    "poppins semibold": "https://raw.githubusercontent.com/google/fonts/main/ofl/poppins/Poppins-SemiBold.ttf",
+    "space mono bold": "https://raw.githubusercontent.com/google/fonts/main/ofl/spacemono/SpaceMono-Bold.ttf",
+    "archivo black": "https://raw.githubusercontent.com/google/fonts/main/ofl/archivoblack/ArchivoBlack-Regular.ttf",
 }
+# Nama tampilan di UI (kunci CATALOG ditulis dengan kapitalisasi yang benar untuk libass/ASS Fontname).
+FONT_NAMES = ["Montserrat ExtraBold", "Montserrat Black", "Anton", "Bebas Neue", "Bangers", "Luckiest Guy",
+              "Poppins Bold", "Poppins SemiBold", "Poppins ExtraBold", "Archivo Black", "Space Mono Bold", "Arial"]
 
 
 def _norm(s: str) -> str:
@@ -59,3 +69,21 @@ def ensure(name: str) -> str | None:
     except httpx.HTTPError as e:
         return f"Gagal mengunduh font '{name}' ({e}) — subtitle memakai font cadangan."
     return None
+
+
+def path(name: str) -> Path | None:
+    """File font untuk Pillow (thumbnail, pengukuran lebar kata). Diunduh dulu bila perlu."""
+    ensure(name)
+    key = _norm(name)
+    best = None
+    for d in _system_dirs():
+        for f in d.iterdir():
+            stem = _norm(f.stem)
+            if f.suffix.lower() in (".ttf", ".otf") and stem.startswith(key):
+                if best is None or len(stem) < len(_norm(best.stem)):  # "PoppinsBold" sebelum "PoppinsBoldItalic"
+                    best = f
+    if best is None and key == "arial":
+        for d in _system_dirs():
+            if (d / "arialbd.ttf").is_file():
+                return d / "arialbd.ttf"
+    return best

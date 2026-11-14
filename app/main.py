@@ -7,8 +7,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, clipper, prompts, render, research, scriptgen, story, subtitles,
-                       sync, thumbs, tts, youtube)
+from .services import (assets, audio_lib, batch, clipper, fonts, prompts, render, research, scriptgen, story,
+                       subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
 WEB = config.ROOT / "web"
@@ -74,7 +74,8 @@ ACTIONS = {
     "assets.search":       (assets.search_scene, "assets", True),
     "assets.select":       (assets.select_candidate, "assets", True),
     "assets.auto_all":     (assets.auto_all, "assets", True),
-    "assets.cut_clip":     (clipper.cut_clip, "assets", True),
+    "assets.cut_clip":     (clipper.cut_clip, "script", True),   # Clipper: tahap Momen & Potong (gabungan)
+    "script.produce_clips": (clipper.produce_clips, "script", True),
     "assets.story_setup":  (story.setup, "assets", True),
     "assets.story_chars":  (story.characters, "assets", True),
     "assets.story_scenes": (story.scenes, "assets", True),
@@ -86,7 +87,10 @@ ACTIONS = {
     "render.run":          (render.run, "render", True),
     "publish.metadata":    (youtube.gen_metadata, "publish", True),
     "publish.upload":      (youtube.upload, "publish", True),
-    "publish.thumbs":      (thumbs.make, "publish", True),
+    "thumbnail.frames":    (thumbs.frames, "thumbnail", True),
+    "thumbnail.render":    (thumbs.render_design, "thumbnail", True),
+    "thumbnail.auto":      (thumbs.auto, "thumbnail", True),
+    "thumbnail.remove":    (thumbs.remove, "thumbnail", False),
     "publish.thumbnail":   (thumbs.upload, "publish", True),
 }
 
@@ -104,7 +108,11 @@ def meta():
             "labels_by_mode": {"scratch": store.STAGE_LABELS, "clipper": store.STAGE_LABELS_CLIPPER},
             "stage_help": store.STAGE_HELP, "voice_presets": store.VOICE_PRESETS,
             "emotions": list(store.EMOTION_VOICE), "moods": store.MOODS, "google": config.google_enabled(),
-            "sub_presets": store.SUB_PRESETS,
+            "sub_presets": store.SUB_PRESETS, "sub_templates": store.SUB_TEMPLATES,
+            "sub_user_templates": store.user_templates(), "sub_defaults": subtitles.STYLE_DEFAULTS,
+            "sub_choices": subtitles.CHOICES, "fonts": fonts.FONT_NAMES,
+            "thumb_templates": thumbs.THUMB_TEMPLATES, "thumb_defaults": thumbs.DESIGN_DEFAULTS,
+            "clipper_merged": store.CLIPPER_MERGED,
             "llm": config.LLM_PROVIDER,
             "keys": {"pexels": bool(config.PEXELS_API_KEY), "pixabay": bool(config.PIXABAY_API_KEY),
                      "pollinations": bool(config.POLLINATIONS_KEY)},
@@ -151,18 +159,8 @@ def delete_project(pid: str):
 @app.post("/api/projects/{pid}/fork")
 def fork(pid: str, body: dict = Body(...)):
     """Clipper: jadikan kandidat klip lain sebagai proyek baru (sumber & transkrip ikut disalin)."""
-    src = _load(pid)
-    p = store.new_project("clipper", src["format"], "", language=src["language"])
-    old_dir, new_dir = store.project_dir(pid), store.project_dir(p["id"])
-    shutil.copytree(old_dir / "source", new_dir / "source", dirs_exist_ok=True)
-    idx = int(body["clip_index"])
-    clip = src["script"]["clips"][idx]
-    p.update({"title": clip.get("title") or src["title"], "current_stage": 1, "voice": src["voice"]})
-    p["research"] = src["research"]
-    p["script"] = {**src["script"], "selected_clip": idx}
-    p["stage_status"].update({"research": "approved", "script": "draft"})
-    store.log(p, f"Fork dari {pid}, klip {clip['id']}")
-    return store.save(p)
+    _load(pid)
+    return clipper.fork_clip(pid, int(body["clip_index"]))
 
 
 @app.post("/api/projects/{pid}/narration-prompt")
@@ -203,8 +201,13 @@ def approve(pid: str, stage: str):
     _load(pid)
     if stage not in store.STAGES:
         raise HTTPException(404)
+    def do(p):
+        store.approve(p, stage)
+        # Clipper: "Momen & Potong" = tahap script + assets sekaligus
+        if p["mode"] == "clipper" and stage == "script":
+            store.approve(p, "assets")
     try:
-        p = store.update(pid, lambda p: store.approve(p, stage))
+        p = store.update(pid, do)
     except (PermissionError, ValueError) as e:
         raise HTTPException(409, str(e))
     jid = jobs.submit(pid, f"sync.{stage}", lambda progress: sync.safe_sync(pid, stage, progress))
@@ -380,6 +383,77 @@ def schedule():
                         "publish_at": p["publish"].get("publish_at"), "status": p["publish"].get("status"),
                         "url": p["publish"].get("url")})
     return sorted(out, key=lambda x: x["publish_at"] or "")
+
+
+# ---------- template subtitle buatan sendiri ----------
+@app.get("/api/sub-templates")
+def sub_templates():
+    return store.user_templates()
+
+
+@app.post("/api/sub-templates")
+def save_sub_template(body: dict = Body(...)):
+    try:
+        return store.save_user_template(str(body.get("name", "")), dict(body.get("style") or {}))
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.delete("/api/sub-templates/{key}")
+def delete_sub_template(key: str):
+    return store.delete_user_template(key)
+
+
+@app.post("/api/projects/{pid}/subtitles/preview")
+def subtitle_preview(pid: str, body: dict = Body(...)):
+    """Pratinjau AKURAT: satu frame dirender libass (sama persis dengan hasil render) pada detik t."""
+    p = _load(pid)
+    try:
+        png = subtitles.preview_frame(p, body.get("style") or p["subtitles"]["style"], float(body.get("t") or 0))
+    except Exception as e:  # noqa: BLE001
+        raise HTTPException(400, f"Pratinjau gagal: {e}")
+    return Response(png, media_type="image/png")
+
+
+@app.post("/api/projects/{pid}/thumbnail/preview")
+def thumbnail_preview(pid: str, body: dict = Body(...)):
+    """Pratinjau live editor thumbnail (JPEG, tidak disimpan)."""
+    import io
+    import tempfile
+    p = _load(pid)
+    d = store.project_dir(pid)
+    frame = body.get("frame") or p["thumbnail"].get("frame")
+    if not frame or not (d / frame).resolve().is_relative_to(d.resolve()) or not (d / frame).is_file():
+        raise HTTPException(400, "Pilih frame dulu.")
+    info = next((f for f in p["thumbnail"].get("frames") or [] if f["path"] == frame), None)
+    design = dict(body.get("design") or {})
+    design.setdefault("text", thumbs.default_text(p))
+    with tempfile.TemporaryDirectory() as td:
+        out = f"{td}/prev.jpg"
+        try:
+            thumbs.compose(d / frame, info, design, p["format"], out)
+        except Exception as e:  # noqa: BLE001
+            raise HTTPException(400, f"Pratinjau gagal: {e}")
+        data = io.BytesIO(open(out, "rb").read()).getvalue()
+    return Response(data, media_type="image/jpeg")
+
+
+@app.post("/api/projects/{pid}/thumbnail/upload")
+def thumbnail_upload(pid: str, file: UploadFile = File(...)):
+    _load(pid)
+    try:
+        return thumbs.save_upload(pid, file.filename or "x.jpg", file.file)
+    except ValueError as e:
+        raise HTTPException(400, str(e))
+
+
+@app.get("/fonts/{name}")
+def font_file(name: str):
+    """File font untuk pratinjau subtitle di browser (@font-face) — sama dengan font render."""
+    f = fonts.path(name)
+    if not f or not f.is_file():
+        raise HTTPException(404)
+    return FileResponse(f, headers={"Cache-Control": "max-age=86400"})
 
 
 # ---------- file media proyek (preview video/audio di UI) ----------

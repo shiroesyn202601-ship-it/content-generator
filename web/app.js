@@ -77,7 +77,9 @@ function status(msg) {
 const ACTION_LABEL = {
   'research.ideas': '💡 Membuat ide konten', 'research.download': '⬇ Mengunduh video sumber',
   'script.generate': '✍ Menulis naskah', 'script.narrate': '✍ Menulis narasi', 'script.split': '✂ Memecah narasi jadi scene', 'script.factcheck': '🔍 Cek fakta', 'research.batch': '🏭 Produksi massal',
-  'publish.thumbs': '🖼 Membuat thumbnail', 'publish.thumbnail': '🖼 Memasang thumbnail',
+  'publish.thumbnail': '🖼 Memasang thumbnail', 'thumbnail.frames': '🎞 Mengambil kandidat frame',
+  'thumbnail.render': '🖼 Menyimpan thumbnail', 'thumbnail.auto': '⚡ Membuat 3 thumbnail otomatis',
+  'thumbnail.remove': '✕ Menghapus thumbnail', 'script.produce_clips': '🏭 Produksi banyak video',
   'assets.story_setup': '📖 Menyusun karakter & prompt', 'assets.story_chars': '👤 Membuat gambar karakter',
   'assets.story_scenes': '🎨 Membuat gambar scene', 'script.transcribe': '🎧 Transkrip audio (Whisper)',
   'script.find_clips': '🔥 Mencari momen viral', 'assets.search': '🔎 Mencari stock footage',
@@ -115,13 +117,23 @@ const S = {
   batch: new Set(),  // indeks ide yang dicentang untuk produksi massal
   tab: ['clipper', 'publish'].includes(lsGet('tab')) ? lsGet('tab') : 'scratch',  // Dari Nol / Clipper / Upload
 };
-const PUB = 6;          // indeks tahap "publish": dikerjakan di tab Upload & Jadwal, bukan di wizard
+let PUB = 7;            // indeks tahap "publish" (diisi dari /api/meta): dikerjakan di tab Upload, bukan di wizard
 const TABS = ['scratch', 'clipper', 'publish'];
 const readyForUpload = (p) => p.current_stage >= PUB;
+// Clipper: tahap "assets" (potong klip) digabung ke tahap "script" (Momen & Potong) → tidak tampil sendiri.
+const hiddenStage = (mode, k) => mode === 'clipper' && ((S.meta && S.meta.clipper_merged) || {})[k];
+const wizardStages = (mode) => S.meta.stages.slice(0, PUB).map((k, i) => [k, i]).filter(([k]) => !hiddenStage(mode, k));
+function fixView() { const t = hiddenStage(S.p.mode, stageKey()); if (t) S.view = S.meta.stages.indexOf(t); }
 const stageKey = () => S.meta.stages[S.view];
 const labelsFor = (mode) => ((S.meta.labels_by_mode || {})[mode]) || S.meta.labels;
 const helpFor = (mode, st) => (((S.meta.stage_help || {})[mode]) || {})[st] || '';
 const media = (rel) => rel ? U(`/media/${S.p.id}/${rel}?v=${encodeURIComponent(S.p.updated_at)}`) : '';
+
+function loadFonts() {
+  const css = (S.meta.fonts || []).filter((f) => f !== 'Arial')
+    .map((f) => `@font-face{font-family:"${f}";src:url("${U('/fonts/' + encodeURIComponent(f))}");font-display:swap}`).join('\n');
+  document.head.append(h('style', {}, css));
+}
 
 // ---------------------------------------------------------------- data flow
 async function loadProject(pid, keepView = false, tab = null) {
@@ -131,6 +143,7 @@ async function loadProject(pid, keepView = false, tab = null) {
   if (S.tab !== want) { S.tab = want; lsSet('tab', want); renderSidebarTab(); }
   if (S.tab === 'publish') S.view = PUB;
   else if (!keepView || S.view >= PUB) S.view = Math.min(S.p.current_stage, PUB - 1);
+  fixView();
   S.draft = clone(S.p[stageKey()]);
   S.voiceDraft = clone(S.p.voice);
   S.dirty = false; S.voiceDirty = false;
@@ -213,11 +226,13 @@ async function approve() {
     const res = await api('POST', `/api/projects/${S.p.id}/stage/${stageKey()}/approve`);
     toast('Disetujui ✓ — lanjut ke tahap berikutnya');
     S.p = res.project; S.dirty = false;
-    if (S.tab !== 'publish' && S.view + 1 >= PUB) {
+    let nv = S.view + 1;
+    while (nv < PUB && hiddenStage(S.p.mode, S.meta.stages[nv])) nv++;
+    if (S.tab !== 'publish' && nv >= PUB) {
       toast('Video siap ✓ — lanjut di tab 📅 Upload & Jadwal');
       await loadProject(S.p.id, false, 'publish');
     } else {
-      S.view = Math.min(S.view + 1, S.tab === 'publish' ? PUB : PUB - 1);
+      S.view = Math.min(nv, S.tab === 'publish' ? PUB : PUB - 1);
       S.draft = clone(S.p[stageKey()]);
       render(); refreshList();
     }
@@ -312,7 +327,7 @@ function render() {
         h('span', { class: 'badge' }, p.id))),
     h('button', { class: 'ghost danger small', onclick: deleteProject }, 'Hapus proyek')));
 
-  main.append(h('div', { class: 'stepper' }, S.meta.stages.slice(0, PUB).map((k, i) => h('div', {
+  main.append(h('div', { class: 'stepper' }, wizardStages(p.mode).map(([k, i]) => h('div', {
     class: `step s-${p.stage_status[k]} ${i === S.view ? 'current' : ''} ${i > p.current_stage ? 'locked' : ''}`,
     onclick: () => setView(i),
   }, L[k], h('span', { class: 'st' }, statusLabel(p.stage_status[k]))))));
@@ -666,6 +681,74 @@ function scoreBadge(c) {
   return h('span', { class: `badge score ${pct >= 0.75 ? 'hi' : pct >= 0.55 ? 'mid' : 'lo'}` }, `skor ${c.score}/${outOf}`);
 }
 
+/* Klip yang dicentang untuk produksi massal (default: skor ≥ 70, atau semua bila skor lama). */
+function picks() {
+  const clips = (S.draft && S.draft.clips) || [];
+  if (!S.pick || S.pick.pid !== S.p.id || S.pick.n !== clips.length) {
+    const good = clips.filter((c) => (c.scores ? c.score >= 70 : true)).map((c) => c.id);
+    S.pick = { pid: S.p.id, n: clips.length, set: new Set(good.length ? good : clips.map((c) => c.id)) };
+  }
+  return S.pick.set;
+}
+
+function subTemplateOptions() {
+  const all = { ...(S.meta.sub_templates || {}), ...(S.meta.sub_user_templates || {}) };
+  return Object.entries(all).map(([k, t]) => [k, t.label + (k.startsWith('u_') ? ' ★' : '')]);
+}
+function templateStyle(key) {
+  const t = (S.meta.sub_user_templates || {})[key] || (S.meta.sub_templates || {})[key];
+  return t ? { ...S.meta.sub_defaults, ...t.style, template: key } : null;
+}
+
+function producePanel(d) {
+  const set = picks(), n = set.size;
+  const opt = S.produceOpt = S.produceOpt || {
+    crop_mode: S.p.assets.crop_mode || 'face', template: (S.p.subtitles.style || {}).template || 'pop', music: false, mood: 'santai' };
+  const res = S.lastProduce && S.lastProduce.pid === S.p.id ? S.lastProduce.res : null;
+  return h('div', { class: 'card produce' },
+    h('div', { class: 'row between' }, h('b', {}, '🏭 Jadikan banyak video sekaligus'),
+      h('span', { class: 'row small' },
+        btn('Centang semua', () => { d.clips.forEach((c) => set.add(c.id)); render(); }, 'small ghost'),
+        btn('Kosongkan', () => { set.clear(); render(); }, 'small ghost'))),
+    h('div', { class: 'muted small' }, 'Tiap klip yang dicentang (☑) → proyek sendiri → dipotong & dibingkai → subtitle → render → 3 thumbnail. Hasilnya masuk tab 📅 Upload untuk dicek sebelum diunggah; tiap video tetap bisa dibuka & diedit per tahap.'),
+    h('div', { class: 'grid' },
+      field('Bingkai 9:16', opt, 'crop_mode', { type: 'select', dirty: () => {}, options: [
+        ['face', 'Ikuti wajah (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] }),
+      field('Template subtitle', opt, 'template', { type: 'select', dirty: () => {}, options: subTemplateOptions() }),
+      field('Musik latar (auto-ducking)', opt, 'music', { type: 'checkbox', dirty: () => {}, onchange: () => render() }),
+      opt.music ? field('Mood musik', opt, 'mood', { type: 'select', dirty: () => {}, options: S.meta.moods || ['santai'] }) : null),
+    h('div', { class: 'row' },
+      btn(`🏭 Produksi ${n} video`, async () => {
+        if (!n) return toast('Centang minimal satu klip (☑ di kiri judul).', true);
+        if (!confirm(`Buat ${n} video sekaligus? Tiap video dipotong, diberi subtitle, dirender, dan dibuatkan thumbnail (±1-2 menit per video). Bisa ditinggal — progres terlihat di bar bawah.`)) return;
+        const indexes = d.clips.map((c, i) => (set.has(c.id) ? i : -1)).filter((i) => i >= 0);
+        const r = await runAction('script.produce_clips', { indexes, crop_mode: opt.crop_mode, sub_style: templateStyle(opt.template), music: opt.music, mood: opt.mood });
+        if (r) { S.lastProduce = { pid: S.p.id, res: r }; toast(`${r.created.length} video jadi${r.failed.length ? `, ${r.failed.length} perlu dicek` : ''} — lihat tab 📅 Upload`); render(); refreshList(); }
+      }, 'primary'),
+      h('span', { class: 'muted small' }, `${n} dari ${d.clips.length} klip dicentang`)),
+    res ? h('div', { class: 'produce-res' },
+      res.created.map((c) => h('div', { class: 'row small' }, '✅ ', h('a', { href: '#', onclick: (e) => { e.preventDefault(); loadProject(c.id, false, 'publish'); } }, c.title))),
+      res.failed.map((c) => h('div', { class: 'row small warn-text' }, `⚠ ${c.title} — berhenti di tahap ${c.step}: ${c.error} `,
+        h('a', { href: '#', onclick: (e) => { e.preventDefault(); loadProject(c.id, false, 'clipper'); } }, 'buka & perbaiki')))) : null);
+}
+
+/* Kerjakan satu klip di proyek ini: atur bingkai, potong, cek hasil, lalu Setujui. */
+function cutPanel(c) {
+  const a = S.p.assets || {};
+  const cutOk = a.clip_path && a.clip_range && Math.abs(a.clip_range[0] - c.start) < 0.06 && Math.abs(a.clip_range[1] - c.end) < 0.06;
+  const opt = { crop_mode: a.crop_mode || 'face' };
+  return h('div', { class: 'cutpanel' },
+    h('div', { class: 'row' },
+      h('div', { style: 'min-width:240px' }, field('Bingkai', opt, 'crop_mode', { type: 'select', dirty: () => {}, options: [
+        ['face', 'Ikuti wajah (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] })),
+      btn(cutOk ? '↻ Potong ulang' : '✂ Potong klip ini', async () => {
+        if (S.dirty) await saveDraft(true);
+        runAction('assets.cut_clip', { crop_mode: opt.crop_mode }, true);
+      }, cutOk ? 'small' : 'small primary'),
+      h('span', { class: 'muted small' }, cutOk ? '✓ Sudah dipotong — cek hasilnya, lalu "Setujui & Lanjut".' : 'Potong dulu sebelum Setujui.')),
+    cutOk ? h('video', { class: 'preview-v small-v', src: media(a.clip_path), controls: true, preload: 'metadata' }) : null);
+}
+
 function rScriptClipper() {
   const d = S.draft, box = h('div');
   const src = S.p.research.source || {};
@@ -679,11 +762,15 @@ function rScriptClipper() {
   if (d.clip_note) box.append(hint(`⚠ ${d.clip_note}`, 'warn'));
   box.append(vid);
   const sel = d.selected_clip;
+  if ((d.clips || []).length) box.append(producePanel(d));
   (d.clips || []).forEach((c, i) => {
     const durEl = h('span', { class: 'badge' }, `${(c.end - c.start).toFixed(1)} dtk`);
     box.append(h('div', { class: `card ${sel === i ? 'selected' : ''}` },
       h('div', { class: 'row between' },
-        h('label', { class: 'row' }, h('input', { type: 'radio', name: 'clip', checked: sel === i, onchange: () => { d.selected_clip = i; markDirty(); render(); } }),
+        h('label', { class: 'row' },
+          h('input', { type: 'checkbox', title: 'Ikut produksi massal', checked: picks().has(c.id),
+            onchange: (e) => { e.target.checked ? picks().add(c.id) : picks().delete(c.id); render(); } }),
+          h('input', { type: 'radio', name: 'clip', title: 'Kerjakan di proyek ini', checked: sel === i, onchange: () => { d.selected_clip = i; markDirty(); render(); } }),
           h('b', {}, c.title || c.id), durEl, scoreBadge(c)),
         h('div', { class: 'row' },
           btn('▶ Putar', () => playSegment(vid, c.start, c.end), 'small'),
@@ -703,7 +790,8 @@ function rScriptClipper() {
         field('Judul', c, 'title'), field('Hook', c, 'hook')),
       field('Kata kunci ditekankan', c, 'keywords', { type: 'csv' }),
       c.scores ? h('div', { class: 'row small' }, Object.entries(SUB_LABEL).map(([k, l]) => h('span', { class: 'subscore' }, `${l} `, h('b', {}, c.scores[k] ?? '-')))) : null,
-      c.reason ? h('div', { class: 'muted small' }, 'Alasan AI: ', c.reason) : null));
+      c.reason ? h('div', { class: 'muted small' }, 'Alasan AI: ', c.reason) : null,
+      sel === i ? cutPanel(c) : null));
   });
   if (d.transcript) {
     const segs = d.transcript.segments || [];
@@ -982,75 +1070,182 @@ function tokenizeJS(text) {
 
 function rSubtitles() {
   const d = S.draft, box = h('div');
-  const st = d.style = d.style || {};
+  d.style = normStyle(d.style || {});
+  const st = d.style;
   box.append(h('div', { class: 'row' },
     btn('🔤 Bangun subtitle dari timestamp kata', () => runAction('subtitles.build'), d.words && d.words.length ? '' : 'primary'),
     btn('↻ Kelompokkan ulang baris', () => runAction('subtitles.regroup', { style: st }, true), 'ghost'),
     h('span', { class: 'muted' }, `${(d.lines || []).length} baris · ${(d.words || []).length} kata`)));
-  box.append(hint('Edit teks langsung per baris. Bungkus kata dengan *bintang* untuk penekanan (warna kata kunci + membesar saat diucapkan). Klik "Simpan Edit Manual" untuk menerapkan — timing kata dipertahankan bila jumlah kata sama.'));
 
-  const presets = S.meta.sub_presets || {};
-  const presetSel = h('select', { onchange: () => {
-    const pr = presets[presetSel.value]; if (!pr) return;
-    Object.assign(st, pr, { preset: presetSel.value }); markDirty(); render();
-    toast('Preset diterapkan. Klik "↻ Kelompokkan ulang baris" bila jumlah kata per baris berubah.');
-  } }, h('option', { value: '' }, '— pilih preset —'),
-    Object.keys(presets).map((k) => h('option', { value: k, selected: st.preset === k },
-      { pop: 'Pop (kata meletup, 3 kata)', tebal2: 'Tebal 2 kata (gaya viral)', elegan: 'Elegan (4 kata, tanpa animasi)', klasik: 'Klasik (1 baris panjang)' }[k] || k)));
-  box.append(h('div', { class: 'row' }, h('b', {}, 'Preset gaya:'), presetSel));
-  box.append(h('details', {}, h('summary', {}, 'Gaya subtitle (detail)'), h('div', { class: 'grid' },
-    field('Font', st, 'font'), field('Ukuran', st, 'size', { type: 'number' }),
-    field('Animasi kata aktif', st, 'animation', { type: 'select', options: [['pop', 'Pop (meletup)'], ['none', 'Tanpa animasi']] }),
-    field('Skala kata aktif (%)', st, 'active_scale', { type: 'number' }),
-    field('Teks hook di 2.5 dtk awal', st, 'hook_text', { type: 'checkbox' }),
-    field('Warna teks', st, 'primary', { type: 'color' }), field('Warna kata aktif', st, 'highlight', { type: 'color' }),
-    field('Warna kata kunci', st, 'emphasis', { type: 'color' }), field('Skala kata kunci (%)', st, 'emphasis_scale', { type: 'number' }),
-    field('Outline', st, 'outline', { type: 'number' }),
-    field('Posisi', st, 'position', { type: 'select', options: [['middle', 'Tengah'], ['lower', 'Sepertiga bawah'], ['bottom', 'Bawah']] }),
-    field('Kata per baris', st, 'words_per_line', { type: 'number', min: 1, max: 12 }),
-    field('Karaoke (sorot kata aktif)', st, 'karaoke', { type: 'checkbox' }),
-    field('HURUF BESAR', st, 'uppercase', { type: 'checkbox' }))));
-
-  // --- pratinjau live
+  // ---------- pratinjau (bisa digeser)
   const [W, H] = S.p.format === 'short' ? [1080, 1920] : [1920, 1080];
-  const pw = S.p.format === 'short' ? 270 : 560, ph = (pw * H) / W;
+  const pw = S.p.format === 'short' ? 300 : 600, ph = (pw * H) / W, k = ph / H;
   const isClip = S.p.mode === 'clipper';
   const player = isClip ? h('video', { src: media(S.p.assets.clip_path), controls: true, playsInline: true })
     : h('audio', { src: media(S.p.audio.vo_path), controls: true, style: 'width:100%' });
-  const overlay = h('div', { class: 'sub-overlay' });
-  const stage = h('div', { class: 'sub-stage', style: `width:${pw}px;height:${ph}px` }, isClip ? player : h('div', { class: 'bg' }), overlay);
+  const overlay = h('div', { class: 'sub-overlay2', title: 'Geser untuk memindah posisi subtitle' });
+  const exact = h('img', { class: 'sub-exact', hidden: true });
+  const safe = S.p.format === 'short' ? h('div', { class: 'safezone' }, h('span', {}, 'tertutup UI YouTube')) : null;
+  const stage = h('div', { class: 'sub-stage', style: `width:${pw}px;height:${ph}px` },
+    isClip ? player : h('div', { class: 'bg' }), safe, overlay, exact);
   const lineEls = [];
+  const changed = () => { markDirty(); exact.hidden = true; draw(); };
+
   const draw = () => {
     const t = player.currentTime;
-    const scale = ph / H;
-    overlay.style.fontSize = `${(st.size || 60) * scale}px`;
+    overlay.style.left = `${st.pos_x}%`; overlay.style.top = `${st.pos_y}%`;
+    overlay.style.transform = `translate(-50%,-50%) rotate(${-(+st.rotation || 0)}deg)`;
     overlay.style.fontFamily = `"${st.font}", Arial, sans-serif`;
-    overlay.style.top = st.position === 'middle' ? '45%' : '';
-    // Shorts: posisi bawah dinaikkan di atas UI YouTube (sama seperti subs.ass: 700 / 900 px dari bawah).
-    const short = S.p.format === 'short';
-    overlay.style.bottom = st.position === 'middle' ? '' : st.position === 'lower' ? (short ? '47%' : '22%') : (short ? '36%' : '8%');
+    overlay.style.fontSize = `${st.size * k}px`;
+    overlay.style.fontWeight = st.bold ? '900' : '400';
+    overlay.style.letterSpacing = `${(st.letter_spacing || 0) * k}px`;
+    const boxed = st.box === 'box';
+    overlay.style.background = boxed ? hexA(st.box_color, st.box_alpha) : 'transparent';
+    overlay.style.padding = boxed ? `${st.box_pad * k}px` : '0';
+    const shadows = [];
+    if (st.shadow_alpha > 0 && !boxed) shadows.push(`${st.shadow_x * k}px ${st.shadow_y * k}px ${(st.blur || 0) * k * 2}px ${hexA(st.shadow, st.shadow_alpha)}`);
+    if (st.glow && !boxed) shadows.push(`0 0 ${st.glow_w * k * 1.5}px ${st.glow}`, `0 0 ${st.glow_w * k * 3}px ${st.glow}`);
+    overlay.style.textShadow = shadows.join(',');
     const idx = (d.lines || []).findIndex((l) => t >= l.start && t <= l.end + 0.05);
     lineEls.forEach((el, i) => el.classList.toggle('active', i === idx));
     overlay.innerHTML = '';
-    if (idx < 0) return;
-    const line = d.lines[idx], toks = tokenizeJS(line.text);
+    // contoh teks saat tidak ada baris aktif → posisi & gaya tetap terlihat saat diatur
+    const line = idx >= 0 ? d.lines[idx] : (d.lines || [])[0];
+    if (!line) { overlay.append(h('span', {}, 'CONTOH SUBTITLE')); return; }
+    const toks = tokenizeJS(line.text);
     const ws = (d.words || []).slice(line.i0, line.i1 + 1);
     const timed = ws.length === toks.length ? ws : toks.map((_, j) => ({
-      start: line.start + ((line.end - line.start) * j) / toks.length, end: line.start + ((line.end - line.start) * (j + 1)) / toks.length }));
+      start: line.start + ((line.end - line.start) * j) / toks.length }));
+    const tt = idx >= 0 ? t : (timed[1] || timed[0]).start + 0.01;
+    const brk = st.max_lines == 2 && toks.length >= 4 ? Math.floor(toks.length / 2) : -1;
     toks.forEach((tk, j) => {
-      const active = st.karaoke && t >= timed[j].start && (j + 1 >= timed.length || t < timed[j + 1].start);
-      let color = tk.emphasis ? st.emphasis : st.primary, sc = 1;
-      if (active) { color = tk.emphasis ? st.emphasis : st.highlight; sc = tk.emphasis ? (st.emphasis_scale || 125) / 100 : 1; }
-      overlay.append(h('span', { style: `color:${color};transform:scale(${sc});-webkit-text-stroke:${(st.outline || 3) * scale}px #000` },
-        st.uppercase ? tk.text.toUpperCase() : tk.text));
+      const active = st.highlight_mode !== 'none' && tt >= timed[j].start && (j + 1 >= timed.length || tt < timed[j + 1].start);
+      const sung = tt >= timed[j].start;
+      let color = tk.emphasis ? st.emphasis : st.primary, sc = 1, bg = '';
+      if (st.highlight_mode === 'karaoke') { if (sung) color = tk.emphasis ? st.emphasis : st.highlight; }
+      else if (active && (st.highlight_mode === 'pill' || st.highlight_mode === 'box')) {
+        color = st.highlight_text; bg = st.highlight_bg;
+      } else if (active) {
+        color = tk.emphasis ? st.emphasis : st.highlight;
+        sc = (tk.emphasis ? st.emphasis_scale : st.highlight_scale) / 100;
+      }
+      const hidden = st.anim_in === 'typewriter' && idx >= 0 && j > toks.findIndex((_, q) => q + 1 >= timed.length || tt < timed[q + 1].start);
+      const txt = st.case === 'upper' ? tk.text.toUpperCase() : st.case === 'lower' ? tk.text.toLowerCase() : tk.text;
+      if (j === brk) overlay.append(h('br'));
+      overlay.append(h('span', { class: 'w', style: [
+        `color:${color}`, `transform:scale(${boxed ? 1 : sc})`, hidden ? 'visibility:hidden' : '',
+        boxed ? '' : `-webkit-text-stroke:${(st.stroke_w || 0) * k * 2}px ${st.stroke}`,
+        bg ? `background:${bg};border-radius:${st.highlight_mode === 'pill' ? 999 : 6}px;padding:0 ${st.box_pad * k}px;-webkit-text-stroke:0` : '',
+      ].join(';') }, txt), ' ');
     });
   };
+  // geser posisi dengan mouse/jari
+  overlay.addEventListener('pointerdown', (e) => {
+    overlay.setPointerCapture(e.pointerId);
+    const rect = stage.getBoundingClientRect();
+    const move = (ev) => {
+      st.pos_x = Math.round(Math.max(5, Math.min(95, ((ev.clientX - rect.left) / rect.width) * 100)));
+      st.pos_y = Math.round(Math.max(5, Math.min(95, ((ev.clientY - rect.top) / rect.height) * 100)));
+      changed(); syncPosInputs();
+    };
+    const up = () => { overlay.removeEventListener('pointermove', move); overlay.removeEventListener('pointerup', up); };
+    overlay.addEventListener('pointermove', move); overlay.addEventListener('pointerup', up);
+  });
   let raf;
   const loop = () => { draw(); if (!player.paused) raf = requestAnimationFrame(loop); };
-  player.addEventListener('play', () => { cancelAnimationFrame(raf); loop(); });
+  player.addEventListener('play', () => { exact.hidden = true; cancelAnimationFrame(raf); loop(); });
   player.addEventListener('seeked', draw);
+  setTimeout(draw, 0);
 
-  const lines = h('div', { class: 'scroll', style: 'max-height:520px' }, (d.lines || []).map((l, i) => {
+  const exactBtn = btn('🎯 Pratinjau akurat', async () => {
+    exactBtn.disabled = true; exactBtn.textContent = 'Merender…';
+    try {
+      const blob = await api('POST', `/api/projects/${S.p.id}/subtitles/preview`, { style: st, t: player.currentTime + 0.25 });
+      exact.src = URL.createObjectURL(blob); exact.hidden = false;
+    } catch (e) { toast(e.message, true); }
+    finally { exactBtn.disabled = false; exactBtn.textContent = '🎯 Pratinjau akurat'; }
+  }, 'small');
+
+  // ---------- kontrol gaya
+  const f = (label, key, o = {}) => field(label, st, key, { ...o, onchange: () => { if (o.rerender) render(); else changed(); } });
+  const range = (label, key, min, max, step = 1, fmt) => f(label, key, { type: 'range', min, max, step, fmt });
+  const posX = range('Posisi X (%)', 'pos_x', 5, 95), posY = range('Posisi Y (%)', 'pos_y', 5, 95);
+  const syncPosInputs = () => {
+    [[posX, st.pos_x], [posY, st.pos_y]].forEach(([el, v]) => { $('input', el).value = v; $('b', el).textContent = v; });
+  };
+  const all = { ...(S.meta.sub_templates || {}), ...(S.meta.sub_user_templates || {}) };
+  const gallery = h('div', { class: 'tpl-grid' }, Object.entries(all).map(([key, t]) => {
+    const ts = { ...S.meta.sub_defaults, ...t.style };
+    const sample = h('div', { class: 'tpl-sample', style: [
+      `font-family:"${ts.font}",Arial`, `color:${ts.primary}`, `-webkit-text-stroke:${Math.min(3, ts.stroke_w / 3)}px ${ts.stroke}`,
+      ts.box === 'box' ? `background:${hexA(ts.box_color, ts.box_alpha)};padding:2px 6px` : '',
+      ts.glow ? `text-shadow:0 0 8px ${ts.glow}` : '', `transform:rotate(${-(ts.rotation || 0)}deg)`].join(';') },
+      ts.case === 'lower' ? 'ini ' : 'INI ',
+      h('span', { style: ts.highlight_mode === 'pill' || ts.highlight_mode === 'box'
+        ? `background:${ts.highlight_bg};color:${ts.highlight_text};border-radius:${ts.highlight_mode === 'pill' ? 99 : 4}px;padding:0 5px;-webkit-text-stroke:0`
+        : `color:${ts.highlight}` }, ts.case === 'lower' ? 'contoh' : 'CONTOH'));
+    return h('div', { class: `tpl ${st.template === key ? 'on' : ''}`, title: t.desc, onclick: () => {
+      const keep = { pos_x: st.pos_x };
+      d.style = { ...S.meta.sub_defaults, ...t.style, template: key, ...(S.p.format === 'short' ? {} : keep) };
+      markDirty(); render();
+      const wpl = (d.style.words_per_line || 3) * (d.style.max_lines || 1);
+      toast(`Template "${t.label}" dipakai.` + (wpl ? ' Klik "↻ Kelompokkan ulang baris" bila jumlah kata per tampilan berubah.' : ''));
+    } }, sample, h('div', { class: 'tpl-name' }, t.label,
+      key.startsWith('u_') ? h('span', { class: 'tpl-del', title: 'Hapus template', onclick: async (e) => {
+        e.stopPropagation();
+        if (!confirm(`Hapus template "${t.label}"?`)) return;
+        S.meta.sub_user_templates = await api('DELETE', `/api/sub-templates/${key}`); render();
+      } }, ' ✕') : null));
+  }));
+  const saveTpl = btn('💾 Simpan gaya ini jadi template', async () => {
+    const name = prompt('Nama template (mis. "Channel Shiroe"):'); if (!name) return;
+    try { S.meta.sub_user_templates = await api('POST', '/api/sub-templates', { name, style: st }); toast('Template tersimpan ✓ — bisa dipakai di semua proyek'); render(); }
+    catch (e) { toast(e.message, true); }
+  }, 'small');
+
+  const sec = (title, open, ...kids) => h('details', { class: 'sub-sec', open }, h('summary', {}, title), h('div', { class: 'grid' }, kids));
+  const controls = h('div', { class: 'sub-controls' },
+    h('div', { class: 'row between' }, h('b', {}, '🎨 Template'), saveTpl), gallery,
+    sec('🔠 Teks', true,
+      f('Font', 'font', { type: 'select', options: S.meta.fonts || [] }), range('Ukuran', 'size', 30, 180),
+      f('Huruf', 'case', { type: 'select', options: [['upper', 'BESAR SEMUA'], ['none', 'Seperti diucapkan'], ['lower', 'kecil semua']] }),
+      f('Tebal (faux bold)', 'bold', { type: 'checkbox' }), range('Jarak huruf', 'letter_spacing', -5, 15),
+      f('Warna teks', 'primary', { type: 'color' }), f('Warna kata kunci (*kata*)', 'emphasis', { type: 'color' }),
+      range('Ukuran kata kunci (%)', 'emphasis_scale', 100, 150)),
+    sec('✨ Sorot kata yang diucapkan', true,
+      f('Mode sorot', 'highlight_mode', { type: 'select', rerender: true, options: [['color', 'Ganti warna'], ['pill', 'Latar pill'], ['box', 'Latar kotak'], ['karaoke', 'Karaoke (sapuan)'], ['none', 'Tanpa sorot']] }),
+      f('Warna sorot', 'highlight', { type: 'color' }),
+      st.highlight_mode === 'color' ? range('Ukuran kata aktif (%)', 'highlight_scale', 100, 140) : null,
+      ['pill', 'box'].includes(st.highlight_mode) ? f('Warna latar sorot', 'highlight_bg', { type: 'color' }) : null,
+      ['pill', 'box'].includes(st.highlight_mode) ? f('Warna teks tersorot', 'highlight_text', { type: 'color' }) : null),
+    sec('🖌 Garis tepi, bayangan & cahaya', false,
+      f('Warna garis tepi', 'stroke', { type: 'color' }), range('Tebal garis tepi', 'stroke_w', 0, 14),
+      f('Warna bayangan', 'shadow', { type: 'color' }), range('Bayangan (%)', 'shadow_alpha', 0, 100),
+      range('Bayangan X', 'shadow_x', -12, 12), range('Bayangan Y', 'shadow_y', -12, 12), range('Blur tepi', 'blur', 0, 10),
+      h('label', { class: 'field' }, h('span', {}, 'Cahaya (glow)'), h('div', { class: 'row' },
+        h('input', { type: 'checkbox', checked: !!st.glow, onchange: (e) => { st.glow = e.target.checked ? (st.glow_prev || '#00E5FF') : ''; changed(); render(); } }),
+        st.glow ? h('input', { type: 'color', value: st.glow, oninput: (e) => { st.glow = st.glow_prev = e.target.value; changed(); } }) : null)),
+      st.glow ? range('Lebar cahaya', 'glow_w', 2, 24) : null),
+    sec('⬛ Kotak latar per baris', false,
+      f('Kotak latar', 'box', { type: 'select', rerender: true, options: [['none', 'Tidak ada'], ['box', 'Ada']] }),
+      st.box === 'box' ? f('Warna kotak', 'box_color', { type: 'color' }) : null,
+      st.box === 'box' ? range('Kepekatan kotak (%)', 'box_alpha', 10, 100) : null,
+      range('Padding kotak / pill', 'box_pad', 0, 30)),
+    sec('🎬 Animasi', true,
+      f('Masuk (tiap baris)', 'anim_in', { type: 'select', options: [['none', 'Tanpa'], ['pop', 'Pop'], ['bounce', 'Bounce'], ['fade', 'Fade'], ['slide_up', 'Naik dari bawah'], ['typewriter', 'Muncul per kata (ketik)']] }),
+      f('Kata aktif', 'active_anim', { type: 'select', options: [['none', 'Diam'], ['pop', 'Meletup'], ['bounce', 'Memantul']] }),
+      f('Keluar', 'anim_out', { type: 'select', options: [['none', 'Langsung'], ['fade', 'Fade']] }),
+      f('Teks hook di 2.5 dtk awal', 'hook_text', { type: 'checkbox' })),
+    sec('📍 Tata letak & posisi', true,
+      posX, posY, range('Rotasi (°)', 'rotation', -30, 30),
+      f('Kata per baris', 'words_per_line', { type: 'number', min: 1, max: 12 }),
+      f('Jumlah baris', 'max_lines', { type: 'select', options: [[1, '1 baris'], [2, '2 baris']], num: true }),
+      h('div', { class: 'row' }, ['Atas:25', 'Tengah:50', 'Bawah aman:62'].map((x) => {
+        const [lbl, v] = x.split(':');
+        return btn(lbl, () => { st.pos_y = +v; st.pos_x = 50; changed(); syncPosInputs(); }, 'small ghost');
+      }))));
+
+  const lines = h('div', { class: 'scroll', style: 'max-height:420px' }, (d.lines || []).map((l, i) => {
     const row = h('div', { class: 'subline' },
       btn('▶', () => { player.currentTime = l.start; player.play(); }, 'small ghost'),
       field('', l, 'start', { type: 'number', step: 0.05 }), field('', l, 'end', { type: 'number', step: 0.05 }),
@@ -1059,10 +1254,35 @@ function rSubtitles() {
     lineEls.push(row);
     return row;
   }));
-  box.append(h('div', { class: 'row', style: 'align-items:flex-start;gap:16px' },
-    h('div', {}, stage, isClip ? null : player, h('div', { class: 'muted small' }, 'Pratinjau perkiraan; hasil akhir dirender oleh FFmpeg/libass.')),
-    h('div', { class: 'grow' }, lines)));
+  box.append(h('div', { class: 'sub-editor' },
+    h('div', { class: 'sub-left' }, stage, isClip ? null : player,
+      h('div', { class: 'row' }, exactBtn, h('span', { class: 'muted small' }, 'Geser teks di layar untuk memindah. "Pratinjau akurat" = hasil render sebenarnya (libass).'))),
+    controls));
+  box.append(h('details', { open: true }, h('summary', {}, `📝 Teks per baris (${(d.lines || []).length}) — bungkus *kata* untuk penekanan`), lines));
   return box;
+}
+
+/* Sama dengan subtitles.normalize_style di server: terjemahkan gaya lama (uppercase/outline/position/
+   animation/karaoke/active_scale) ke field editor baru, lalu isi default. */
+function normStyle(raw) {
+  const s = { ...raw }, short = S.p.format === 'short';
+  if (!s.template && s.preset) s.template = s.preset;
+  if ('uppercase' in s && !('case' in s)) s.case = s.uppercase ? 'upper' : 'none';
+  if ('outline' in s && !('stroke_w' in s)) s.stroke_w = s.outline;
+  if ('active_scale' in s && !('highlight_scale' in s)) s.highlight_scale = s.active_scale;
+  if ('animation' in s && !('active_anim' in s)) { s.active_anim = s.animation === 'pop' ? 'pop' : 'none'; if (!('anim_in' in s)) s.anim_in = 'none'; }
+  if ('karaoke' in s && !('highlight_mode' in s)) s.highlight_mode = s.karaoke ? 'color' : 'none';
+  if ('position' in s && !('pos_y' in s)) s.pos_y = (short ? { middle: 50, lower: 53, bottom: 60 } : { middle: 50, lower: 75, bottom: 88 })[s.position] || 60;
+  const base = { ...S.meta.sub_defaults };
+  if (!short) Object.assign(base, { size: 56, case: 'none', words_per_line: 7, pos_y: 88, anim_in: 'fade', active_anim: 'none', highlight_scale: 100, stroke_w: 3 });
+  return { ...base, ...s };
+}
+
+function hexA(hex, pct) {
+  const m = /^#?([0-9a-f]{6})$/i.exec(hex || '');
+  if (!m) return hex || 'transparent';
+  const n = parseInt(m[1], 16);
+  return `rgba(${n >> 16},${(n >> 8) & 255},${n & 255},${(pct ?? 100) / 100})`;
 }
 
 // ================================================================ TAHAP 6
@@ -1089,7 +1309,126 @@ function rRender() {
   return box;
 }
 
-// ================================================================ TAHAP 7
+// ================================================================ TAHAP Thumbnail
+function rThumbnail() {
+  const d = S.draft, box = h('div');
+  const fmt = S.p.format, tw = fmt === 'short' ? 300 : 560;
+  d.frames = d.frames || []; d.thumbs = d.thumbs || []; d.designs = d.designs || [];
+  const tpls = S.meta.thumb_templates || {};
+  // desain yang sedang diedit: dari slot terpilih, atau template awal + teks default
+  if (!S.tw || S.tw.pid !== S.p.id) {
+    const cur = d.designs[d.selected || 0];
+    S.tw = { pid: S.p.id, slot: d.thumbs.length ? (d.selected || 0) : null,
+      design: cur ? { ...cur } : { template: fmt === 'short' ? 'atas' : 'kiri', text: '' } };
+  }
+  const ds = S.tw.design;
+  const full = () => ({ ...S.meta.thumb_defaults, ...((tpls[ds.template] || {}).design || {}), ...ds });
+
+  box.append(h('div', { class: 'row' },
+    btn(d.thumbs.length ? '⚡ Buat ulang 3 variasi otomatis' : '⚡ Buat 3 thumbnail otomatis', async () => {
+      if (d.thumbs.length && !confirm('Ganti 3 slot pertama dengan variasi otomatis baru?')) return;
+      S.tw = null; await runAction('thumbnail.auto');
+    }, d.thumbs.length ? '' : 'primary'),
+    btn('🎞 Ambil kandidat frame', () => runAction('thumbnail.frames'), 'ghost'),
+    btn('📁 Unggah gambar latar', () => uploadFile(`/api/projects/${S.p.id}/thumbnail/upload`, 'image/*'), 'ghost'),
+    S.p.mode === 'clipper' ? h('span', { class: 'row small' }, 'frame di detik',
+      h('input', { type: 'number', step: 0.1, min: 0, style: 'width:80px', id: 'tf-t' }),
+      btn('+', () => runAction('thumbnail.frames', { t: +$('#tf-t').value || 0 }), 'small')) : null));
+  box.append(hint('Thumbnail diambil dari video TANPA subtitle. Tips: 1-4 kata, kontras tinggi, wajah ekspresif. Bungkus *kata* untuk warna sorot, Enter = baris baru. Buat 2-3 variasi untuk fitur "Test & Compare" YouTube.'));
+
+  // --- kandidat frame
+  if (d.frames.length) {
+    box.append(h('div', { class: 'frame-strip' }, d.frames.map((fr) => h('div', {
+      class: `fr ${d.frame === fr.path ? 'on' : ''}`, title: `skor ${fr.score}${fr.face ? ' · ada wajah' : ''}`,
+      onclick: () => { d.frame = fr.path; markDirty(); render(); } },
+    h('img', { src: media(fr.path) }), fr.face ? h('span', { class: 'fr-face' }, '🙂') : null))));
+  }
+  if (!d.frame) { box.append(h('div', { class: 'muted' }, 'Ambil kandidat frame dulu (atau klik "Buat 3 thumbnail otomatis").')); return box; }
+
+  // --- editor
+  const img = h('img', { class: 'th-prev', style: `width:${tw}px`, title: 'Klik untuk memindah teks ke titik ini' });
+  let timer, seq = 0;
+  const refresh = (now) => {
+    clearTimeout(timer);
+    timer = setTimeout(async () => {
+      const my = ++seq;
+      img.classList.add('loading');
+      try {
+        const blob = await api('POST', `/api/projects/${S.p.id}/thumbnail/preview`, { frame: d.frame, design: ds });
+        if (my === seq) img.src = URL.createObjectURL(blob);
+      } catch (e) { toast(e.message, true); }
+      finally { if (my === seq) img.classList.remove('loading'); }
+    }, now ? 0 : 450);
+  };
+  img.onclick = (e) => {
+    const r = img.getBoundingClientRect(), f0 = full();
+    const x = ((e.clientX - r.left) / r.width) * 100, y = ((e.clientY - r.top) / r.height) * 100;
+    ds.text_x = Math.round(f0.align === 'left' ? x : f0.align === 'right' ? x : x); ds.text_y = Math.round(y);
+    refresh(true); render();
+  };
+  const F = full();
+  const set = (key, v) => { ds[key] = v; refresh(); };
+  const fld = (label, key, o = {}) => {
+    const proxy = { [key]: F[key] };
+    return field(label, proxy, key, { ...o, dirty: () => {}, onchange: (v) => { set(key, v); if (o.rerender) render(); } });
+  };
+  const rng = (label, key, min, max, step = 1) => fld(label, key, { type: 'range', min, max, step });
+  const tgal = h('div', { class: 'tpl-grid' }, Object.entries(tpls).map(([k, t]) => h('div', {
+    class: `tpl ${F.template === k ? 'on' : ''}`, title: t.desc,
+    onclick: () => { S.tw.design = { template: k, text: ds.text || '' }; refresh(true); render(); } },
+  h('div', { class: 'tpl-name' }, t.label), h('div', { class: 'muted small' }, t.desc))));
+  const sec = (title, open, ...kids) => h('details', { class: 'sub-sec', open }, h('summary', {}, title), h('div', { class: 'grid' }, kids));
+  const textBox = h('textarea', { rows: 2, placeholder: 'kosong = hook / judul otomatis', oninput: (e) => set('text', e.target.value) });
+  textBox.value = ds.text || '';
+  const controls = h('div', { class: 'sub-controls' },
+    h('b', {}, '🧩 Template layout'), tgal,
+    sec('🔠 Teks', true,
+      h('label', { class: 'field', style: 'grid-column:1/-1' }, h('span', {}, 'Teks (bungkus *kata* untuk sorot)'), textBox),
+      fld('Font', 'font', { type: 'select', options: S.meta.fonts || [] }), rng('Ukuran (% lebar)', 'size', 4, 30, 0.5),
+      fld('Huruf', 'case', { type: 'select', options: [['upper', 'BESAR'], ['none', 'Apa adanya'], ['lower', 'kecil']] }),
+      fld('Rata', 'align', { type: 'select', options: [['center', 'Tengah'], ['left', 'Kiri'], ['right', 'Kanan']] }),
+      fld('Warna teks', 'text_color', { type: 'color' }), fld('Warna sorot', 'highlight_color', { type: 'color' }),
+      h('label', { class: 'field' }, h('span', {}, 'Kotak di belakang kata sorot'), h('div', { class: 'row' },
+        h('input', { type: 'checkbox', checked: !!F.highlight_bg, onchange: (e) => { set('highlight_bg', e.target.checked ? '#E50914' : ''); render(); } }),
+        F.highlight_bg ? h('input', { type: 'color', value: F.highlight_bg, oninput: (e) => set('highlight_bg', e.target.value) }) : null)),
+      fld('Warna garis tepi', 'stroke_color', { type: 'color' }), rng('Tebal garis tepi', 'stroke_w', 0, 20),
+      rng('Bayangan', 'shadow', 0, 100), rng('Rotasi (°)', 'rotation', -15, 15),
+      rng('Posisi X (%)', 'text_x', 0, 100), rng('Posisi Y (%)', 'text_y', 0, 100), rng('Lebar maks (%)', 'max_width', 30, 95)),
+    sec('🌄 Latar', false,
+      rng('Gelapkan', 'darken', 0, 80), fld('Gradasi gelap', 'gradient', { type: 'select', options: [['none', 'Tidak'], ['bottom', 'Bawah'], ['top', 'Atas'], ['left', 'Kiri'], ['right', 'Kanan']] }),
+      rng('Kekuatan gradasi', 'gradient_strength', 0, 100), rng('Saturasi', 'saturation', 0.6, 1.8, 0.05), rng('Kontras', 'contrast', 0.7, 1.6, 0.05),
+      rng('Blur latar', 'bg_blur', 0, 20), rng('Vignette', 'vignette', 0, 100), rng('Zoom', 'zoom', 1, 2, 0.05),
+      rng('Posisi subjek (% dari kiri)', 'subject_x', 10, 90)),
+    sec('✂ Potong subjek & outline', false,
+      fld('Potong subjek (butuh wajah)', 'cutout', { type: 'checkbox', rerender: true }),
+      fld('Warna outline', 'outline_color', { type: 'color' }), rng('Tebal outline', 'outline_w', 0, 24)),
+    sec('➡ Stiker', false,
+      fld('Stiker', 'sticker', { type: 'select', rerender: true, options: [['none', 'Tidak ada'], ['arrow', 'Panah + lingkaran'], ['circle', 'Lingkaran']] }),
+      fld('Warna', 'sticker_color', { type: 'color' }), rng('X (%)', 'sticker_x', 0, 100), rng('Y (%)', 'sticker_y', 0, 100)));
+
+  const slot = S.tw.slot;
+  const saveRow = h('div', { class: 'row' },
+    slot !== null && slot < d.thumbs.length ? btn(`💾 Simpan ke variasi ${slot + 1}`, () => runAction('thumbnail.render', { frame: d.frame, design: ds, slot }), 'primary') : null,
+    btn('➕ Simpan sebagai variasi baru', async () => { S.tw.slot = d.thumbs.length; await runAction('thumbnail.render', { frame: d.frame, design: ds, slot: d.thumbs.length }); }, slot === null ? 'primary' : ''));
+
+  // --- slot variasi
+  const slots = h('div', { class: 'row', style: 'align-items:flex-start;flex-wrap:wrap' }, d.thumbs.map((t, i) => h('div', { class: `slot ${d.selected === i ? 'on' : ''}` },
+    h('img', { src: media(t), style: `width:${fmt === 'short' ? 110 : 200}px`, onclick: () => {
+      d.selected = i; markDirty(); S.tw = { pid: S.p.id, slot: i, design: { ...(d.designs[i] || {}) } };
+      if ((d.designs[i] || {}).frame) d.frame = d.designs[i].frame;
+      render(); } }),
+    h('div', { class: 'row small' }, d.selected === i ? h('b', {}, '✓ dipakai') : h('span', { class: 'muted' }, `variasi ${i + 1}`),
+      btn('✕', async () => { if (confirm('Hapus variasi ini?')) { S.tw = null; await runAction('thumbnail.remove', { slot: i }, true); } }, 'small ghost danger')))));
+
+  box.append(h('div', { class: 'sub-editor' },
+    h('div', { class: 'sub-left' }, img, saveRow,
+      d.thumbs.length ? h('div', {}, h('b', {}, 'Variasi tersimpan'), h('div', { class: 'muted small' }, 'Klik untuk mengedit; variasi bertanda ✓ dipakai saat upload. Klik "Simpan Edit Manual" setelah mengganti pilihan.'), slots) : null),
+    controls));
+  refresh(true);
+  return box;
+}
+
+// ================================================================ TAHAP Upload
 function rPublish() {
   const d = S.draft, box = h('div');
   if (!S.meta.google) box.append(hint('Google belum terhubung. Jalankan: python run.py --setup-google', 'warn'));
@@ -1120,26 +1459,22 @@ function rPublish() {
   }, 'success')));
   if (d.video_id) box.append(h('div', { class: 'card' }, '✅ Terunggah: ', h('a', { href: d.url, target: '_blank' }, d.url), ` · status: ${d.status}`));
 
-  // --- thumbnail
+  // --- thumbnail (dibuat di tahap Thumbnail)
+  const th = S.p.thumbnail || {}, thumbs = th.thumbs || [], tsel = Math.min(th.selected || 0, Math.max(0, thumbs.length - 1));
   const tb = h('div', { class: 'card' }, h('b', {}, '🖼 Thumbnail'),
-    h('div', { class: 'row' },
-      btn((d.thumbs || []).length ? '↻ Buat ulang thumbnail' : '🖼 Buat 3 thumbnail dari video', () => runAction('publish.thumbs', { text: d.thumb_text || undefined }), 'small'),
-      h('div', { class: 'grow' }, field('Teks di thumbnail', d, 'thumb_text', { placeholder: 'kosong = teks hook / judul' }))));
-  if ((d.thumbs || []).length) {
-    d.thumb_selected = d.thumb_selected || 0;
-    tb.append(h('div', { class: 'row', style: 'align-items:flex-start;flex-wrap:wrap' }, d.thumbs.map((t, k) =>
-      h('img', { src: media(t), class: `thumbpick ${d.thumb_selected === k ? 'on' : ''}`, style: `width:${S.p.format === 'short' ? 120 : 220}px`,
-        onclick: () => { d.thumb_selected = k; markDirty(); render(); } }))));
-    tb.append(h('div', { class: 'row' },
-      d.video_id ? btn('⬆ Pasang thumbnail terpilih ke YouTube', () => runAction('publish.thumbnail', { index: d.thumb_selected }), 'small primary')
-        : h('span', { class: 'muted small' }, 'Thumbnail bisa dipasang setelah video terunggah.'),
-      d.thumb_uploaded ? h('span', { class: 'muted small' }, `terpasang ${d.thumb_uploaded}`) : null));
-  }
+    thumbs.length ? h('div', { class: 'row', style: 'align-items:flex-start' },
+      h('img', { src: media(thumbs[tsel]), style: `width:${S.p.format === 'short' ? 120 : 240}px;border-radius:8px` }),
+      h('div', {},
+        h('div', { class: 'muted small' }, `Variasi ${tsel + 1} dari ${thumbs.length} dipakai. Ganti/ubah di tahap Thumbnail.`),
+        d.video_id ? btn('⬆ Pasang thumbnail ke YouTube', () => runAction('publish.thumbnail', { index: tsel }), 'small primary')
+          : h('div', { class: 'muted small' }, 'Bisa dipasang setelah video terunggah (YouTube perlu selesai memproses video).'),
+        th.uploaded ? h('div', { class: 'muted small' }, `terpasang ${th.uploaded}`) : null))
+      : h('div', { class: 'muted small' }, 'Belum ada thumbnail — buat di tahap Thumbnail.'));
   box.append(tb);
   return box;
 }
 
-const RENDER = { research: rResearch, script: rScript, assets: rAssets, audio: rAudio, subtitles: rSubtitles, render: rRender, publish: rPublish };
+const RENDER = { research: rResearch, script: rScript, assets: rAssets, audio: rAudio, subtitles: rSubtitles, render: rRender, thumbnail: rThumbnail, publish: rPublish };
 
 // ---------------------------------------------------------------- sidebar
 async function refreshList() {
@@ -1217,7 +1552,7 @@ function renderPublishView() {
       h('button', { class: 'ghost small', onclick: () => {
         if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
         S.view = PUB - 1; loadProject(p.id, true, p.mode);
-      } }, `✎ Edit video di tab ${p.mode === 'clipper' ? 'Clipper' : 'Dari Nol'}`),
+      } }, `✎ Edit video / thumbnail di tab ${p.mode === 'clipper' ? 'Clipper' : 'Dari Nol'}`),
       h('button', { class: 'ghost small', onclick: () => { S.p = null; lsSet('lastProject_publish', null); renderWelcome('publish'); refreshList(); } }, '📅 Ringkasan jadwal'))));
 
   const panel = h('div', { class: 'panel' });
@@ -1420,20 +1755,20 @@ function renderWelcome(mode) {
     h('p', {}, clip
       ? 'Ubah video panjang (podcast, wawancara, live) jadi klip pendek. Tempel link YouTube atau unggah file di kiri.'
       : 'Bangun video tanpa bahan apa pun: ide → naskah → visual → suara → subtitle → render. Isi niche di kiri.'),
-    h('ol', { class: 'flow' }, S.meta.stages.slice(0, PUB).map((k) => h('li', {}, h('b', {}, L[k].replace(/^\d+\.\s*/, '')), ' — ', h('span', { class: 'muted' }, helpFor(mode, k))))),
+    h('ol', { class: 'flow' }, wizardStages(mode).map(([k]) => h('li', {}, h('b', {}, L[k].replace(/^\d+\.\s*/, '')), ' — ', h('span', { class: 'muted' }, helpFor(mode, k))))),
     h('p', { class: 'muted small' }, 'Di setiap tahap Anda bisa menjalankan AI, mengedit manual, lalu "Setujui & Lanjut". ',
       'Setelah Render disetujui, video pindah ke tab 📅 Upload & Jadwal.')));
 }
 
 async function init() {
-  try { S.meta = await api('GET', '/api/meta'); }
+  try { S.meta = await api('GET', '/api/meta'); PUB = S.meta.stages.indexOf('publish'); loadFonts(); }
   catch (e) {
     const r = SERVED_BY_BACKEND ? { why: e.message } : await probeBackend(API_BASE);
     backendBox(r.ok ? e.message : r.why); return;
   }
   backendBox(null);
   $('#sysinfo').textContent = `LLM: ${S.meta.llm} · Google: ${S.meta.google ? 'terhubung ✓' : 'belum terhubung'}`;
-  const [hashTab, hashPid] = location.hash.slice(1).split('/');  // link langsung: …/#clipper, …/#publish/<id proyek>
+  const [hashTab, hashPid, hashStage] = location.hash.slice(1).split('/');  // link langsung: …/#clipper, …/#publish/<id>, …/#clipper/<id>/subtitles
   if (TABS.includes(hashTab)) { S.tab = hashTab; lsSet('tab', hashTab); if (hashPid) lsSet(`lastProject_${hashTab}`, hashPid); }
   document.querySelectorAll('#tabs button').forEach((b) => { b.onclick = () => setTab(b.dataset.mode); });
   renderSidebarTab();
@@ -1441,7 +1776,9 @@ async function init() {
   window.addEventListener('beforeunload', (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ''; } });
   await refreshList();
   const last = lsGet(`lastProject_${S.tab}`) || (hashTab ? null : lsGet('lastProject'));
-  if (last) loadProject(last, false, S.tab === 'publish' ? 'publish' : null).catch(() => { lsSet(`lastProject_${S.tab}`, null); renderWelcome(S.tab); });
+  if (last) loadProject(last, false, S.tab === 'publish' ? 'publish' : null)
+    .then(() => { const i = S.meta.stages.indexOf(hashStage || ''); if (i >= 0 && i < PUB) setView(i); })
+    .catch(() => { lsSet(`lastProject_${S.tab}`, null); renderWelcome(S.tab); });
   else renderWelcome(S.tab);
 }
 

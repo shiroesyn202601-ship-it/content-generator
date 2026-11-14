@@ -174,6 +174,23 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       kata/dtk (Edge-TTS Indonesia hanya ±2–2.5 kata/dtk → 50 dtk ≈ 92–109 kata). Fakta/Tragedi tetap bisa memakai
       sumber Wikipedia + cek fakta.
 
+13. **15 Nov 2026 — produksi massal Clipper, subtitle ala CapCut, tahap Thumbnail:**
+    - `STAGES` kini 8: ... render → **thumbnail** → publish (indeks publish 7; `store._migrate` menyesuaikan proyek
+      lama saat dibaca). UI membaca indeks dari `/api/meta` (`PUB`).
+    - Clipper: tahap script + assets tampil sebagai satu tahap **"Momen & Potong"** (`store.CLIPPER_MERGED`; approve
+      script ikut approve assets; `assets.cut_clip` terdaftar di tahap script). Centang klip → `script.produce_clips`
+      (`clipper.produce_clips`): fork (sumber di-**hardlink**) → potong/reframe → subtitle (template) → (musik) →
+      render → 3 thumbnail → semua tahap disetujui → masuk tab Upload. Satu klip gagal tidak menghentikan yang lain.
+    - Subtitle: `subtitles.normalize_style` + `to_ass` baru (posisi bebas `\pos` %, rotasi, animasi masuk
+      pop/bounce/fade/slide/ketik, kata aktif pop/bounce, sorot warna/pill/kotak (`\p1` dari lebar kata Pillow)/karaoke
+      `\kf`, glow, bayangan xy, kotak per baris BorderStyle 3, 1-2 baris). 14 template `store.SUB_TEMPLATES` +
+      template buatan sendiri (`data/sub_templates.json`). Pratinjau browser bisa digeser + "Pratinjau akurat"
+      (`/subtitles/preview`, satu frame libass). Font OFL tambahan di `fonts.CATALOG`, disajikan di `/fonts/{nama}`.
+    - Thumbnail (`thumbs.py`): kandidat frame dari video TANPA subtitle (skor ketajaman + wajah YuNet), 7 template
+      layout, teks auto-fit dengan *sorot*, latar (gelap/gradasi/blur/vignette), potong subjek grabCut + outline,
+      stiker panah/lingkaran; pratinjau live `/thumbnail/preview`; variasi untuk A/B; dipasang via `publish.thumbnail`.
+    - Catatan: render otomatis ikut mengunggah ke Google Drive bila Google terhubung (juga saat produksi massal).
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).
