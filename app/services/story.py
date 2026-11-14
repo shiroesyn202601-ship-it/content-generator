@@ -101,6 +101,19 @@ def _retry_wait(r: httpx.Response) -> float:
     return float(m.group(1)) if m else float(r.headers.get("retry-after") or 0)
 
 
+def _crop_watermark(img: bytes) -> bytes:
+    """Endpoint gratis tanpa key menaruh watermark kecil di kanan bawah → buang 6% bawah."""
+    import io
+    try:
+        from PIL import Image
+        im = Image.open(io.BytesIO(img)).convert("RGB")
+        buf = io.BytesIO()
+        im.crop((0, 0, im.width, int(im.height * 0.94))).save(buf, "JPEG", quality=92)
+        return buf.getvalue()
+    except Exception:  # noqa: BLE001
+        return img
+
+
 def _text2img(prompt: str, w: int, h: int, seed: int, progress) -> bytes:
     for attempt in range(4):
         if has_key():
@@ -111,7 +124,7 @@ def _text2img(prompt: str, w: int, h: int, seed: int, progress) -> bytes:
             r = httpx.get(CLASSIC + quote(prompt), params={"width": w, "height": h, "seed": seed, "nologo": "true",
                           "model": "flux"}, timeout=180, follow_redirects=True)
         if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-            return r.content
+            return r.content if has_key() else _crop_watermark(r.content)
         wait = _retry_wait(r) or (20 if r.status_code in (402, 429, 502, 503) else 0)
         if not wait or attempt == 3:
             raise RuntimeError(f"Pollinations {r.status_code}: {r.text[:200]}")
