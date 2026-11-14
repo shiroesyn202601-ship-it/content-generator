@@ -138,6 +138,9 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     masing-masing dengan form proyek baru sendiri (Clipper: tempel link → langsung unduh, atau unggah file),
     daftar proyek terfilter, nama tahap sendiri (`store.STAGE_LABELS_CLIPPER`), penjelasan tahap
     (`store.STAGE_HELP`), dan layar sambutan. Link langsung `/#clipper`. Tahap internal tetap sama (7 kunci).
+    Tab ketiga **📅 Upload** dipakai bersama kedua jalur: wizard Dari Nol/Clipper hanya 6 tahap (s.d. Render);
+    setelah Render disetujui proyek pindah ke tab Upload (grup Siap diunggah / Terjadwal / Sudah terunggah,
+    ringkasan jadwal di halaman awal tab). Tahap internal `publish` tetap ada (indeks 6). Link `/#publish/<id>`.
     Juga ikut: mode visual **Cerita AI** (`story.py`, karakter konsisten via Pollinations) + transisi antar-scene.
 
 ## 5. Status & langkah berikutnya

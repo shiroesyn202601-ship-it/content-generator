@@ -113,22 +113,28 @@ const S = {
   meta: null, p: null, view: 0, draft: null, dirty: false, raw: false, busy: false,
   voices: [], lib: null, globalPron: {}, voiceDraft: null, voiceDirty: false,
   batch: new Set(),  // indeks ide yang dicentang untuk produksi massal
-  tab: lsGet('tab') === 'clipper' ? 'clipper' : 'scratch',  // ruang kerja: Dari Nol / Clipper
+  tab: ['clipper', 'publish'].includes(lsGet('tab')) ? lsGet('tab') : 'scratch',  // Dari Nol / Clipper / Upload
 };
+const PUB = 6;          // indeks tahap "publish": dikerjakan di tab Upload & Jadwal, bukan di wizard
+const TABS = ['scratch', 'clipper', 'publish'];
+const readyForUpload = (p) => p.current_stage >= PUB;
 const stageKey = () => S.meta.stages[S.view];
 const labelsFor = (mode) => ((S.meta.labels_by_mode || {})[mode]) || S.meta.labels;
 const helpFor = (mode, st) => (((S.meta.stage_help || {})[mode]) || {})[st] || '';
 const media = (rel) => rel ? U(`/media/${S.p.id}/${rel}?v=${encodeURIComponent(S.p.updated_at)}`) : '';
 
 // ---------------------------------------------------------------- data flow
-async function loadProject(pid, keepView = false) {
+async function loadProject(pid, keepView = false, tab = null) {
   S.p = await api('GET', `/api/projects/${pid}`);
-  if (!keepView) S.view = Math.min(S.p.current_stage, 6);
+  // Tab tujuan: yang diminta, atau tetap di Upload bila proyek sudah siap upload, selain itu tab jalurnya.
+  const want = tab || (S.tab === 'publish' && readyForUpload(S.p) ? 'publish' : S.p.mode);
+  if (S.tab !== want) { S.tab = want; lsSet('tab', want); renderSidebarTab(); }
+  if (S.tab === 'publish') S.view = PUB;
+  else if (!keepView || S.view >= PUB) S.view = Math.min(S.p.current_stage, PUB - 1);
   S.draft = clone(S.p[stageKey()]);
   S.voiceDraft = clone(S.p.voice);
   S.dirty = false; S.voiceDirty = false;
-  lsSet('lastProject', pid); lsSet(`lastProject_${S.p.mode}`, pid);
-  if (S.tab !== S.p.mode) { S.tab = S.p.mode; lsSet('tab', S.tab); renderSidebarTab(); }
+  lsSet('lastProject', pid); lsSet(`lastProject_${S.tab}`, pid);
   render(); refreshList();
   resumeJobs();
 }
@@ -206,9 +212,15 @@ async function approve() {
     if (S.dirty) await saveDraft(true);
     const res = await api('POST', `/api/projects/${S.p.id}/stage/${stageKey()}/approve`);
     toast('Disetujui ✓ — lanjut ke tahap berikutnya');
-    S.p = res.project; S.view = Math.min(S.view + 1, 6);
-    S.draft = clone(S.p[stageKey()]); S.dirty = false;
-    render(); refreshList();
+    S.p = res.project; S.dirty = false;
+    if (S.tab !== 'publish' && S.view + 1 >= PUB) {
+      toast('Video siap ✓ — lanjut di tab 📅 Upload & Jadwal');
+      await loadProject(S.p.id, false, 'publish');
+    } else {
+      S.view = Math.min(S.view + 1, S.tab === 'publish' ? PUB : PUB - 1);
+      S.draft = clone(S.p[stageKey()]);
+      render(); refreshList();
+    }
     if (S.meta.google) pollJob(res.sync_job, 'Sinkron Google').catch((e) => toast(e.message, true)).finally(() => status(''));
   } catch (e) { toast(e.message, true); }
 }
@@ -285,6 +297,7 @@ async function uploadFile(url, accept) {
 
 // ---------------------------------------------------------------- main render
 function render() {
+  if (S.tab === 'publish') return renderPublishView();
   const p = S.p, main = $('#main');
   main.innerHTML = '';
   const st = stageKey(), locked = S.view > p.current_stage, L = labelsFor(p.mode);
@@ -299,7 +312,7 @@ function render() {
         h('span', { class: 'badge' }, p.id))),
     h('button', { class: 'ghost danger small', onclick: deleteProject }, 'Hapus proyek')));
 
-  main.append(h('div', { class: 'stepper' }, S.meta.stages.map((k, i) => h('div', {
+  main.append(h('div', { class: 'stepper' }, S.meta.stages.slice(0, PUB).map((k, i) => h('div', {
     class: `step s-${p.stage_status[k]} ${i === S.view ? 'current' : ''} ${i > p.current_stage ? 'locked' : ''}`,
     onclick: () => setView(i),
   }, L[k], h('span', { class: 'st' }, statusLabel(p.stage_status[k]))))));
@@ -313,6 +326,9 @@ function render() {
     h('button', { class: 'success', onclick: approve, disabled: locked || S.busy }, '✓ Setujui & Lanjut')));
 
   if (helpFor(p.mode, st)) panel.append(h('div', { class: 'muted small stage-help' }, helpFor(p.mode, st)));
+  if (st === 'render' && readyForUpload(p)) panel.append(h('div', { class: 'hint ok row' },
+    h('span', { class: 'grow' }, '✅ Video sudah disetujui dan masuk antrean upload.'),
+    h('button', { class: 'small primary', onclick: () => loadProject(p.id, false, 'publish') }, '📅 Buka di Upload & Jadwal')));
   if (locked) panel.append(hint('🔒 Tahap ini terkunci. Setujui tahap sebelumnya terlebih dahulu.', 'warn'));
   else if (p.stage_status[st] === 'stale') panel.append(hint('⚠ Tahap sebelumnya diubah. Cek ulang tahap ini (jalankan ulang bila perlu), lalu setujui lagi.', 'warn'));
 
@@ -339,7 +355,7 @@ function rawEditor() {
 async function deleteProject() {
   if (!confirm(`Hapus proyek "${S.p.title}" beserta semua file lokalnya? (Backup di Google Drive tidak ikut terhapus)`)) return;
   await api('DELETE', `/api/projects/${S.p.id}`);
-  lsSet(`lastProject_${S.p.mode}`, null); S.p = null; lsSet('lastProject', null);
+  lsSet(`lastProject_${S.p.mode}`, null); lsSet('lastProject_publish', null); S.p = null; lsSet('lastProject', null);
   renderWelcome(S.tab);
   refreshList();
 }
@@ -940,11 +956,16 @@ const RENDER = { research: rResearch, script: rScript, assets: rAssets, audio: r
 // ---------------------------------------------------------------- sidebar
 async function refreshList() {
   const all = await api('GET', '/api/projects');
-  S.counts = { scratch: 0, clipper: 0 };
-  all.forEach((p) => { S.counts[p.mode] = (S.counts[p.mode] || 0) + 1; });
+  S.all = all;
+  S.counts = { scratch: 0, clipper: 0, publish: 0 };
+  all.forEach((p) => {
+    S.counts[p.mode] = (S.counts[p.mode] || 0) + 1;
+    if (readyForUpload(p) && !p.publish.video_id) S.counts.publish += 1;  // yang belum diunggah
+  });
   document.querySelectorAll('#tabs button').forEach((b) => { $('.cnt', b).textContent = S.counts[b.dataset.mode] || ''; });
-  const list = all.filter((p) => p.mode === S.tab);
   const ul = $('#project-list'); ul.innerHTML = '';
+  if (S.tab === 'publish') return publishList(all, ul);
+  const list = all.filter((p) => p.mode === S.tab);
   if (!list.length) ul.append(h('li', { class: 'muted small', style: 'cursor:default' },
     S.tab === 'clipper' ? 'Belum ada proyek clipper.' : 'Belum ada proyek dari nol.'));
   list.forEach((p) => {
@@ -954,19 +975,94 @@ async function refreshList() {
       loadProject(p.id);
     } },
       h('div', {}, p.title),
-      h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'} · ${labelsFor(p.mode)[S.meta.stages[Math.min(p.current_stage, 6)]]}`),
-      h('div', { class: 'pbar' }, h('i', { style: `width:${(done / 7) * 100}%` }))));
+      h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'} · ${readyForUpload(p) ? (p.publish.video_id ? '✅ sudah diunggah' : '📅 siap upload') : labelsFor(p.mode)[S.meta.stages[p.current_stage]]}`),
+      h('div', { class: 'pbar' }, h('i', { style: `width:${Math.min(done, PUB) / PUB * 100}%` }))));
   });
 }
 
-async function showSchedule() {
-  const rows = await api('GET', '/api/schedule');
-  const body = $('#modal-body'); body.innerHTML = '';
-  body.append(h('h2', {}, '📅 Jadwal publikasi'),
-    rows.length ? h('table', {}, h('tr', {}, h('th', {}, 'Tayang'), h('th', {}, 'Judul'), h('th', {}, 'Status')),
-      rows.map((r) => h('tr', {}, h('td', {}, r.publish_at || '-'), h('td', {}, r.url ? h('a', { href: r.url, target: '_blank' }, r.title) : r.title), h('td', {}, r.status || 'belum diunggah'))))
-      : h('p', { class: 'muted' }, 'Belum ada video terjadwal.'));
-  $('#modal').showModal();
+// ---------------------------------------------------------------- tab Upload & Jadwal
+/* Dipakai bersama oleh jalur Dari Nol dan Clipper: semua video yang render-nya sudah disetujui
+   masuk ke sini, dikelompokkan: siap diunggah → terjadwal → sudah terunggah. */
+function pubState(p) {
+  const pub = p.publish || {};
+  if (!pub.video_id) return 'ready';
+  if (pub.publish_at && new Date(pub.publish_at) > new Date()) return 'scheduled';
+  return 'live';
+}
+const PUB_GROUPS = [['ready', '⏳ Siap diunggah'], ['scheduled', '📅 Terjadwal'], ['live', '✅ Sudah terunggah']];
+const fmtWhen = (iso) => { if (!iso) return ''; const d = new Date(iso); return isNaN(d) ? iso : d.toLocaleString('id', { weekday: 'short', day: 'numeric', month: 'short', hour: '2-digit', minute: '2-digit' }); };
+
+function publishList(all, ul) {
+  const ready = all.filter(readyForUpload);
+  if (!ready.length) ul.append(h('li', { class: 'muted small', style: 'cursor:default' }, 'Belum ada video siap upload. Selesaikan sampai tahap Render di tab Dari Nol / Clipper.'));
+  PUB_GROUPS.forEach(([key, label]) => {
+    const rows = ready.filter((p) => pubState(p) === key)
+      .sort((a, b) => (a.publish.publish_at || '9').localeCompare(b.publish.publish_at || '9'));
+    if (!rows.length) return;
+    ul.append(h('li', { class: 'group' }, `${label} (${rows.length})`));
+    rows.forEach((p) => ul.append(h('li', { class: S.p && S.p.id === p.id ? 'active' : '', onclick: () => {
+      if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
+      loadProject(p.id, false, 'publish');
+    } },
+      h('div', {}, p.mode === 'clipper' ? '✂ ' : '🎬 ', p.publish.title || p.title),
+      h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'}`,
+        p.publish.publish_at ? ` · tayang ${fmtWhen(p.publish.publish_at)}` : p.publish.video_id ? ` · ${p.publish.privacy || ''}` : ''))));
+  });
+  const wip = all.length - ready.length;
+  if (wip) ul.append(h('li', { class: 'muted small', style: 'cursor:default' }, `${wip} proyek lain masih dikerjakan.`));
+}
+
+function renderPublishView() {
+  const p = S.p, main = $('#main');
+  main.innerHTML = '';
+  applyTheme('publish');
+  if (!p || !readyForUpload(p)) return renderWelcome('publish');
+  const r = p.render || {};
+  main.append(h('div', { class: 'row between' },
+    h('div', {},
+      h('h1', {}, p.publish.title || p.title),
+      h('div', { class: 'row' },
+        h('span', { class: 'badge' }, p.mode === 'scratch' ? '🎬 Dari nol' : '✂ Clipper'),
+        h('span', { class: 'badge' }, p.format === 'short' ? 'Short 9:16' : 'Long 16:9'),
+        h('span', { class: `badge ${p.stage_status.publish}` }, statusLabel(p.stage_status.publish)))),
+    h('div', { class: 'row' },
+      h('button', { class: 'ghost small', onclick: () => {
+        if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
+        S.view = PUB - 1; loadProject(p.id, true, p.mode);
+      } }, `✎ Edit video di tab ${p.mode === 'clipper' ? 'Clipper' : 'Dari Nol'}`),
+      h('button', { class: 'ghost small', onclick: () => { S.p = null; lsSet('lastProject_publish', null); renderWelcome('publish'); refreshList(); } }, '📅 Ringkasan jadwal'))));
+
+  const panel = h('div', { class: 'panel' });
+  panel.append(h('div', { class: 'gate' },
+    h('b', { class: 'grow' }, 'Upload & Jadwal'),
+    h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: S.raw, onchange: (e) => { S.raw = e.target.checked; render(); } }), 'Edit Manual (JSON mentah)'),
+    h('button', { id: 'btn-save', onclick: () => saveDraft().catch((e) => toast(e.message, true)), disabled: S.busy },
+      S.dirty ? '💾 Simpan *' : '💾 Simpan'),
+    h('button', { class: 'success', onclick: approve, disabled: S.busy }, '✓ Tandai selesai')));
+  if (p.mode === 'clipper') panel.append(hint('Klip dari video orang lain: cantumkan kredit & link sumber di deskripsi.', 'warn'));
+  const left = h('div', { class: 'pub-video' },
+    r.output_path ? h('video', { class: 'preview-v', src: media(r.output_path), controls: true, preload: 'metadata' }) : hint('File video belum ada — render ulang di tab jalurnya.', 'warn'),
+    r.output_path ? h('div', { class: 'row small' }, h('a', { href: media(r.output_path), download: `${p.id}.mp4` }, '⬇ Unduh MP4'),
+      r.duration ? h('span', { class: 'muted' }, `durasi ${fmtT(r.duration)}`) : null) : null);
+  panel.append(h('div', { class: `pub-grid ${p.format}` }, left, h('div', {}, S.raw ? rawEditor() : rPublish())));
+  main.append(panel);
+  main.append(h('details', {}, h('summary', {}, 'Log proyek'), h('pre', { class: 'log' }, (p.log || []).slice().reverse().join('\n'))));
+}
+
+async function renderScheduleOverview(box) {
+  let rows = [];
+  try { rows = await api('GET', '/api/schedule'); } catch (e) { box.append(hint(`Gagal memuat jadwal: ${e.message}`, 'warn')); return; }
+  const ready = (S.all || []).filter((p) => readyForUpload(p) && !p.publish.video_id);
+  box.append(h('div', { class: 'grid2 pub-summary' },
+    h('div', { class: 'card' }, h('div', { class: 'big' }, String(ready.length)), 'video siap diunggah'),
+    h('div', { class: 'card' }, h('div', { class: 'big' }, String(rows.filter((r) => r.publish_at && new Date(r.publish_at) > new Date()).length)), 'terjadwal tayang')));
+  box.append(h('h3', {}, 'Jadwal tayang'), rows.length
+    ? h('table', {}, h('tr', {}, h('th', {}, 'Tayang'), h('th', {}, 'Judul'), h('th', {}, 'Status')),
+      rows.map((r) => h('tr', { class: 'clickable', onclick: () => loadProject(r.id, false, 'publish') },
+        h('td', {}, r.publish_at ? fmtWhen(r.publish_at) : '-'),
+        h('td', {}, r.url ? h('a', { href: r.url, target: '_blank', onclick: (e) => e.stopPropagation() }, r.title) : r.title),
+        h('td', {}, r.status || 'belum diunggah'))))
+    : h('p', { class: 'muted' }, 'Belum ada video terjadwal.'));
 }
 
 /* Cek koneksi ke backend dan jelaskan penyebab gagalnya dalam bahasa manusia. */
@@ -1044,12 +1140,21 @@ function backendBox(errMsg) {
 // ---------------------------------------------------------------- ruang kerja (tab) per jalur
 /* Jalur "Dari Nol" dan "Clipper" kebutuhannya beda, jadi masing-masing punya tab sendiri:
    daftar proyek, form proyek baru, nama tahap, warna aksen, dan layar sambutan. */
-function applyTheme(mode) { document.body.classList.toggle('mode-clipper', mode === 'clipper'); }
+function applyTheme(mode) {
+  document.body.classList.toggle('mode-clipper', mode === 'clipper');
+  document.body.classList.toggle('mode-publish', mode === 'publish');
+}
 
 function renderSidebarTab() {
   document.querySelectorAll('#tabs button').forEach((b) => b.classList.toggle('on', b.dataset.mode === S.tab));
   applyTheme(S.tab);
   const box = $('#newproj'); box.innerHTML = '';
+  if (S.tab === 'publish') {
+    box.append(h('h3', {}, '📅 Upload & Jadwal'),
+      h('div', { class: 'muted small' }, 'Semua video dari jalur Dari Nol dan Clipper yang tahap Render-nya sudah disetujui masuk ke sini. Atur judul, thumbnail, lalu unggah atau jadwalkan.'),
+      ...(S.meta.google ? [] : [h('div', { class: 'hint warn small', style: 'margin-top:8px' }, 'Google belum terhubung: python run.py --setup-google')]));
+    return;
+  }
   const fmtSel = (def) => {
     const el = h('select', {}, h('option', { value: 'short' }, 'Short (9:16, ≤60 dtk)'), h('option', { value: 'long' }, 'Long (16:9)'));
     el.value = def; return el;
@@ -1106,21 +1211,30 @@ function setTab(mode) {
   renderSidebarTab();
   const last = lsGet(`lastProject_${mode}`);
   const blank = () => { S.p = null; renderWelcome(mode); refreshList(); };
-  if (last) loadProject(last).catch(() => { lsSet(`lastProject_${mode}`, null); blank(); });
+  if (last) loadProject(last, false, mode).catch(() => { lsSet(`lastProject_${mode}`, null); blank(); });
   else blank();
 }
 
 function renderWelcome(mode) {
   applyTheme(mode);
-  const L = labelsFor(mode), main = $('#main'); main.innerHTML = '';
+  const main = $('#main'); main.innerHTML = '';
+  if (mode === 'publish') {
+    const box = h('div', { class: 'pub-home' }, h('h1', {}, '📅 Upload & Jadwal'),
+      h('p', { class: 'muted' }, 'Antrean upload untuk kedua jalur. Pilih video di kiri untuk mengisi judul, deskripsi, tag, thumbnail, lalu unggah atau jadwalkan. YouTube yang menayangkan sesuai jadwal — laptop tidak perlu menyala.'));
+    main.append(box);
+    renderScheduleOverview(box);
+    return;
+  }
+  const L = labelsFor(mode);
   const clip = mode === 'clipper';
   main.append(h('div', { class: 'empty' },
     h('h1', {}, clip ? '✂ Clipper' : '🎬 Konten dari Nol'),
     h('p', {}, clip
       ? 'Ubah video panjang (podcast, wawancara, live) jadi klip pendek. Tempel link YouTube atau unggah file di kiri.'
-      : 'Bangun video tanpa bahan apa pun: ide → naskah → visual → suara → subtitle → render → upload. Isi niche di kiri.'),
-    h('ol', { class: 'flow' }, S.meta.stages.map((k) => h('li', {}, h('b', {}, L[k].replace(/^\d+\.\s*/, '')), ' — ', h('span', { class: 'muted' }, helpFor(mode, k))))),
-    h('p', { class: 'muted small' }, 'Di setiap tahap Anda bisa menjalankan AI, mengedit manual, lalu "Setujui & Lanjut".')));
+      : 'Bangun video tanpa bahan apa pun: ide → naskah → visual → suara → subtitle → render. Isi niche di kiri.'),
+    h('ol', { class: 'flow' }, S.meta.stages.slice(0, PUB).map((k) => h('li', {}, h('b', {}, L[k].replace(/^\d+\.\s*/, '')), ' — ', h('span', { class: 'muted' }, helpFor(mode, k))))),
+    h('p', { class: 'muted small' }, 'Di setiap tahap Anda bisa menjalankan AI, mengedit manual, lalu "Setujui & Lanjut". ',
+      'Setelah Render disetujui, video pindah ke tab 📅 Upload & Jadwal.')));
 }
 
 async function init() {
@@ -1131,16 +1245,15 @@ async function init() {
   }
   backendBox(null);
   $('#sysinfo').textContent = `LLM: ${S.meta.llm} · Google: ${S.meta.google ? 'terhubung ✓' : 'belum terhubung'}`;
-  const hashTab = location.hash.slice(1);  // link langsung: …/#clipper atau …/#scratch
-  if (hashTab === 'clipper' || hashTab === 'scratch') { S.tab = hashTab; lsSet('tab', hashTab); }
+  const [hashTab, hashPid] = location.hash.slice(1).split('/');  // link langsung: …/#clipper, …/#publish/<id proyek>
+  if (TABS.includes(hashTab)) { S.tab = hashTab; lsSet('tab', hashTab); if (hashPid) lsSet(`lastProject_${hashTab}`, hashPid); }
   document.querySelectorAll('#tabs button').forEach((b) => { b.onclick = () => setTab(b.dataset.mode); });
   renderSidebarTab();
-  $('#btn-schedule').onclick = () => showSchedule().catch((e) => toast(e.message, true));
   $('#btn-health').onclick = () => showHealth().catch((e) => toast(e.message, true));
   window.addEventListener('beforeunload', (e) => { if (S.dirty) { e.preventDefault(); e.returnValue = ''; } });
   await refreshList();
   const last = lsGet(`lastProject_${S.tab}`) || (hashTab ? null : lsGet('lastProject'));
-  if (last) loadProject(last).catch(() => { lsSet(`lastProject_${S.tab}`, null); renderWelcome(S.tab); });
+  if (last) loadProject(last, false, S.tab === 'publish' ? 'publish' : null).catch(() => { lsSet(`lastProject_${S.tab}`, null); renderWelcome(S.tab); });
   else renderWelcome(S.tab);
 }
 

@@ -210,8 +210,13 @@ def list_projects() -> list[dict]:
     for f in sorted(config.PROJECTS_DIR.glob("*/project.json"), reverse=True):
         try:
             p = json.loads(f.read_text(encoding="utf-8"))
-            out.append({k: p[k] for k in ("id", "title", "mode", "format", "current_stage",
-                                          "stage_status", "updated_at")})
+            item = {k: p[k] for k in ("id", "title", "mode", "format", "current_stage",
+                                      "stage_status", "updated_at")}
+            # Ringkasan untuk tab "Upload & Jadwal" (dipakai bersama jalur Dari Nol & Clipper).
+            pub, rnd = p.get("publish") or {}, p.get("render") or {}
+            item["rendered"] = bool(rnd.get("output_path"))
+            item["publish"] = {k: pub.get(k) for k in ("title", "publish_at", "privacy", "video_id", "url", "status")}
+            out.append(item)
         except Exception:
             continue
     return out
