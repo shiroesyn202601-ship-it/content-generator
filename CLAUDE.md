@@ -259,6 +259,13 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       2 pembicara, render satu kali encode (potong+reframe langsung di graf render), cut_clip pakai encoder GPU,
       teks auto-caption YouTube sebagai cadangan transkrip, "cold open" teaser, produksi klip paralel.
 
+18. **15 Nov 2026 — redesign UI mobile/tablet:** gaya "meja produksi" (grafit hangat, IBM Plex Sans/Mono, sudut tegas,
+    aksen per ruang kerja: mustard Dari Nol / oranye Clipper / hijau Upload, token di `:root` style.css). **Tanpa emoji di UI**
+    (ikon garis SVG `<symbol>` di index.html) — sengaja, supaya tidak terlihat "buatan AI"; jangan tambahkan emoji baru.
+    < 1024px: top bar + sidebar jadi laci (`setNav`, `body.nav-open`) + tab bawah `#bottomnav` (selector `.tabs button`);
+    `(pointer: coarse)` → target sentuh ≥44px & input 16px; < 640px dialog jadi lembar bawah, tabel bisa digeser.
+    Branding Clipper (background/icon/logo) kini **dialog** (`brandButton`/`openBrandDialog`), bukan lipatan.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).
