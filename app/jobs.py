@@ -132,6 +132,12 @@ def submit(project_id: str, kind: str, fn, *args, **kwargs) -> str:
     job = {"id": jid, "project_id": project_id, "kind": kind, "status": "running",
            "progress": "", "result": None, "error": None,
            "started_at": now, "step_started_at": now, "steps": []}
+    if len(args) >= 2 and isinstance(args[1], dict):  # aksi (pid, params): params dipakai tombol "Jalankan ulang"
+        try:
+            if len(json.dumps(args[1], ensure_ascii=False)) < 200_000:
+                job["params"] = args[1]
+        except (TypeError, ValueError):
+            pass
     with _lock:
         for old in [k for k, j in _jobs.items() if j.get("finished_at") and now - j["finished_at"] > KEEP_SEC]:
             del _jobs[old]
@@ -208,10 +214,29 @@ def active_for(project_id: str) -> list[dict]:
     return [{"id": j["id"], "kind": j["kind"], "progress": j["progress"]} for j in running]
 
 
+# Aksi yang bisa diulang tanpa parameter tersimpan (pengaturannya ada di proyek) — untuk job lama.
+NO_PARAM_RETRY = ("research.auto_clip",)
+
+
 def recent_interrupted(project_id: str) -> list[dict]:
+    """Job yang terputus oleh restart dan belum ditangani (dijalankan ulang / ditutup) oleh pengguna."""
     with _lock:
-        return [{"id": j["id"], "kind": j["kind"], "error": j.get("error")} for j in _jobs.values()
-                if j["project_id"] == project_id and j["status"] == "interrupted"]
+        return [{"id": j["id"], "kind": j["kind"], "error": j.get("error"),
+                 "retry": "params" in j or j["kind"] in NO_PARAM_RETRY}
+                for j in _jobs.values()
+                if j["project_id"] == project_id and j["status"] == "interrupted" and not j.get("handled")]
+
+
+def take_interrupted(jid: str) -> dict | None:
+    """Tandai job terputus sudah ditangani; kembalikan datanya (untuk dijalankan ulang)."""
+    with _lock:
+        j = _jobs.get(jid)
+        if not j or j["status"] != "interrupted" or j.get("handled"):
+            return None
+        j["handled"] = True
+        out = {"project_id": j["project_id"], "kind": j["kind"], "params": j.get("params")}
+    _save()
+    return out
 
 
 _load()

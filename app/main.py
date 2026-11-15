@@ -329,6 +329,26 @@ def action(pid: str, name: str, params: dict = Body(default={})):
         raise HTTPException(400, f"{type(e).__name__}: {e}")
 
 
+@app.post("/api/jobs/{jid}/retry")
+def retry_job(jid: str):
+    """Jalankan ulang aksi yang terputus karena server di-restart — dengan parameter yang sama.
+    Langkah yang sudah selesai dilewati oleh aksinya sendiri (mis. Buat Klip tidak mengunduh/transkrip ulang)."""
+    j = jobs.take_interrupted(jid)
+    if not j:
+        raise HTTPException(409, "Proses ini sudah dijalankan ulang atau tidak ditemukan.")
+    if j["params"] is None and j["kind"] in jobs.NO_PARAM_RETRY:
+        j["params"] = {}
+    if j["kind"] not in ACTIONS or j["params"] is None:
+        raise HTTPException(400, "Proses ini tidak bisa dijalankan ulang otomatis — buka tahapnya lalu jalankan lagi.")
+    return action(j["project_id"], j["kind"], j["params"])
+
+
+@app.post("/api/jobs/{jid}/dismiss")
+def dismiss_job(jid: str):
+    jobs.take_interrupted(jid)
+    return {"ok": True}
+
+
 @app.post("/api/jobs/{jid}/cancel")
 def cancel_job(jid: str):
     if not jobs.cancel(jid):

@@ -624,3 +624,12 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
   .batch-go { flex-wrap: wrap; }
   .batch-go button.primary { width: 100%; }
 }
+
+/* ---- pemberitahuan proses terhenti (dengan tombol Jalankan ulang) ---- */
+#notice { position: fixed; top: 16px; right: 16px; z-index: 60; max-width: 440px; display: grid; gap: 10px;
+  background: var(--danger); color: #fff; padding: 12px 14px; border-radius: 8px; box-shadow: 0 8px 28px rgba(0,0,0,.35); }
+#notice .nt-msg { font-size: 14px; line-height: 1.4; }
+#notice .nt-btns { display: flex; gap: 8px; justify-content: flex-end; align-items: center; }
+#notice button.primary { background: #fff; color: var(--danger); border-color: #fff; }
+#notice button.ghost { color: #fff; }
+@media (max-width: 900px) { #notice { top: auto; bottom: calc(var(--bot-h, 60px) + 12px); left: 12px; right: 12px; max-width: none; } }

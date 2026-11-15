@@ -166,15 +166,37 @@ async function loadProject(pid, keepView = false, tab = null) {
   resumeJobs();
 }
 
+/* Kotak "proses terhenti" yang tidak hilang sendiri: Jalankan ulang (aksi & pengaturan yang sama) atau Tutup. */
+function interruptedNotice(pid, j, n) {
+  const box = $('#notice') || document.body.appendChild(h('div', { id: 'notice', role: 'alert' }));
+  box.innerHTML = ''; box.hidden = false;
+  const close = async (dismiss = true) => {
+    box.hidden = true;
+    if (dismiss) await api('POST', `/api/jobs/${j.id}/dismiss`).catch(() => {});
+  };
+  const again = h('button', { class: 'primary small', onclick: async () => {
+    again.disabled = true; again.textContent = 'Memulai…';
+    try {
+      await api('POST', `/api/jobs/${j.id}/retry`);
+      close(false);
+      if (S.p && S.p.id === pid) {
+        if (j.kind === 'research.auto_clip' || j.kind === 'script.produce_clips') S.clipRun = null;
+        await loadProject(pid, true);  // proses baru langsung tampil di bar status / layar progres
+      }
+      toast(`${actionLabel(j.kind)} dijalankan ulang — langkah yang sudah selesai dilewati.`);
+    } catch (e) { toast(e.message, true); again.disabled = false; again.textContent = 'Jalankan ulang'; }
+  } }, 'Jalankan ulang');
+  box.append(h('div', { class: 'nt-msg' }, h('b', {}, `${actionLabel(j.kind)} terhenti`),
+    h('div', {}, 'Server di-restart saat proses berjalan.' + (n > 1 ? ` (${n} proses terhenti di proyek ini)` : ''))),
+    h('div', { class: 'nt-btns' }, j.retry ? again : h('span', { class: 'small' }, 'Jalankan lagi dari tahapnya.'),
+      h('button', { class: 'ghost small', onclick: () => close(true) }, 'Tutup')));
+}
+
 /* Proyek dibuka ulang (refresh halaman / pindah proyek) saat proses masih berjalan → lanjutkan bar status. */
 async function resumeJobs() {
-  // Proses yang terputus karena server restart: beri tahu sekali per proses.
-  (S.p._interrupted || []).forEach((j) => {
-    const key = `seen-int-${j.id}`;
-    if (sessionStorage.getItem(key)) return;
-    sessionStorage.setItem(key, '1');
-    toast(`${actionLabel(j.kind)} terhenti karena server di-restart. Jalankan ulang aksinya.`, true);
-  });
+  // Proses yang terputus karena server restart: kotak pemberitahuan + tombol "Jalankan ulang" (pengaturan sama).
+  const intr = S.p._interrupted || [];
+  if (intr.length) interruptedNotice(S.p.id, intr[intr.length - 1], intr.length);
   // Shorts massal dipantau di latar (trackBatch) — tidak memakai bar status global supaya layar tidak terkunci.
   (S.p._jobs || []).filter((j) => j.kind === 'research.shorts_batch').forEach((j) => trackBatch(S.p.id, j.id, S.p.title));
   const running = (S.p._jobs || []).filter((j) => !j.kind.startsWith('sync.') && j.kind !== 'research.shorts_batch');
