@@ -100,7 +100,33 @@ def bind(fn):
     return run
 
 
+_stopping = threading.Event()
+STOP_MSG = "Proses terhenti karena server di-restart/reload saat berjalan. Jalankan ulang aksinya."
+
+
+def stop_all(wait: float = 20.0) -> int:
+    """Server akan mati / auto-reload: hentikan semua job SEKARANG (FFmpeg dimatikan, langkah berikutnya
+    tidak dimulai) lalu tunggu sebentar sampai thread-nya keluar. Tanpa ini proses lama menunggu job selesai
+    (bisa belasan menit) dan selama itu halaman tidak bisa dibuka sama sekali."""
+    _stopping.set()
+    running = [jid for jid, j in _jobs.items() if j["status"] == "running"]
+    for jid in running:
+        _cancel[jid].set()
+        _jobs[jid]["progress"] = "Server di-restart — menghentikan proses…"
+    t = time.time()
+    while time.time() - t < wait and any(_jobs[j]["status"] == "running" for j in running):
+        time.sleep(0.2)
+    for jid in running:  # yang belum keluar tetap dicatat terputus supaya UI memberi tahu setelah restart
+        j = _jobs[jid]
+        if j["status"] in ("running", "cancelled"):
+            j.update(status="interrupted", error=STOP_MSG, finished_at=j.get("finished_at") or time.time())
+    _save()
+    return len(running)
+
+
 def submit(project_id: str, kind: str, fn, *args, **kwargs) -> str:
+    if _stopping.is_set():
+        raise RuntimeError("Server sedang di-restart — coba lagi beberapa detik lagi.")
     jid = uuid.uuid4().hex[:10]
     now = time.time()
     job = {"id": jid, "project_id": project_id, "kind": kind, "status": "running",
@@ -138,11 +164,12 @@ def submit(project_id: str, kind: str, fn, *args, **kwargs) -> str:
             job["result"] = fn(*args, progress=progress, **kwargs)
             job["status"] = "done"
         except JobCancelled:
-            job["status"] = "cancelled"
-            job["error"] = "Dibatalkan oleh pengguna."
+            job["status"], job["error"] = (("interrupted", STOP_MSG) if _stopping.is_set()
+                                           else ("cancelled", "Dibatalkan oleh pengguna."))
         except Exception as e:  # noqa: BLE001 — error ditampilkan ke UI
             if _cancel[jid].is_set():
-                job["status"], job["error"] = "cancelled", "Dibatalkan oleh pengguna."
+                job["status"], job["error"] = (("interrupted", STOP_MSG) if _stopping.is_set()
+                                               else ("cancelled", "Dibatalkan oleh pengguna."))
             else:
                 job["status"] = "error"
                 job["error"] = f"{type(e).__name__}: {e}"

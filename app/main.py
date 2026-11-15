@@ -30,6 +30,14 @@ app.add_middleware(CORSMiddleware, **_cors)
 LOOPBACK = {"127.0.0.1", "::1", "localhost", "testclient"}
 
 
+@app.on_event("shutdown")
+def _stop_jobs_on_shutdown():
+    """Auto-reload / Ctrl+C: hentikan job yang berjalan supaya server baru bisa langsung hidup."""
+    n = jobs.stop_all()
+    if n:
+        print(f"Menghentikan {n} proses yang sedang berjalan karena server di-restart.")
+
+
 @app.middleware("http")
 async def lan_pin_guard(request, call_next):
     """Mode tablet/LAN: perangkat lain di Wi-Fi wajib memasukkan PIN. Laptop sendiri (loopback, termasuk
