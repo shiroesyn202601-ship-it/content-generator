@@ -127,10 +127,11 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
             print(f"LLM: {primary} gagal, memakai cadangan '{name}'.")
         report(f"Jawaban AI ({PROVIDER_LABEL[name]}) diterima, membaca hasilnya…")
         return data
-    hint = ("" if len(order) > 1 else
-            "\n\nSolusi: isi API key cadangan di .env — GROQ_API_KEY_2 / GEMINI_API_KEY_2 (akun kedua), atau "
-            "CEREBRAS_API_KEY / OPENROUTER_API_KEY / MISTRAL_API_KEY (semua gratis). Aplikasi otomatis pindah saat "
-            "yang lain habis.")
+    single = [keys.ENV[p] + "_2" for p in ("groq", "gemini") if len(keys.pool(p)) == 1]
+    unused = [keys.ENV[p] for p in ("cerebras", "openrouter", "mistral") if not keys.pool(p)]
+    hint = ("" if len(order) > 1 or not (single or unused) else
+            "\n\nSolusi: tambah API key cadangan di .env — " + " / ".join(single + unused)
+            + " (semua gratis). Aplikasi otomatis pindah saat yang lain habis.")
     raise LLMError("\n\n".join(errors) + hint)
 
 
