@@ -64,6 +64,18 @@ def local_available(probe: bool = True) -> tuple[bool, str]:
 
 def transcribe(path: Path, language: str | None, progress=lambda m: None, total: float = 0, hint: str = "") -> dict:
     """{"language", "segments": [{start, end, text, words: [{text, start, end}]}]}"""
+    import time as _t
+
+    from . import usage
+    t0 = _t.time()
+    res = _transcribe(path, language, progress, total, hint)
+    eng = (res or {}).get("engine") or ""
+    usage.ai("Transkrip", {"groq": "Groq Whisper (cloud)", "local": "faster-whisper (lokal)"}.get(eng, eng or "Whisper"),
+             (res or {}).get("model") or "", _t.time() - t0, "transkrip suara")
+    return res
+
+
+def _transcribe(path: Path, language: str | None, progress, total: float, hint: str) -> dict:
     pref = (config.STT_PROVIDER or "auto").lower()
     ok, why = local_available() if pref != "groq" else (False, "")
     if pref == "local" or (pref == "auto" and ok):

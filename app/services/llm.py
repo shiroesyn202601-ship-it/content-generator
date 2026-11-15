@@ -16,7 +16,7 @@ import httpx
 
 from .. import config
 from ..jobs import report
-from . import keys
+from . import keys, usage
 
 TIMEOUT = httpx.Timeout(180.0, connect=15.0)
 PROVIDER_LABEL = {"gemini": "Gemini", "groq": "Groq", "cerebras": "Cerebras", "openrouter": "OpenRouter",
@@ -36,6 +36,11 @@ def last_used() -> dict:
 
 def _mark(provider: str, model: str) -> None:
     _last.info = {"provider": provider, "model": model}
+    # laporan produksi (services/usage.py): AI apa yang menjawab + lama tunggunya (termasuk antre kuota)
+    t0 = getattr(_last, "t0", None)
+    usage.ai(getattr(_last, "kind", None) or "LLM", PROVIDER_LABEL.get(provider, provider), model,
+             time.time() - t0 if t0 else None)
+    _last.t0 = None  # jangan terbawa ke panggilan berikutnya yang tidak lewat chat_json/vision_json
 
 
 class LLMError(RuntimeError):
@@ -101,6 +106,7 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
     for i, name in enumerate(order):
         if errors:
             report(f"{PROVIDER_LABEL[order[i - 1]]} gagal → beralih ke cadangan {PROVIDER_LABEL[name]}…")
+        _last.t0, _last.kind = time.time(), "LLM"
         try:
             if name == "groq":
                 raw = _groq(system, user, temperature, schema, prefer=groq_model, effort=effort, max_wait=max_wait,
@@ -417,6 +423,14 @@ def vision_json(prompt: str, image_jpeg: bytes, schema: dict | None = None) -> d
     import base64
     b64 = base64.b64encode(image_jpeg).decode()
     errors = []
+    _last.t0, _last.kind = time.time(), "Visi (gambar)"
+    try:
+        return _vision(prompt, b64, schema, errors)
+    finally:
+        _last.kind = None
+
+
+def _vision(prompt: str, b64: str, schema: dict | None, errors: list) -> dict:
     if keys.has("groq"):
         messages = [{"role": "user", "content": [{"type": "text", "text": prompt},
                                                  {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]

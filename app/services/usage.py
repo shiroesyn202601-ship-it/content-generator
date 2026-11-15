@@ -171,6 +171,10 @@ def step(name: str, pid: str | None = None):
     if stack is None:
         stack = _tls.pid = []
     stack.append(pid)
+    names = getattr(_tls, "names", None)
+    if names is None:
+        names = _tls.names = []
+    names.append(name)
     try:
         yield
         s["ok"] = True
@@ -180,6 +184,7 @@ def step(name: str, pid: str | None = None):
     finally:
         s["t1"] = _now()
         stack.pop()
+        names.pop()
 
 
 def stepped(name: str):
@@ -200,6 +205,10 @@ def ai(kind: str, service: str, model: str = "", seconds: float | None = None, p
     rep = current()
     if rep is None:
         return
+    if not purpose:  # "untuk apa": langkah yang sedang berjalan di thread ini, atau fase job saat ini
+        names = getattr(_tls, "names", None)
+        open_phase = next((p["name"] for p in reversed(rep.phases) if p["t1"] is None), "")
+        purpose = names[-1] if names else open_phase
     with rep._lock:
         rep.calls.append({"kind": kind, "service": service, "model": model or "",
                           "seconds": round(seconds, 2) if seconds is not None else None,
