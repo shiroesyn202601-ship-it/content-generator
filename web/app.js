@@ -396,14 +396,56 @@ function openProject(id, tab = null) {
   loadProject(id, false, tab);
 }
 
-async function deleteProject() {
-  if (!confirm(`Hapus ${S.p.parent ? 'video' : 'proyek'} "${S.p.title}" beserta semua file lokalnya? (Backup di Google Drive tidak ikut terhapus)`)) return;
-  const kids = kidsOf(S.p.id).length;
-  const withKids = kids > 0 && confirm(`Proyek ini punya ${kids} video hasil.\nOK = hapus juga semua video hasil.\nBatal = video hasil tetap disimpan (jadi proyek mandiri).`);
-  await api('DELETE', `/api/projects/${S.p.id}${withKids ? '?with_children=true' : ''}`);
-  lsSet(`lastProject_${S.p.mode}`, null); lsSet('lastProject_publish', null); S.p = null; lsSet('lastProject', null);
-  renderWelcome(S.tab);
-  refreshList();
+/* Dialog hapus: pengganti confirm() bawaan browser. Pilihan: video hasil Clipper ikut dihapus/dipertahankan,
+   dan backup Google Drive ikut dipindah ke Sampah atau dibiarkan. */
+function deleteProject() {
+  const p = S.p, kids = kidsOf(p.id), isVid = !!p.parent;
+  const noun = isVid ? 'video' : 'proyek';
+  const opt = { kids: 'delete', drive: false };
+  const dlg = $('#modal'), body = $('#modal-body'); body.innerHTML = '';
+  dlg.classList.add('confirm');
+  const choice = (name, val, title, desc) => h('label', { class: 'dl-choice' },
+    h('input', { type: 'radio', name, checked: opt.kids === val, onchange: () => { opt.kids = val; } }),
+    h('span', {}, h('b', {}, title), h('small', { class: 'muted' }, desc)));
+  const hasFolder = !!(p.drive || {}).folder_id;
+  const ytCount = [p, ...kids].filter((q) => (q.publish || {}).video_id).length;
+  const go = h('button', { class: 'danger-solid', onclick: async () => {
+    go.disabled = true; go.textContent = 'Menghapus…';
+    const q = new URLSearchParams();
+    if (kids.length && opt.kids === 'delete') q.set('with_children', 'true');
+    if (opt.drive) q.set('drive', 'true');
+    try {
+      const r = await api('DELETE', `/api/projects/${p.id}${q.toString() ? `?${q}` : ''}`);
+      dlg.close();
+      if (r.drive_error) toast(`${noun[0].toUpperCase() + noun.slice(1)} terhapus, tapi backup Drive gagal dihapus: ${r.drive_error}`, true);
+      else toast(`"${p.title}" terhapus${r.drive_trashed ? ` · ${r.drive_trashed} folder Drive dipindah ke Sampah` : ''}`);
+      lsSet(`lastProject_${p.mode}`, null); lsSet('lastProject_publish', null); lsSet('lastProject', null); S.p = null;
+      if (p.parent) { await refreshList(); loadProject(p.parent, false, 'clipper').catch(() => renderWelcome(S.tab)); }
+      else { renderWelcome(S.tab); refreshList(); }
+    } catch (e) { toast(e.message, true); go.disabled = false; go.textContent = `Hapus ${noun}`; }
+  } }, `Hapus ${noun}`);
+  body.append(
+    h('div', { class: 'dl-head' }, h('div', { class: 'dl-kicker' }, `Hapus ${noun}`), h('h2', {}, p.title || p.id),
+      h('div', { class: 'muted small' }, `${p.mode === 'clipper' ? 'Clipper' : 'Dari Nol'} · ${p.id}`)),
+    h('p', {}, 'Semua file lokal (naskah, aset, audio, video render) akan dihapus dari laptop dan ',
+      h('b', {}, 'tidak bisa dikembalikan'), '.'),
+    kids.length ? h('fieldset', { class: 'dl-group' }, h('legend', {}, `${kids.length} video hasil di proyek ini`),
+      choice('kids', 'delete', 'Hapus juga semua video hasil', 'Proyek sumber dan seluruh klipnya hilang.'),
+      choice('kids', 'keep', 'Pertahankan video hasil', 'Klip dipindah jadi proyek mandiri (video sumber ikut disalin untuknya).')) :'',
+    h('fieldset', { class: 'dl-group' }, h('legend', {}, 'Backup Google Drive'),
+      S.meta.google
+        ? h('label', { class: 'dl-choice' },
+          h('input', { type: 'checkbox', onchange: (e) => { opt.drive = e.target.checked; } }),
+          h('span', {}, h('b', {}, 'Hapus juga folder backup di Drive'),
+            h('small', { class: 'muted' }, (hasFolder ? 'Folder dipindah ke Sampah Drive — masih bisa dipulihkan 30 hari. '
+              : 'Belum ada folder tercatat untuk proyek ini; akan dicari berdasarkan ID. ')
+              + (kids.length ? 'Folder video hasil ikut bila video hasil dihapus.' : ''))))
+        : h('div', { class: 'muted small' }, 'Google belum terhubung — tidak ada yang dihapus di Drive.')),
+    ytCount ? h('div', { class: 'hint warn' }, `${ytCount} video sudah ada di YouTube. Menghapus di sini tidak menghapus video di YouTube.`) :'',
+    h('div', { class: 'dl-actions' }, h('button', { class: 'ghost', onclick: () => dlg.close() }, 'Batal'), go));
+  dlg.addEventListener('close', () => dlg.classList.remove('confirm'), { once: true });
+  if (!dlg.open) dlg.showModal();
+  setTimeout(() => $('.dl-actions .ghost', body).focus(), 0);
 }
 
 function copyText(text, msg = 'Disalin.') {

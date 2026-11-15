@@ -48,6 +48,22 @@ def project_folder(pid: str, title: str) -> str:
     return existing[0]["id"] if existing else ensure_folder(f"{pid} - {title[:60]}", projects)
 
 
+def find_project_folder(pid: str) -> str | None:
+    """Cari folder proyek tanpa membuatnya (untuk hapus)."""
+    projects = find("Projects", root_folder(), FOLDER)
+    if not projects:
+        return None
+    res = service("drive", "v3").files().list(
+        q=f"name contains '{_q(pid)}' and '{projects}' in parents and mimeType = '{FOLDER}' and trashed = false",
+        fields="files(id)", pageSize=1).execute().get("files", [])
+    return res[0]["id"] if res else None
+
+
+def trash(file_id: str) -> None:
+    """Pindahkan ke Sampah Drive (masih bisa dipulihkan 30 hari), bukan hapus permanen."""
+    service("drive", "v3").files().update(fileId=file_id, body={"trashed": True}).execute()
+
+
 def upload(local: Path, parent: str, name: str | None = None) -> str:
     """Upload (atau timpa bila nama sama) — resumable untuk file video besar."""
     from googleapiclient.http import MediaFileUpload

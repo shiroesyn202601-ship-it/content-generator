@@ -156,17 +156,38 @@ def get_project(pid: str):
 
 
 @app.delete("/api/projects/{pid}")
-def delete_project(pid: str, with_children: bool = False):
-    """with_children: Clipper — ikut hapus video hasil (proyek anak). Tanpa itu anak jadi proyek mandiri."""
-    _load(pid)
+def delete_project(pid: str, with_children: bool = False, drive: bool = False):
+    """with_children: Clipper — ikut hapus video hasil (proyek anak). Tanpa itu anak jadi proyek mandiri.
+    drive: folder backup Google Drive ikut dipindah ke Sampah (bisa dipulihkan 30 hari). Gagal Drive tidak
+    membatalkan hapus lokal — dilaporkan di drive_error."""
+    p = _load(pid)
     kids = [q["id"] for q in store.list_projects() if q.get("parent") == pid]
+    drive_trashed, drive_error = 0, None
+    if drive and config.google_enabled():
+        from .services import gdrive
+        targets = [(pid, (p.get("drive") or {}).get("folder_id"))]
+        if with_children:
+            for k in kids:
+                try:
+                    targets.append((k, (store.load(k).get("drive") or {}).get("folder_id")))
+                except Exception:
+                    targets.append((k, None))
+        for tid, fid in targets:
+            try:
+                fid = fid or gdrive.find_project_folder(tid)
+                if fid:
+                    gdrive.trash(fid)
+                    drive_trashed += 1
+            except Exception as e:  # noqa: BLE001
+                drive_error = str(e)[:300]
     for k in kids:  # video hasil ada di dalam folder sumber (clips/<id>) — pindahkan dulu bila dipertahankan
         if with_children:
             shutil.rmtree(store.project_dir(k), ignore_errors=True)
         else:
             store.release_child(k, f"Proyek sumber {pid} dihapus")
     shutil.rmtree(store.project_dir(pid), ignore_errors=True)
-    return {"ok": True, "children": len(kids), "deleted_children": with_children}
+    return {"ok": True, "children": len(kids), "deleted_children": with_children,
+            "drive_trashed": drive_trashed, "drive_error": drive_error}
 
 
 @app.post("/api/projects/{pid}/fork")
