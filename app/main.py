@@ -336,7 +336,11 @@ def retry_job(jid: str):
     j = jobs.take_interrupted(jid)
     if not j:
         raise HTTPException(409, "Proses ini sudah dijalankan ulang atau tidak ditemukan.")
-    if j["params"] is None and j["kind"] in jobs.NO_PARAM_RETRY:
+    if j["kind"] == "research.auto_clip":
+        # Lanjutkan RENCANA yang sama (klip terpilih tersimpan di p.autoclip) — jangan dianggap "Buat Klip" baru.
+        # url hanya dibawa bila video belum sempat terunduh.
+        j["params"] = {"_retry": True, **({"url": j["params"]["url"]} if (j["params"] or {}).get("url") else {})}
+    elif j["params"] is None and j["kind"] in jobs.NO_PARAM_RETRY:
         j["params"] = {}
     if j["kind"] not in ACTIONS or j["params"] is None:
         raise HTTPException(400, "Proses ini tidak bisa dijalankan ulang otomatis — buka tahapnya lalu jalankan lagi.")
