@@ -402,7 +402,16 @@ def save(p: dict) -> dict:
     with _lock:
         tmp = f.with_suffix(".tmp")
         tmp.write_text(json.dumps(p, ensure_ascii=False, indent=2), encoding="utf-8")
-        tmp.replace(f)
+        # Windows: project.json bisa terkunci sesaat (antivirus/indexer/pembaca lain) → WinError 5. Coba lagi
+        # sebentar supaya job panjang (Shorts massal, render) tidak gagal karena hal sepele.
+        for attempt in range(8):
+            try:
+                tmp.replace(f)
+                break
+            except PermissionError:
+                if attempt == 7:
+                    raise
+                time.sleep(0.15 * (attempt + 1))
     return p
 
 
@@ -429,6 +438,7 @@ def list_projects() -> list[dict]:
             th = p.get("thumbnail") or {}
             thumbs = th.get("thumbs") or []
             item["parent"] = p.get("parent")
+            item["batch"] = bool(p.get("batch"))  # wadah Shorts massal (Dari Nol)
             item["output"] = rnd.get("output_path")
             item["duration"] = rnd.get("duration")
             item["thumb"] = thumbs[min(th.get("selected") or 0, len(thumbs) - 1)] if thumbs else None

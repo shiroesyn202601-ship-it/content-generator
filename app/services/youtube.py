@@ -79,6 +79,10 @@ def gen_metadata(pid: str, params: dict, progress) -> dict:
         pub["pinned_comment"] = res.get("pinned_comment", "")
         if p["format"] == "short" and "#shorts" not in pub["description"].lower():
             pub["description"] += "\n\n#Shorts"
+        from .longform import chapters_text
+        ch = chapters_text(p)  # chapter YouTube otomatis (video panjang berbab): "00:00 Pembuka" …
+        if ch and "00:00" not in pub["description"]:
+            pub["description"] += "\n\n" + ch
         from .assets import credits
         cr = credits(p)  # atribusi wajib untuk gambar CC BY / CC BY-SA dari Wikimedia Commons
         if cr and "Kredit visual" not in pub["description"]:

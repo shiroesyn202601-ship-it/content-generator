@@ -175,8 +175,9 @@ def credits(p: dict) -> str:
     """Blok 'Kredit visual' untuk deskripsi YouTube (wajib bagi CC BY / CC BY-SA)."""
     lines = []
     for slot in (p.get("assets", {}).get("scenes") or {}).values():
-        sel = slot.get("selected") or {}
-        if sel.get("requires_attribution"):
+        for sel in [slot.get("selected") or {}, *(slot.get("extras") or [])]:
+            if not sel.get("requires_attribution"):
+                continue
             line = f"• \"{sel.get('title') or 'Gambar'}\" oleh {sel.get('author') or 'tidak diketahui'}, {sel.get('license')}"
             if sel.get("page_url"):
                 line += f" — {sel['page_url']}"
@@ -226,7 +227,9 @@ def search_scene(pid: str, params: dict, progress) -> dict:
 
 
 def _download(url: str, dest: Path) -> None:
-    with HTTP.stream("GET", url) as r:
+    from .factsource import UA  # Wikimedia menolak (403) unduhan tanpa User-Agent deskriptif
+    headers = UA if "wikimedia.org" in url or "wikipedia.org" in url else None
+    with HTTP.stream("GET", url, headers=headers) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:
             for chunk in r.iter_bytes(1 << 16):
@@ -413,6 +416,7 @@ def auto_all(pid: str, params: dict, progress) -> dict:
             slot = p["assets"]["scenes"].setdefault(s["id"], {})
             slot["query"] = ", ".join(used_q[s["id"]])
             slot["candidates"] = found
+            slot.pop("extras", None)  # variasi lama milik pilihan lama
         store.update(pid, save)
         if not found:
             store.update(pid, lambda p, s=s: store.log(p, f"Aset {s['id']}: tidak ada footage ditemukan"))
@@ -426,12 +430,52 @@ def auto_all(pid: str, params: dict, progress) -> dict:
         pick = {"fit": pk.get("fit") or "lumayan", "reason": pk.get("reason") or ""}
         weak += pick["fit"] == "lemah"
         progress(f"Mengunduh footage scene {i + 1}/{len(scenes)} ({pick['fit']})…")
-        try:
-            select_candidate(pid, {"scene_id": s["id"], "index": idx, "pick": pick}, lambda m: None)
-            done += 1
-        except httpx.HTTPError as e:
-            store.update(pid, lambda p, e=e, s=s: store.log(p, f"Unduh aset {s['id']} gagal: {e}"))
+        words = {w.lower() for q in used_q[s["id"]] for w in q.split()}
+        # Unduhan gagal (403/timeout/link kedaluwarsa) → coba kandidat relevan berikutnya, maks 3 percobaan.
+        order = [idx] + sorted((k for k in range(len(found)) if k != idx), key=lambda k: -_tag_score(found[k], words))
+        ok = False
+        for attempt, k in enumerate(order[:3]):
+            try:
+                pk2 = pick if k == idx else {"fit": "lumayan", "reason": "Pilihan pertama gagal diunduh — memakai kandidat berikutnya (cek)."}
+                select_candidate(pid, {"scene_id": s["id"], "index": k, "pick": pk2}, lambda m: None)
+                idx, ok = k, True
+                break
+            except httpx.HTTPError as e:
+                store.update(pid, lambda p, e=e, s=s: store.log(p, f"Unduh aset {s['id']} gagal: {str(e).splitlines()[0]}"))
+                if attempt < 2 and len(order) > attempt + 1:
+                    progress(f"Scene {i + 1}: unduhan gagal — mencoba kandidat lain…")
+        if not ok:
+            continue
+        done += 1
+        if p["format"] == "long" and params.get("extras", True):
+            add_extras(pid, s, found, idx, words, progress)
     return {"filled": done, "weak": weak}
+
+
+def add_extras(pid: str, scene: dict, found: list[dict], idx: int, words: set[str], progress) -> int:
+    """Video panjang: scene 10+ detik diberi 1-2 footage variasi (kandidat relevan berikutnya) supaya potongan
+    dinamis tidak memutar klip yang sama terus. Gambar AI dilewati (lambat & kurang akurat)."""
+    n_words = len(scene["text"].replace("*", "").split())
+    want = 0 if n_words < 22 else 1 if n_words < 45 else 2
+    if not want:
+        return 0
+    pool = [c for k, c in enumerate(found) if k != idx and c.get("provider") != "ai" and c.get("url")]
+    pool.sort(key=lambda c: (c.get("type") != "video", -_tag_score(c, words)))
+    d = store.project_dir(pid)
+    extras = []
+    for c in pool[:want]:
+        ext = ".mp4" if c["type"] == "video" else ".jpg"
+        rel = f"assets/{scene['id']}_x_{c['provider']}_{c['id']}{ext}"
+        try:
+            if not (d / rel).exists():
+                _download(c["url"], d / rel)
+            extras.append({**c, "path": rel})
+        except httpx.HTTPError:
+            continue
+    if extras:
+        progress(f"Scene {scene['id']}: +{len(extras)} footage variasi")
+        store.update(pid, lambda p: p["assets"]["scenes"].setdefault(scene["id"], {}).__setitem__("extras", extras))
+    return len(extras)
 
 
 UPLOAD_EXT = {".mp4", ".mov", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"}

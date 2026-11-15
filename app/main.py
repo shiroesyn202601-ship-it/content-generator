@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, brand, enhance, usage, clipper, fonts, prompts, render, research, scriptgen, story,
+from .services import (assets, audio_lib, batch, brand, longform, shorts, enhance, usage, clipper, fonts, prompts, render, research, scriptgen, story,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
@@ -67,6 +67,9 @@ ACTIONS = {
     "research.ideas":      (research.generate_ideas, "research", True),
     "research.download":   (research.download_source, "research", True),
     "research.batch":      (batch.produce, "research", True),
+    "research.shorts_batch": (shorts.produce, "research", True),   # Shorts massal: ide terpilih → video jadi
+    "research.autopilot":  (shorts.autopilot, "research", True),    # Dari Nol: lanjutkan otomatis s.d. thumbnail
+    "script.longform":     (longform.write, "script", True),        # video panjang: naskah per bab
     "script.generate":     (scriptgen.generate, "script", True),
     "script.factcheck":    (scriptgen.factcheck, "script", True),
     "script.narrate":      (scriptgen.narrate, "script", True),
@@ -140,8 +143,12 @@ def projects():
 @app.post("/api/projects")
 def create(body: dict = Body(...)):
     try:
-        return store.new_project(body.get("mode", "scratch"), body.get("format", "short"),
-                                 body.get("title", ""), body.get("keyword", ""), body.get("language", ""))
+        p = store.new_project(body.get("mode", "scratch"), body.get("format", "short"),
+                              body.get("title", ""), body.get("keyword", ""), body.get("language", ""))
+        if body.get("batch") and p["mode"] == "scratch" and p["format"] == "short":
+            # Shorts massal: proyek wadah berisi ide & pengaturan; tiap video = proyek anak.
+            p = store.update(p["id"], lambda q: q.update({"batch": {"opts": shorts.options(body.get("opts"))}}))
+        return p
     except ValueError as e:
         raise HTTPException(400, str(e))
 

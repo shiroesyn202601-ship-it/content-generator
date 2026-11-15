@@ -266,6 +266,29 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     `(pointer: coarse)` → target sentuh ≥44px & input 16px; < 640px dialog jadi lembar bawah, tabel bisa digeser.
     Branding Clipper (background/icon/logo) kini **dialog** (`brandButton`/`openBrandDialog`), bukan lipatan.
 
+19. **15 Nov 2026 — Dari Nol: pendekatan beda untuk Short vs Long** (permintaan user, acuan: script-to-video CapCut).
+    Halaman awal Dari Nol (`scratchHome`) = dua pilihan:
+    - **Shorts massal** (`shorts.py`): proyek WADAH `p.batch = {opts, status, last}` (dibuat `POST /api/projects` dengan
+      `batch: true`) + proyek ANAK per video (`parent`, folder `data/projects/<wadah>/clips/<id>/`, sama seperti Clipper).
+      Topik → `research.ideas` → centang ide → aksi `research.shorts_batch` (`shorts.produce`): tiap ide → anak →
+      `shorts.run_pipeline` (narasi → scene → visual stok `assets.auto_all` / gambar AI `story.*` → VO → musik → subtitle
+      template → render dinamis → `thumbs.auto` → `youtube.gen_metadata`) → semua tahap disetujui → tab Upload.
+      Pipeline melewati tahap yang sudah disetujui → "Lanjutkan produksi" (`children`) = coba lagi / lanjut setelah
+      opsi "Cek naskah dulu" (`opts.review`). `ideas[i].video` = id anak. UI `renderShortsBatch` (ide · gaya video · galeri
+      `batchCard`); proses dipantau di latar (`trackBatch`, baki `#bgtray`, TIDAK memakai `S.busy`). `isBatch(p)`.
+    - **Video panjang** (`longform.py`): tetap 1 proyek wizard. Aksi `script.longform`: outline (cold open, 3-7 bab,
+      penutup; schema strict) → tiap bagian ditulis terpisah (anggaran kata per bab, 2 kalimat akhir bagian sebelumnya,
+      jembatan ke bab berikut) → narasi dengan baris **`## Judul`** → `scriptgen.split` kini paham bab (`longform.parse_parts`,
+      per bab `_split_part`) → `scene.chapter` + `script.chapters [{title, n, scene_id}]` (n=0 untuk Pembuka/Penutup).
+      Edit narasi + "Pecah jadi scene" mempertahankan bab. Kartu judul bab di video (`longform.ass_chapters`, digabung di
+      `subtitles.export`, matikan via `render.chapter_cards`), chapter YouTube "00:00 Judul" otomatis di deskripsi
+      (`longform.chapters_text`, aturan: mulai 00:00, ≥3 bab, ≥10 dtk). `assets.add_extras`: scene panjang di video long
+      diberi 1-2 footage variasi (`slot.extras`, ikut kredit) yang dipakai bergantian per shot di render; potongan dinamis
+      kini default juga untuk long (maks 6 dtk/shot).
+    - Tombol **"Lanjutkan otomatis"** di gerbang wizard Dari Nol (`research.autopilot` = `shorts.autopilot`): kerjakan &
+      setujui tahap sisa sampai thumbnail (long tanpa naskah → ditulis per bab dulu).
+    - Dialog konfirmasi sendiri `askDialog(title, text, okLabel, danger)` (pengganti `confirm()`).
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

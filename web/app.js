@@ -81,6 +81,7 @@ const ACTION_LABEL = {
   'thumbnail.render': 'Menyimpan thumbnail', 'thumbnail.auto': 'Membuat 3 thumbnail otomatis',
   'thumbnail.remove': '✕ Menghapus thumbnail', 'script.produce_clips': 'Produksi banyak video',
   'research.auto_clip': 'Membuat klip',
+  'research.shorts_batch': 'Shorts massal', 'research.autopilot': 'Lanjutkan otomatis', 'script.longform': 'Menulis naskah per bab',
   'assets.story_setup': 'Menyusun karakter & prompt', 'assets.story_chars': 'Membuat gambar karakter',
   'assets.story_scenes': 'Membuat gambar scene', 'script.transcribe': 'Transkrip audio (Whisper)',
   'script.find_clips': 'Mencari momen viral', 'assets.search': 'Mencari stock footage',
@@ -174,7 +175,9 @@ async function resumeJobs() {
     sessionStorage.setItem(key, '1');
     toast(`${actionLabel(j.kind)} terhenti karena server di-restart. Jalankan ulang aksinya.`, true);
   });
-  const running = (S.p._jobs || []).filter((j) => !j.kind.startsWith('sync.'));
+  // Shorts massal dipantau di latar (trackBatch) — tidak memakai bar status global supaya layar tidak terkunci.
+  (S.p._jobs || []).filter((j) => j.kind === 'research.shorts_batch').forEach((j) => trackBatch(S.p.id, j.id, S.p.title));
+  const running = (S.p._jobs || []).filter((j) => !j.kind.startsWith('sync.') && j.kind !== 'research.shorts_batch');
   if (!running.length || S.busy) return;
   const j = running[0], pid = S.p.id;
   S.busy = true;
@@ -329,8 +332,12 @@ function render() {
   if (S.tab === 'publish') return renderPublishView();
   S.onJob = null;
   if (S.tab === 'clipper' && S.p && !S.p.parent && !(S.adv || {})[S.p.id]) return renderClipSource();
+  if (S.tab === 'scratch' && isBatch(S.p) && !(S.adv || {})[S.p.id]) return renderShortsBatch();
   const p = S.p, main = $('#main');
   main.innerHTML = '';
+  if (isBatch(p)) main.append(h('div', { class: 'row', style: 'margin-bottom:6px' },
+    btn('← Tampilan sederhana', () => { S.adv[p.id] = false; render(); }, 'small ghost'),
+    h('span', { class: 'muted small' }, 'Mode lanjutan: data ide mentah. Tiap video dikerjakan di proyeknya sendiri.')));
   if (p.mode === 'clipper') main.append(h('div', { class: 'row', style: 'margin-bottom:6px' },
     p.parent ? btn('← Kembali ke galeri klip', () => loadProject(p.parent, false, 'clipper'), 'small ghost')
       : btn('← Tampilan sederhana', () => { S.adv[p.id] = false; render(); }, 'small ghost'),
@@ -347,14 +354,14 @@ function render() {
     h('div', {},
       h('h1', {}, p.title),
       h('div', { class: 'row' },
-        h('span', { class: 'badge' }, p.mode === 'scratch' ? 'Jalur 1 · Dari nol' : parent ? 'Video hasil Clipper' : 'Jalur 2 · Clipper · video sumber'),
+        h('span', { class: 'badge' }, p.mode === 'scratch' ? (isBatch(p) ? 'Shorts massal' : parent ? 'Video hasil Shorts massal' : 'Jalur 1 · Dari nol') : parent ? 'Video hasil Clipper' : 'Jalur 2 · Clipper · video sumber'),
         h('span', { class: 'badge' }, p.format === 'short' ? 'Short 9:16' : 'Long 16:9'),
         container ? h('span', { class: 'badge' }, `${kidsOf(p.id).length} video hasil`) : null,
         h('span', { class: 'badge' }, p.id))),
     h('button', { class: 'ghost danger small', onclick: deleteProject }, parent ? 'Hapus video ini' : 'Hapus proyek')));
 
   // Proyek sumber Clipper hanya punya tahap Video Sumber & Momen; tahap berikutnya dikerjakan per video hasil.
-  main.append(h('div', { class: 'stepper' }, wizardStages(p.mode).filter(([k]) => !container || k === 'research' || k === 'script').map(([k, i]) => h('div', {
+  main.append(h('div', { class: 'stepper' }, wizardStages(p.mode).filter(([k]) => !container || k === 'research' || (k === 'script' && !p.batch)).map(([k, i]) => h('div', {
     class: `step s-${p.stage_status[k]} ${i === S.view ? 'current' : ''} ${i > p.current_stage ? 'locked' : ''}`,
     onclick: () => setView(i),
   }, L[k], h('span', { class: 'st' }, statusLabel(p.stage_status[k]))))));
@@ -365,7 +372,9 @@ function render() {
     h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: S.raw, onchange: (e) => { S.raw = e.target.checked; render(); } }), 'Edit Manual (JSON mentah)'),
     h('button', { id: 'btn-save', onclick: () => saveDraft().catch((e) => toast(e.message, true)), disabled: locked || S.busy },
       S.dirty ? 'Simpan Edit Manual *' : 'Simpan Edit Manual'),
-    container && st === 'script' ? null : h('button', { class: 'success', onclick: approve, disabled: locked || S.busy }, '✓ Setujui & Lanjut')));
+    p.mode === 'scratch' && !container && p.current_stage < PUB - 1 && (p.research || {}).selected != null
+      ? h('button', { class: 'ghost', title: 'Kerjakan tahap sisanya otomatis sampai thumbnail', onclick: openAutopilot, disabled: locked || S.busy }, 'Lanjutkan otomatis') : null,
+    container && (st === 'script' || p.batch) ? null : h('button', { class: 'success', onclick: approve, disabled: locked || S.busy }, '✓ Setujui & Lanjut')));
 
   if (container && st === 'script') panel.append(h('div', { class: 'muted small stage-help' }, 'Tiap klip pilihan dijadikan video sendiri di dalam proyek ini — otomatis sekaligus atau satu per satu untuk diedit manual per tahap.'));
   else if (helpFor(p.mode, st)) panel.append(h('div', { class: 'muted small stage-help' }, helpFor(p.mode, st)));
@@ -398,10 +407,10 @@ function rawEditor() {
 }
 
 // ---- Clipper: 1 video sumber = 1 proyek (wadah); tiap video hasil = proyek anak (field parent).
-const isContainer = (p) => !!p && p.mode === 'clipper' && !p.parent && (p.current_stage || 0) <= 1;
+const isContainer = (p) => !!p && !p.parent && ((p.mode === 'clipper' && (p.current_stage || 0) <= 1) || !!p.batch);
 const kidsOf = (pid) => (S.all || []).filter((q) => q.parent === pid).sort((a, b) => a.id.localeCompare(b.id));
 const kidStatus = (q) => (readyForUpload(q) ? (q.publish.video_id ? 'sudah diunggah' : 'siap upload')
-  : `${labelsFor('clipper')[S.meta.stages[q.current_stage]] || ''}`);
+  : `${labelsFor(q.mode)[S.meta.stages[q.current_stage]] || ''}`);
 function openProject(id, tab = null) {
   if (S.bg[id]) { toast(`Sedang diproses: ${S.bg[id].label}. Tunggu sampai selesai.`); return; }
   if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
@@ -485,7 +494,8 @@ function deleteProject() {
       h('b', {}, 'tidak bisa dikembalikan'), '.'),
     kids.length ? h('fieldset', { class: 'dl-group' }, h('legend', {}, `${kids.length} video hasil di proyek ini`),
       choice('kids', 'delete', 'Hapus juga semua video hasil', 'Proyek sumber dan seluruh klipnya hilang.'),
-      choice('kids', 'keep', 'Pertahankan video hasil', 'Klip dipindah jadi proyek mandiri (video sumber ikut disalin untuknya).')) :'',
+      choice('kids', 'keep', 'Pertahankan video hasil', p.mode === 'clipper' ? 'Klip dipindah jadi proyek mandiri (video sumber ikut disalin untuknya).'
+        : 'Tiap video dipindah jadi proyek Dari Nol mandiri.')) :'',
     h('fieldset', { class: 'dl-group' }, h('legend', {}, 'Backup Google Drive'),
       S.meta.google
         ? h('label', { class: 'dl-choice' },
@@ -576,6 +586,18 @@ function rNarration(d) {
       h('input', { type: 'number', min: 15, step: 5, value: d.narr_duration, style: 'width:80px',
         oninput: (e) => { d.narr_duration = +e.target.value || d.narr_duration; markDirty(); } }), ' detik') : null,
     factual ? field('Pakai sumber Wikipedia + cek fakta', d, 'use_sources', { type: 'checkbox' }) : null));
+  if (!short) {
+    const chs = d.chapters || [];
+    card.append(h('div', { class: 'longform-box' },
+      h('div', { class: 'grow' }, h('b', {}, 'Naskah per bab'), h('div', { class: 'muted small' },
+        'Disarankan untuk video panjang: AI merancang pembuka (cold open), beberapa bab, dan penutup, lalu menulis tiap bagian terpisah dengan sambungan antar-bab. ',
+        'Judul bab jadi kartu di video dan chapter YouTube otomatis. Baris "## Judul" di narasi = awal bab (boleh diubah/ditambah, lalu Pecah jadi scene).'),
+        chs.length ? h('div', { class: 'row', style: 'flex-wrap:wrap;margin-top:6px' }, chs.map((c) => h('span', { class: 'chip' }, c.n ? `Bab ${c.n} · ${c.title}` : c.title))) : null),
+      btn(d.narration ? 'Tulis ulang per bab' : 'Tulis naskah per bab', async () => {
+        if (d.narration && !(await askDialog('Tulis ulang naskah per bab?', 'Narasi, bab, dan scene yang ada sekarang diganti hasil baru. Edit manual pada naskah ini akan hilang.', 'Tulis ulang'))) return;
+        runAction('script.longform', { template: tpl === 'custom' ? 'fakta' : tpl, duration: d.narr_duration, use_sources: factual ? d.use_sources : false });
+      }, 'primary')));
+  }
   if (tpl === 'custom') {
     card.append(field('Prompt custom (ditulis apa adanya ke AI)', d, 'narr_custom', { type: 'textarea', rows: 10,
       placeholder: 'Tulis atau tempel prompt kustom di sini… (atau buka "Lihat prompt" lalu "Edit sebagai Custom")' }));
@@ -587,12 +609,13 @@ function rNarration(d) {
         use_sources: factual ? d.use_sources : false });
     }, 'primary'),
     btn('Lihat prompt', () => showNarrPrompt(d), 'ghost')));
-  const words = (d.narration || '').trim() ? d.narration.trim().split(/\s+/).length : 0;
+  const spoken = (t) => (t || '').replace(/^\s*##.*$/gm, '').trim();  // baris "## Judul bab" tidak dibacakan
+  const words = spoken(d.narration) ? spoken(d.narration).split(/\s+/).length : 0;
   const secs = voSeconds(words);
   const stats = h('span', { class: short && secs > 58 ? 'warn-text small' : 'muted small' },
     `${words} kata · ${(d.narration || '').length} karakter · ±${secs} dtk VO${short && secs > 58 ? ' — terlalu panjang untuk Shorts!' : ''}`);
   card.append(field('', d, 'narration', { type: 'textarea', rows: 10, placeholder: 'Narasi hasil AI muncul di sini — boleh diedit langsung.',
-    onchange: (v) => { const w = v.trim() ? v.trim().split(/\s+/).length : 0; const s = voSeconds(w);
+    onchange: (v) => { const w = spoken(v) ? spoken(v).split(/\s+/).length : 0; const s = voSeconds(w);
       stats.textContent = `${w} kata · ${v.length} karakter · ±${s} dtk VO${short && s > 58 ? ' — terlalu panjang untuk Shorts!' : ''}`; } }));
   card.append(h('div', { class: 'row' }, stats, h('div', { class: 'grow' }),
     btn('Salin narasi', () => copyText(d.narration, 'Narasi disalin.'), 'small ghost')));
@@ -600,7 +623,7 @@ function rNarration(d) {
     btn('Salin', () => copyText(d.hook_text, 'Hook disalin.'), 'small ghost')));
   // Narasi diedit setelah dipecah → scene tidak lagi cocok.
   const joined = (d.scenes || []).map((s) => s.text.replace(/\*/g, '')).join(' ').replace(/\s+/g, ' ').trim();
-  const differs = d.narration && joined && joined !== d.narration.replace(/\*/g, '').replace(/\s+/g, ' ').trim();
+  const differs = d.narration && joined && joined !== spoken(d.narration).replace(/\*/g, '').replace(/\s+/g, ' ').trim();
   card.append(h('div', { class: 'row' },
     d.narration ? btn('Pecah jadi scene (AI)', () => {
       if ((d.scenes || []).length && !confirm('Scene yang ada (termasuk edit manual per scene) akan diganti dari narasi. Lanjut?')) return;
@@ -774,7 +797,12 @@ function rScriptScratch() {
     box.append(h('details', { open: true }, h('summary', {}, 'Kerangka cerita'),
       h('div', { class: 'grid2' }, Object.keys(d.framework).map((k) => field(k.toUpperCase(), d.framework, k, { type: 'textarea', rows: 2 })))));
   }
+  const chaps = d.chapters || [];
   d.scenes.forEach((s, i) => {
+    if (typeof s.chapter === 'number' && chaps[s.chapter] && (i === 0 || d.scenes[i - 1].chapter !== s.chapter)) {
+      const c = chaps[s.chapter];
+      box.append(h('div', { class: 'chap-head' }, h('span', { class: 'mono small' }, c.n ? `BAB ${c.n}` : 'BAGIAN'), ' ', h('b', {}, c.title)));
+    }
     const move = (dir) => { const j = i + dir; if (j < 0 || j >= d.scenes.length) return; [d.scenes[i], d.scenes[j]] = [d.scenes[j], d.scenes[i]]; markDirty(); render(); };
     box.append(h('div', { class: 'card' },
       h('div', { class: 'row between' }, h('b', {}, `Scene ${i + 1} `, h('span', { class: 'muted small' }, s.id),
@@ -1054,6 +1082,7 @@ function rAssets() {
             `${{ cocok: 'Cocok', lumayan: 'Lumayan', lemah: 'Kurang cocok — mohon dicek/ganti' }[slot.pick.fit] || slot.pick.fit}`,
             slot.pick.reason ? ` · ${slot.pick.reason}` : '') : null,
           sel && sel.tags ? h('div', { class: 'small muted' }, `Isi video: ${sel.tags}`) : null,
+          (slot.extras || []).length ? h('div', { class: 'small muted' }, `+${slot.extras.length} footage variasi — dipakai bergantian per potongan supaya scene panjang tidak monoton`) : null,
           sel ? h('div', { style: 'max-width:280px' }, field('Bingkai di layar', slot, 'fit', { type: 'select', options: [
             ['auto', 'Otomatis'], ['center', 'Isi penuh (crop tengah)'], ['blur', 'Utuh + latar blur']] })) : null,
           h('div', { class: 'row' },
@@ -1434,11 +1463,14 @@ function rRender() {
   box.append(h('div', { class: 'row' }, btn('Render video final (FFmpeg)', () => runAction('render.run'), 'primary'),
     h('span', { class: 'muted' }, S.p.format === 'short' ? '1080×1920 · 30fps' : '1920×1080 · 30fps')));
   if (S.p.mode === 'scratch') {
-    d.cut_style = d.cut_style || (S.p.format === 'short' ? 'dinamis' : 'statis');
+    d.cut_style = d.cut_style || 'dinamis';
+    const chs = (S.p.script || {}).chapters || [];
+    if (S.p.format === 'long' && chs.length && d.chapter_cards == null) d.chapter_cards = true;
     box.append(h('div', { style: 'max-width:420px' }, field('Gaya potongan visual', d, 'cut_style', { type: 'select', options: [
       ['dinamis', 'Dinamis — shot baru tiap kalimat, zoom bergantian (cocok Shorts)'], ['statis', 'Statis — 1 shot per scene']] }),
       field('Transisi antar-scene', d, 'transition', { type: 'select', options: [
-        ['', 'Otomatis (fade bila dinamis)'], ['fade', 'Fade'], ['geser', 'Geser'], ['zoom', 'Zoom in'], ['hitam', 'Fade hitam'], ['lingkaran', 'Lingkaran'], ['none', 'Tanpa transisi']] })));
+        ['', 'Otomatis (fade bila dinamis)'], ['fade', 'Fade'], ['geser', 'Geser'], ['zoom', 'Zoom in'], ['hitam', 'Fade hitam'], ['lingkaran', 'Lingkaran'], ['none', 'Tanpa transisi']] }),
+      S.p.format === 'long' && chs.length ? field(`Kartu judul bab di video (${chs.filter((c) => c.n).length} bab)`, d, 'chapter_cards', { type: 'checkbox' }) : null));
   }
   box.append(hint('Menggabungkan visual + voice over + musik (auto-ducking) + SFX + burn-in subtitle. Untuk font khusus, taruh file .ttf di data/fonts/. Ubah gaya potongan → klik "Simpan Edit Manual" lalu render.'));
   if (d.output_path) {
@@ -2267,6 +2299,313 @@ function clipCard(c) {
       } }, 'Hapus')));
 }
 
+// ================================================================ DARI NOL: SHORTS MASSAL & VIDEO PANJANG
+/* Shorts massal (ala script-to-video CapCut, tapi borongan): satu topik → banyak ide → centang → semua jadi
+   video 9:16 tanpa klik per scene. Proyek wadah (p.batch) berisi ide & pengaturan; tiap video = proyek anak
+   yang tetap bisa dibuka per tahap. Video panjang tetap satu proyek per video (wizard). */
+const isBatch = (p) => !!p && !!p.batch && !p.parent;
+const BATCH_DEF = { template: 'fakta', duration: 50, visual: 'stock', style: '3d', voice_preset: 'antusias',
+  sub_tpl: 'pop', music: true, transition: '', review: false };
+S.bopt = {};    // pengaturan Shorts massal per proyek wadah (belum dikirim)
+S.bsel = {};    // ide yang dicentang per proyek wadah
+S.bjobs = {};   // proses Shorts massal yang sedang dipantau di latar
+
+/* Dialog konfirmasi sendiri (aturan UX: tanpa confirm() bawaan untuk aksi penting). */
+function askDialog(title, text, okLabel = 'Lanjut', danger = false) {
+  return new Promise((resolve) => {
+    const dlg = $('#modal'), body = $('#modal-body'); body.innerHTML = '';
+    let answer = false;
+    dlg.classList.add('confirm');
+    body.append(h('div', { class: 'dl-head' }, h('h2', {}, title)),
+      typeof text === 'string' ? h('p', {}, text) : text,
+      h('div', { class: 'dl-actions' }, h('button', { class: 'ghost', onclick: () => dlg.close() }, 'Batal'),
+        h('button', { class: danger ? 'danger-solid' : 'primary', onclick: () => { answer = true; dlg.close(); } }, okLabel)));
+    dlg.addEventListener('close', () => { dlg.classList.remove('confirm'); resolve(answer); }, { once: true });
+    if (!dlg.open) dlg.showModal();
+  });
+}
+
+async function openAutopilot() {
+  const p = S.p, L = labelsFor(p.mode);
+  const rest = S.meta.stages.slice(p.current_stage, PUB).map((k) => L[k].replace(/^\d+\.\s*/, ''));
+  const ok = await askDialog('Lanjutkan otomatis?', h('div', {},
+    h('p', {}, 'Tahap yang belum disetujui dikerjakan & disetujui otomatis dengan pengaturan proyek ini:'),
+    h('p', { class: 'mono small' }, rest.join(' → ')),
+    h('p', { class: 'muted small' }, (p.format === 'long' && !(p.script.scenes || []).length ? 'Naskah ditulis per bab. ' : '')
+      + 'Data yang sudah Anda edit di tahap sekarang dipakai apa adanya. Hasilnya tetap bisa diubah per tahap lalu dirender ulang.')), 'Mulai');
+  if (!ok) return;
+  const r = await runAction('research.autopilot');
+  if (r) { toast('Selesai sampai thumbnail — cek hasilnya di tab Upload & Jadwal.'); refreshList(); }
+}
+
+function scratchHome(focus) {
+  applyTheme('scratch');
+  const main = $('#main'); main.innerHTML = '';
+  const sTopic = h('input', { class: 'ch-url', placeholder: 'Topik, mis. hewan unik, fakta luar angkasa, misteri sejarah…' });
+  const lTopic = h('input', { class: 'ch-url', placeholder: 'Topik video panjang, mis. runtuhnya Majapahit' });
+  const lDur = h('select', {}, [[300, '±5 menit'], [480, '±8 menit'], [720, '±12 menit'], [900, '±15 menit']].map(([v, l]) => h('option', { value: v }, l)));
+  lDur.value = '480';
+  const goShort = async (btnEl) => {
+    const t = sTopic.value.trim();
+    if (!t) { toast('Tulis topiknya dulu.', true); sTopic.focus(); return; }
+    btnEl.disabled = true;
+    try {
+      const p = await api('POST', '/api/projects', { mode: 'scratch', format: 'short', title: t, keyword: t, batch: true });
+      await loadProject(p.id, false, 'scratch');
+      S.draft.keyword = t;
+      runAction('research.ideas', { keyword: t, count: 20, duration: BATCH_DEF.duration, template: S.meta.idea_template, trends: true });
+    } catch (e) { toast(e.message, true); btnEl.disabled = false; }
+  };
+  const goLong = async (btnEl) => {
+    const t = lTopic.value.trim();
+    if (!t) { toast('Tulis topiknya dulu.', true); lTopic.focus(); return; }
+    btnEl.disabled = true;
+    try {
+      const p = await api('POST', '/api/projects', { mode: 'scratch', format: 'long', title: t, keyword: t });
+      await loadProject(p.id, false, 'scratch');
+      S.draft.keyword = t; S.draft.duration = +lDur.value; S.draft.idea_count = 10;
+      runAction('research.ideas', { keyword: t, count: 10, duration: +lDur.value, template: S.meta.idea_template, trends: true });
+    } catch (e) { toast(e.message, true); btnEl.disabled = false; }
+  };
+  sTopic.onkeydown = (e) => { if (e.key === 'Enter') goShort(e.target); };
+  lTopic.onkeydown = (e) => { if (e.key === 'Enter') goLong(e.target); };
+  const sBtn = h('button', { class: 'primary', onclick: (e) => goShort(e.currentTarget) }, 'Cari ide →');
+  const lBtn = h('button', { class: 'primary', onclick: (e) => goLong(e.currentTarget) }, 'Buat proyek →');
+  main.append(h('div', { class: 'sc-home' },
+    h('h1', {}, 'Konten dari Nol'),
+    h('p', { class: 'muted' }, 'Tanpa bahan apa pun: AI menulis naskah, mencari visual, membuat suara, subtitle, dan merender videonya.'),
+    h('div', { class: 'sc-choices' },
+      h('section', { class: `sc-choice ${focus === 'long' ? '' : 'on'}` },
+        h('div', { class: 'sc-kicker mono' }, 'SHORTS · 9:16 · BANYAK SEKALIGUS'),
+        h('h2', {}, 'Shorts massal'),
+        h('p', { class: 'muted small' }, 'Satu topik → puluhan ide & hook → centang yang disukai → semua jadi video sekaligus: narasi, visual stok / gambar AI, suara, musik, subtitle, render, thumbnail, judul. Tidak perlu klik per scene.'),
+        h('ol', { class: 'sc-steps small' }, h('li', {}, 'Tulis topik'), h('li', {}, 'Centang ide'), h('li', {}, 'Klik "Buat video"')),
+        h('div', { class: 'ch-input' }, sTopic, sBtn)),
+      h('section', { class: `sc-choice ${focus === 'long' ? 'on' : ''}` },
+        h('div', { class: 'sc-kicker mono' }, 'LONG · 16:9 · SATU VIDEO'),
+        h('h2', {}, 'Video panjang'),
+        h('p', { class: 'muted small' }, 'Satu video digarap per tahap dengan hasil lebih rapi: naskah per bab (pembuka, bab, penutup), kartu judul bab, chapter YouTube otomatis, footage bervariasi per potongan. Bisa dilanjutkan otomatis kapan saja.'),
+        h('div', { class: 'row' }, h('span', { class: 'small muted' }, 'Durasi'), lDur),
+        h('div', { class: 'ch-input' }, lTopic, lBtn)))));
+  (focus === 'long' ? lTopic : sTopic).focus();
+}
+
+// ---- proses Shorts massal di latar (tidak mengunci layar: S.busy tidak dipakai)
+function batchProgress(j) {
+  const msg = (j && (j.progress || ((j.steps || []).slice(-1)[0] || {}).msg)) || '';
+  const m = /Video (\d+)\/(\d+):\s*(.*)$/.exec(msg);
+  return m ? { n: +m[1], of: +m[2], text: m[3] } : { n: 0, of: 0, text: msg };
+}
+
+async function startBatch(p, params) {
+  try {
+    if (S.dirty && S.p && S.p.id === p.id) await saveDraft(true);
+    const res = await api('POST', `/api/projects/${p.id}/action/research.shorts_batch`, params);
+    trackBatch(p.id, res.job, p.title);
+    render();
+  } catch (e) { toast(e.message, true); }
+}
+
+async function trackBatch(pid, jid, title) {
+  if ((S.bjobs[pid] || {}).polling) return;
+  const st = S.bjobs[pid] = { polling: true, job: null, jid };
+  const task = { label: 'Shorts massal', title, start: Date.now() };
+  S.bg[`job:${pid}`] = task; bgTray();
+  let lastN = -1;
+  try {
+    for (;;) {
+      await sleep(1500);
+      let j;
+      try { j = await api('GET', `/api/jobs/${jid}`); } catch (e) { toast(`Shorts massal: ${e.message}`, true); break; }
+      st.job = j;
+      const pr = batchProgress(j);
+      task.title = pr.of ? `${title} · video ${pr.n}/${pr.of}` : title; bgTray();
+      if (pr.n !== lastN) { lastN = pr.n; await refreshList().catch(() => {}); if (S.tab === 'scratch' && S.p && S.p.id === pid && isBatch(S.p) && !S.adv[pid] && !S.dirty && !S.busy) render(); }
+      updBatchLive();
+      if (j.status === 'done') {
+        const r = j.result || {};
+        toast(`Shorts massal selesai: ${(r.created || []).length} video jadi`
+          + ((r.review || []).length ? `, ${r.review.length} menunggu cek naskah` : '') + ((r.failed || []).length ? `, ${r.failed.length} perlu dicek` : ''), !!(r.failed || []).length);
+        break;
+      }
+      if (j.status === 'cancelled') { toast('Shorts massal dibatalkan. Video yang sudah jadi tetap ada.'); break; }
+      if (j.status === 'error' || j.status === 'interrupted') { toast(`Shorts massal berhenti: ${j.error || j.status}`, true); break; }
+    }
+  } finally {
+    st.polling = false;
+    delete S.bg[`job:${pid}`]; bgTray();
+    await refreshList().catch(() => {});
+    if (S.p && S.p.id === pid && !S.dirty) loadProject(pid, true).catch(() => {});
+  }
+}
+
+function updBatchLive(el = $('#batch-live')) {
+  if (!el || !S.p) return;
+  const bj = S.bjobs[S.p.id]; el.innerHTML = '';
+  if (!(bj && bj.polling)) return;
+  const j = bj.job || {}, pr = batchProgress(j);
+  el.append(h('div', { class: 'card batch-live' },
+    h('div', { class: 'row between' }, h('b', {}, pr.of ? `Membuat video ${pr.n} dari ${pr.of}` : 'Menyiapkan…'),
+      j.status === 'running' ? h('button', { class: 'small ghost', onclick: async (e) => {
+        e.target.disabled = true; e.target.textContent = 'Membatalkan…';
+        try { await api('POST', `/api/jobs/${bj.jid}/cancel`); } catch (err) { toast(err.message, true); }
+      } }, 'Batalkan') : null),
+    h('div', { class: 'pbar' }, h('i', { style: `width:${pr.of ? Math.max(3, (pr.n - 1) / pr.of * 100) : 3}%` })),
+    h('div', { class: 'small' }, h('span', { class: 'spin' }), ' ', pr.text || 'Memulai…'),
+    h('div', { class: 'muted small' }, 'Boleh ditinggal atau membuka proyek lain — proses jalan di latar. Video yang sudah jadi langsung muncul di galeri.')));
+}
+
+const subStyleFor = (key) => {
+  const t = (S.meta.sub_user_templates || {})[key] || (S.meta.sub_templates || {})[key];
+  return t ? { ...S.meta.sub_defaults, ...t.style, template: key } : null;
+};
+const kidState = (q) => {
+  if (q.output && readyForUpload(q)) return 'done';
+  if (q.current_stage <= 1 && q.stage_status.script !== 'approved') return 'review';
+  return 'stuck';
+};
+
+function batchCard(c, running) {
+  const st = kidState(c);
+  const src = c.output ? U(`/media/${c.id}/${c.output}`) : '';
+  const poster = c.thumb ? U(`/media/${c.id}/${c.thumb}`) : undefined;
+  const up = c.publish && c.publish.video_id;
+  const media = src ? h('video', { src, poster, preload: 'none', playsInline: true, onclick: (e) => {
+    const v = e.currentTarget; if (v.paused) { document.querySelectorAll('.clip-grid video').forEach((x) => x !== v && x.pause()); v.controls = true; v.play(); } else v.pause();
+  } }) : h('div', { class: 'cc-empty' }, h('span', { class: 'mono small' },
+    st === 'review' ? 'MENUNGGU CEK NASKAH' : running ? 'MENUNGGU GILIRAN' : 'BELUM SELESAI'),
+    h('span', { class: 'muted small' }, kidStatus(c)));
+  const open = (stage) => loadProject(c.id, false, 'scratch').then(() => { const i = S.meta.stages.indexOf(stage); if (i >= 0 && i <= S.p.current_stage) setView(i); });
+  return h('div', { class: `clip-card ${st !== 'done' ? 'pending' : ''}` },
+    h('div', { class: 'cc-media' }, media,
+      c.duration ? h('span', { class: 'cc-dur' }, fmtT(c.duration).replace(/\.\d$/, '')) : null,
+      up ? h('span', { class: 'cc-up' }, 'diunggah') : null),
+    h('div', { class: 'cc-title', title: c.title }, (c.publish || {}).title || c.title),
+    h('div', { class: 'cc-actions' },
+      src ? h('a', { class: 'btnlike', href: src, download: `${(c.title || c.id).replace(/[\\/:*?"<>|]+/g, '').slice(0, 60)}.mp4`, title: 'Unduh MP4' }, 'Unduh') : null,
+      st === 'done' ? h('button', { title: 'Judul, deskripsi & jadwal upload', onclick: () => loadProject(c.id, false, 'publish') }, up ? 'Detail' : 'Jadwalkan') : null,
+      st === 'review' ? h('button', { class: 'primary', onclick: () => open('script') }, 'Cek naskah') : null,
+      h('button', { title: 'Buka per tahap: naskah, visual, suara, subtitle…', onclick: () => open(st === 'done' ? 'assets' : S.meta.stages[c.current_stage]) }, 'Edit'),
+      c.output ? h('button', { title: 'AI apa saja yang dipakai & berapa lama', onclick: () => openClipReport(c) }, 'Laporan') : null,
+      h('button', { class: 'danger', title: 'Hapus video ini', disabled: running, onclick: async () => {
+        if (!(await askDialog(`Hapus video "${c.title}"?`, 'File video, naskah, dan asetnya dihapus dari laptop. Idenya tetap ada dan bisa dibuat ulang.', 'Hapus video', true))) return;
+        bgTask([c.id], 'Menghapus video', c.title, () => api('DELETE', `/api/projects/${c.id}`)).then(() => render()).catch((e) => toast(e.message, true));
+      } }, 'Hapus')));
+}
+
+function renderShortsBatch() {
+  const p = S.p, d = S.draft, main = $('#main'); main.innerHTML = '';
+  applyTheme('scratch');
+  const o = S.bopt[p.id] = S.bopt[p.id] || { ...BATCH_DEF, ...((p.batch || {}).opts || {}),
+    sub_tpl: (((p.batch || {}).opts || {}).sub_style || {}).template || BATCH_DEF.sub_tpl };
+  const sel = S.bsel[p.id] = S.bsel[p.id] || new Set();
+  const kids = kidsOf(p.id), byId = Object.fromEntries(kids.map((k) => [k.id, k]));
+  const bj = S.bjobs[p.id], running = !!(bj && bj.polling);
+  const ideas = d.ideas = d.ideas || [];
+  const busyIdeas = (p._jobs || []).some((j) => j.kind === 'research.ideas') || S.busy;
+  const rerender = () => render();
+
+  main.append(h('div', { class: 'row between' },
+    h('div', {}, h('div', { class: 'muted small mono' }, 'SHORTS MASSAL'), h('h1', {}, p.title || 'Shorts massal'),
+      h('div', { class: 'muted small' }, `${ideas.length} ide · ${kids.length} video · ${kids.filter((k) => kidState(k) === 'done').length} jadi`)),
+    h('div', { class: 'row' },
+      btn('Mode lanjutan', () => { S.adv[p.id] = true; render(); }, 'small ghost'),
+      h('button', { class: 'ghost danger small', onclick: deleteProject, disabled: running }, 'Hapus'))));
+  const live = h('div', { id: 'batch-live' });
+  main.append(live); updBatchLive(live);
+
+  // ---- 1 · Ide
+  if (d.idea_count == null) d.idea_count = ideas.length ? 10 : 20;
+  if (d.use_trends == null) d.use_trends = true;
+  const topic = h('input', { value: d.keyword || p.title || '', placeholder: 'mis. hewan unik', oninput: (e) => { d.keyword = e.target.value; markDirty(); } });
+  const count = h('input', { type: 'number', min: 1, max: 50, value: d.idea_count, style: 'width:72px', oninput: (e) => { d.idea_count = +e.target.value || 10; } });
+  const gen = () => {
+    if (!(d.keyword || '').trim()) { toast('Topik tidak boleh kosong.', true); topic.focus(); return; }
+    runAction('research.ideas', { keyword: d.keyword, count: d.idea_count, duration: o.duration, template: d.idea_template || S.meta.idea_template,
+      trends: d.use_trends, append: ideas.length > 0 });
+  };
+  const s1 = h('section', { class: 'card cs-step' }, h('h2', {}, '1 · Ide'),
+    h('div', { class: 'row', style: 'flex-wrap:wrap;align-items:flex-end' },
+      h('label', { class: 'field grow', style: 'min-width:220px' }, h('span', {}, 'Topik'), topic),
+      h('label', { class: 'field' }, h('span', {}, ideas.length ? 'Tambah' : 'Jumlah ide'), count),
+      h('button', { class: ideas.length ? '' : 'primary', onclick: gen, disabled: busyIdeas }, ideas.length ? 'Tambah ide' : 'Cari ide')),
+    h('div', { class: 'row', style: 'flex-wrap:wrap' },
+      h('span', { class: 'small muted' }, 'Gaya narasi:'),
+      seg(o, 'template', ['fakta', 'tragedi', 'kisah-hidup'].map((k) => [k, (S.meta.narr_templates || {})[k] || k]), rerender),
+      h('label', { class: 'row small' }, h('input', { type: 'checkbox', checked: !!d.use_trends, onchange: (e) => { d.use_trends = e.target.checked; } }), 'Riset tren YouTube')));
+  if (d.insight) s1.append(h('div', { class: 'muted small' }, 'Insight riset: ', d.insight));
+  if (ideas.length) {
+    const free = ideas.map((it, i) => i).filter((i) => !(ideas[i].video && byId[ideas[i].video]));
+    const allOn = free.length && free.every((i) => sel.has(i));
+    s1.append(h('div', { class: 'row between', style: 'margin-top:10px' },
+      h('div', { class: 'row' },
+        h('button', { class: 'small ghost', onclick: () => { free.forEach((i) => (allOn ? sel.delete(i) : sel.add(i))); rerender(); } }, allOn ? 'Batal pilih semua' : 'Pilih semua'),
+        h('span', { class: 'small muted' }, `${sel.size} dipilih`)),
+      sel.size ? h('button', { class: 'small ghost danger', onclick: async () => {
+        if (!(await askDialog(`Hapus ${sel.size} ide?`, 'Ide yang dicentang dibuang dari daftar (video yang sudah dibuat tidak terpengaruh).', 'Hapus ide', true))) return;
+        d.ideas = ideas.filter((_, i) => !sel.has(i)); sel.clear(); await saveDraft(true);
+      } }, 'Hapus ide terpilih') : null));
+    s1.append(h('div', { class: 'idea-list' }, ideas.map((it, i) => {
+      const kid = it.video && byId[it.video];
+      if (it.description == null && it.angle) it.description = it.angle;
+      return h('div', { class: `idea-row ${sel.has(i) ? 'on' : ''} ${kid ? 'made' : ''}` },
+        kid ? h('span', { class: 'ir-num mono' }, String(i + 1))
+          : h('input', { type: 'checkbox', checked: sel.has(i), 'aria-label': `Pilih ide ${i + 1}`, onchange: (e) => { e.target.checked ? sel.add(i) : sel.delete(i); rerender(); } }),
+        h('div', { class: 'grow' },
+          h('input', { class: 'ir-title', value: it.title || '', oninput: (e) => { it.title = e.target.value; markDirty(); } }),
+          it.hook ? h('div', { class: 'small ir-hook' }, it.hook) : null,
+          h('details', { class: 'ir-more' }, h('summary', { class: 'small muted' }, 'Detail ide'),
+            field('Deskripsi / angle', it, 'description', { type: 'textarea', rows: 2 }),
+            field('Hook (teks thumbnail)', it, 'hook'))),
+        kid ? h('button', { class: 'small', onclick: () => openProject(kid.id) }, kidState(kid) === 'done' ? 'Lihat video' : kidStatus(kid)) : null);
+    })));
+    s1.append(h('div', { class: 'row' }, btn('+ Ide manual', () => { ideas.push({ title: '', description: '', hook: '' }); markDirty(); rerender(); }, 'small ghost'),
+      S.dirty ? btn('Simpan perubahan ide', () => saveDraft(true).then(() => toast('Ide tersimpan.')), 'small') : null));
+  }
+  main.append(s1);
+
+  // ---- 2 · Gaya video (berlaku untuk semua video yang dibuat berikutnya)
+  const tpls = { ...(S.meta.sub_templates || {}), ...(S.meta.sub_user_templates || {}) };
+  const opt = (label, el, note) => h('div', { class: 'ch-opt' }, h('b', {}, label), el, note ? h('div', { class: 'muted small' }, note) : null);
+  main.append(h('section', { class: 'card cs-step' }, h('h2', {}, '2 · Gaya video'),
+    h('div', { class: 'ch-opts' },
+      opt('Durasi', seg(o, 'duration', [[30, '±30 dtk'], [45, '±45 dtk'], [50, '±50 dtk'], [58, 'maks 60 dtk']], rerender)),
+      opt('Visual', seg(o, 'visual', [['stock', 'Stok & foto asli'], ['ai', 'Gambar AI (karakter konsisten)']], rerender),
+        o.visual === 'ai' ? (S.meta.keys.pollinations ? 'Gambar dibuat per scene dengan tokoh yang sama di semua scene.'
+          : 'POLLINATIONS_KEY belum diisi: gambar AI lambat (±40 dtk/gambar) dan wajah tokoh kurang konsisten.')
+          : 'Footage Pixabay/Pexels + foto Wikimedia dipilih AI sesuai narasi; scene tanpa stok memakai gambar AI.'),
+      o.visual === 'ai' ? opt('Gaya gambar', seg(o, 'style', Object.entries(S.meta.story_styles || { '3d': 'Animasi 3D' }), rerender)) : null,
+      opt('Suara', seg(o, 'voice_preset', [['antusias', 'Antusias'], ['naratif', 'Naratif'], ['edukatif', 'Edukatif'], ['sinematik', 'Sinematik']], rerender),
+        { antusias: 'Wanita, cepat & ceria', naratif: 'Pria, tenang bercerita', edukatif: 'Wanita, jelas & pelan', sinematik: 'Pria, berat & dramatis' }[o.voice_preset]),
+      opt('Subtitle', h('div', { class: 'tpl-row' }, Object.entries(tpls).filter(([k]) => k !== 'klasik').map(([k, t]) =>
+        tplCard(k, t, o.sub_tpl === k, () => { o.sub_tpl = k; rerender(); })))),
+      opt('Musik latar', seg(o, 'music', [[true, 'Ya (sesuai mood)'], [false, 'Tidak']], rerender)),
+      opt('Transisi', seg(o, 'transition', [['', 'Fade'], ['geser', 'Geser'], ['zoom', 'Zoom'], ['none', 'Tanpa']], rerender)),
+      opt('Alur', seg(o, 'review', [[false, 'Langsung jadi video'], [true, 'Cek naskah dulu']], rerender),
+        o.review ? 'Produksi berhenti setelah naskah. Cek/edit naskah tiap video, lalu klik "Lanjutkan produksi".' : 'Naskah, visual, suara, dan render dikerjakan otomatis; tiap video tetap bisa diedit sesudahnya.'))));
+
+  // ---- 3 · Video hasil
+  const pending = kids.filter((k) => kidState(k) !== 'done');
+  if (kids.length) {
+    main.append(h('div', { class: 'row between', style: 'margin-top:14px' }, h('h2', {}, `Video (${kids.length})`),
+      pending.length && !running ? h('button', { onclick: () => startBatch(p, { children: pending.map((k) => k.id), opts: { ...o, sub_style: subStyleFor(o.sub_tpl) } }) },
+        `Lanjutkan produksi ${pending.length} video`) : null));
+    const rl = sourceReportLine({ ...p, reports: { 'research.auto_clip': (p.reports || {})['research.shorts_batch'] } });
+    if (rl) main.append(rl);
+    main.append(h('div', { class: 'clip-grid' }, [...kids].reverse().map((c) => batchCard(c, running))));
+  }
+
+  // ---- bar aksi (menempel di bawah)
+  const n = sel.size, per = o.visual === 'ai' ? (S.meta.keys.pollinations ? 4 : 7) : 3;
+  main.append(h('div', { class: 'batch-go' },
+    h('div', { class: 'grow small' }, n ? h('span', {}, h('b', {}, `${n} ide dipilih`), h('span', { class: 'muted' }, ` · perkiraan ±${n * per} menit`))
+      : h('span', { class: 'muted' }, ideas.length ? 'Centang ide yang mau dijadikan video.' : 'Mulai dengan mencari ide.')),
+    h('button', { class: 'primary', disabled: running || !n, onclick: () => {
+      const idx = [...sel].sort((a, b) => a - b); sel.clear();
+      startBatch(p, { indexes: idx, opts: { ...o, sub_style: subStyleFor(o.sub_tpl) } });
+    } }, running ? 'Sedang membuat video…' : n ? `Buat ${n} video` : 'Buat video')));
+}
+
 // ---------------------------------------------------------------- tab Upload & Jadwal
 /* Dipakai bersama oleh jalur Dari Nol dan Clipper. Susunannya sama seperti daftar proyek:
    pilih PROYEK dulu (folder) → tampil video-video di proyek itu → klik video untuk judul/jadwal.
@@ -2655,20 +2994,15 @@ function renderSidebarTab() {
     el.value = def; return el;
   };
   if (S.tab === 'scratch') {
-    const fmt = fmtSel('short');
-    const kw = h('input', { placeholder: 'mis. misteri sejarah nusantara' });
-    const go = async () => {
-      try {
-        const t = kw.value.trim();
-        const p = await api('POST', '/api/projects', { mode: 'scratch', format: fmt.value, title: t, keyword: t });
-        kw.value = ''; await loadProject(p.id);
-      } catch (e) { toast(e.message, true); }
+    const home = (focus) => {
+      if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
+      S.p = null; S.dirty = false; lsSet('lastProject_scratch', null); scratchHome(focus); refreshList();
     };
-    kw.onkeydown = (e) => { if (e.key === 'Enter') go(); };
-    box.append(h('h3', {}, 'Konten baru dari nol'),
-      h('label', { class: 'field' }, h('span', {}, 'Niche / kata kunci'), kw),
-      h('label', { class: 'field' }, h('span', {}, 'Format'), fmt),
-      h('button', { class: 'primary', onclick: go }, '+ Buat proyek'));
+    box.append(h('h3', {}, 'Dari Nol'),
+      h('div', { class: 'muted small' }, 'Shorts: banyak video sekaligus dari satu topik. Long: satu video digarap per tahap.'),
+      h('div', { class: 'row', style: 'margin-top:8px;gap:6px' },
+        h('button', { class: 'primary grow', onclick: () => home('short') }, '+ Shorts massal'),
+        h('button', { class: 'grow', onclick: () => home('long') }, '+ Video panjang')));
   } else {
     box.append(h('h3', {}, 'Clipper'),
       h('div', { class: 'muted small' }, 'Video panjang → banyak klip pendek siap upload, sekali klik.'),
@@ -2713,6 +3047,7 @@ function renderWelcome(mode) {
     return;
   }
   if (mode === 'clipper') return clipHome();
+  if (mode === 'scratch') return scratchHome();
   const L = labelsFor(mode);
   const clip = mode === 'clipper';
   main.append(h('div', { class: 'empty' },

@@ -450,8 +450,10 @@ def to_srt(lines: list[dict]) -> str:
 def export(p: dict) -> None:
     d = store.project_dir(p["id"])
     s = p["subtitles"]
-    from . import enhance
-    extra = enhance.ass_parts(p, normalize_style(s["style"], p["format"]))
+    from . import enhance, longform
+    ns = normalize_style(s["style"], p["format"])
+    a, b = enhance.ass_parts(p, ns), longform.ass_chapters(p, ns)
+    extra = ("\n".join(x for x in (a[0], b[0]) if x), a[1] + b[1])
     (d / "subs.ass").write_text(to_ass(s["words"], s["lines"], s["style"], p["format"], hook_text(p), extra),
                                 encoding="utf-8")
     (d / "subs.srt").write_text(to_srt(s["lines"]), encoding="utf-8")

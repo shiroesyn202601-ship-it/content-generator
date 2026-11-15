@@ -45,6 +45,7 @@ def normalize_scenes(scenes: list[dict]) -> list[dict]:
             "role": role if (role := (s.get("role") or "").strip().lower()) in ROLES else "",
             "on_screen_text": (s.get("on_screen_text") or "").strip() if i == 0 else "",
             "sources": [str(x) for x in (s.get("sources") or []) if x][:5],
+            **({"chapter": s["chapter"]} if isinstance(s.get("chapter"), int) else {}),
         })
     seen = set()
     for i, s in enumerate(out):
@@ -190,18 +191,10 @@ def _mark(text: str, words: list[str]) -> str:
     return text
 
 
-def split(pid: str, params: dict, progress) -> dict:
-    """Aksi 'Pecah jadi scene': narasi (teks utuh) -> scene + emosi/mood/visual/SFX. Teks narasi TIDAK diubah:
-    AI hanya memilih nomor kalimat awal tiap scene, kalimat disusun ulang oleh kode."""
-    p = store.load(pid)
-    narr = (p["script"].get("narration") or "").strip()
-    if not narr:
-        raise RuntimeError("Narasi masih kosong.")
-    sents = sentences(narr.replace("*", ""))
-    title = p["script"].get("title") or _idea(p).get("title", p["title"])
-    progress(f"AI memecah narasi ({len(sents)} kalimat) menjadi scene + arahan visual, emosi, musik…")
-    sys_, usr = prompts.split_narration(sents, title, p["format"])
-    res = llm.chat_json(sys_, usr, params.get("provider"), temperature=0.3, schema=SPLIT_SCHEMA)
+def _split_part(sents: list[str], title: str, fmt: str, provider, n: str | None = None) -> tuple[dict, list[dict]]:
+    """Satu bagian narasi → scene (teks disusun kode dari kalimat asli). Return (framework, scenes)."""
+    sys_, usr = prompts.split_narration(sents, title, fmt, n)
+    res = llm.chat_json(sys_, usr, provider, temperature=0.3, schema=SPLIT_SCHEMA)
     raw = [s for s in (res.get("scenes") or []) if isinstance(s, dict)]
     # Batas scene: start naik & unik, scene pertama mulai dari kalimat 0, sisa kalimat ikut scene terakhir.
     marks, seen = [], set()
@@ -219,8 +212,56 @@ def split(pid: str, params: dict, progress) -> dict:
         en = marks[k + 1][0] if k + 1 < len(marks) else len(sents)
         text = _mark(" ".join(sents[st:en]), [str(w) for w in (s.get("emphasis") or [])])
         scenes.append({**{x: s.get(x) for x in ("role", "emotion", "mood", "visual_query", "sfx", "on_screen_text",
-                                                 "sources")}, "id": f"s{k + 1}", "text": text})
+                                                 "sources")}, "text": text})
+    return res.get("framework") or {}, scenes
+
+
+BOOKEND = ("pembuka", "penutup", "intro", "outro", "prolog", "epilog")
+
+
+def split(pid: str, params: dict, progress) -> dict:
+    """Aksi 'Pecah jadi scene': narasi (teks utuh) -> scene + emosi/mood/visual/SFX. Teks narasi TIDAK diubah:
+    AI hanya memilih nomor kalimat awal tiap scene, kalimat disusun ulang oleh kode.
+    Narasi berbab (baris "## Judul", video panjang) dipecah per bab → tiap scene tahu babnya (kartu judul bab
+    & chapter YouTube), dan bab tetap ada walau narasi diedit manual."""
+    from . import longform
+    p = store.load(pid)
+    narr = (p["script"].get("narration") or "").strip()
+    if not narr:
+        raise RuntimeError("Narasi masih kosong.")
+    title = p["script"].get("title") or _idea(p).get("title", p["title"])
+    parts = longform.parse_parts(narr.replace("*", ""))
+    chapters, framework, scenes, num = [], {}, [], 0
+    titled = any(t for t, _ in parts)
+    for k, (ptitle, ptext) in enumerate(parts):
+        sents = sentences(ptext)
+        if not sents:
+            continue
+        if titled:
+            ptitle = ptitle or longform.INTRO_TITLE
+            n_words = len(ptext.split())
+            per = max(1, round(n_words / 38))
+            rng = f"{max(1, per - 1)}-{per + 1} scene"
+            progress(f"AI memecah bagian {k + 1}/{len(parts)} '{ptitle}' ({len(sents)} kalimat) jadi scene…")
+        else:
+            rng = None
+            progress(f"AI memecah narasi ({len(sents)} kalimat) menjadi scene + arahan visual, emosi, musik…")
+        fw, sc = _split_part(sents, f"{title} — {ptitle}" if titled else title, p["format"], params.get("provider"), rng)
+        framework = framework or fw
+        if titled:
+            bookend = ptitle.strip().lower() in BOOKEND
+            num += 0 if bookend else 1
+            chapters.append({"title": ptitle, "n": 0 if bookend else num, "first": len(scenes)})
+            for s in sc:
+                s["chapter"] = len(chapters) - 1
+                if scenes:
+                    s["on_screen_text"] = ""
+        scenes += sc
+    for i, s in enumerate(scenes):
+        s["id"] = f"s{i + 1}"
     scenes = normalize_scenes(scenes)
+    for c in chapters:
+        c["scene_id"] = scenes[min(c.pop("first"), len(scenes) - 1)]["id"] if scenes else None
     claims = []
     sources = (p["research"].get("sources") or []) if p["research"].get("sources_for") == _idea(p).get("title") else []
     if params.get("factcheck", True) and p["script"].get("narr_template") in ("fakta", "tragedi") and sources:
@@ -230,12 +271,13 @@ def split(pid: str, params: dict, progress) -> dict:
             progress(f"Cek fakta gagal ({e}) — bisa diulang dengan tombol Cek Fakta.")
 
     def apply(q):
-        q["script"].update({"framework": res.get("framework") or {}, "scenes": scenes,
+        q["script"].update({"framework": framework, "scenes": scenes, "chapters": chapters,
                             "claims": claims, "claims_at": store.now_iso() if claims else None})
         store.touch_stage(q, "script")
-        store.log(q, f"AI: narasi dipecah jadi {len(scenes)} scene ({_count_words(scenes)} kata)")
+        store.log(q, f"AI: narasi dipecah jadi {len(scenes)} scene ({_count_words(scenes)} kata)"
+                     + (f", {len(chapters)} bab" if chapters else ""))
     store.update(pid, apply)
-    return {"scenes": len(scenes), "words": _count_words(scenes),
+    return {"scenes": len(scenes), "words": _count_words(scenes), "chapters": len(chapters),
             "factcheck": _claims_summary(claims) if claims else ""}
 
 

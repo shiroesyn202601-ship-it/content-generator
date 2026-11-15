@@ -213,10 +213,11 @@ Kalau sumber tidak menyebutnya, jangan tulis (atau pakai bahasa umum yang pasti 
 ---"""
 
 
-def split_narration(sentences: list[str], title: str, fmt: str) -> tuple[str, str]:
-    """AI hanya memilih batas scene (nomor kalimat) + anotasi; teks disusun ulang oleh kode → narasi tidak berubah."""
+def split_narration(sentences: list[str], title: str, fmt: str, n: str | None = None) -> tuple[str, str]:
+    """AI hanya memilih batas scene (nomor kalimat) + anotasi; teks disusun ulang oleh kode → narasi tidak berubah.
+    n = rentang jumlah scene (mis. "3-5 scene" untuk satu bab video panjang)."""
     lines = "\n".join(f"[{i}] {s}" for i, s in enumerate(sentences))
-    n = "4-9 scene" if fmt == "short" else "10-24 scene"
+    n = n or ("4-9 scene" if fmt == "short" else "10-24 scene")
     system = "Kamu sutradara video pendek. Kamu memecah narasi jadi scene visual & memberi arahan produksi."
     user = f"""Judul video: "{title}". Narasi per KALIMAT bernomor:
 {lines}
@@ -501,5 +502,6 @@ Aturan:
   (3 pertama tampil di atas judul). JANGAN lebih dari 15 hashtag.
 - "tags": 8-15 tag, campuran kata kunci umum & spesifik, total < 450 karakter.
 - "pinned_comment": 1 kalimat pertanyaan untuk memancing komentar.
+- JANGAN menulis timestamp / daftar chapter (ditambahkan otomatis dari timing video).
 Balas JSON: {{"title": "...", "description": "...", "tags": ["..."], "pinned_comment": "..."}}"""
     return system, user

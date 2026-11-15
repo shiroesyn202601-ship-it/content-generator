@@ -569,3 +569,58 @@ button.danger-solid { background: var(--danger); border-color: var(--danger); co
 .bg-label { display: flex; gap: 6px; align-items: center; color: var(--accent); }
 .bg-progress { display: flex; gap: 10px; align-items: center; padding: 12px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
 @media (max-width: 1023px) { #bgtray { left: 12px; right: 12px; width: auto; bottom: calc(var(--bot-h) + var(--safe-b) + 12px); } }
+
+/* ---------- Dari Nol: halaman awal (Shorts massal / Video panjang) */
+.mono { font-family: var(--mono); letter-spacing: .06em; }
+.sc-home { max-width: 1040px; margin: 3vh auto; }
+.sc-home h1 { font-size: 30px; line-height: 1.15; letter-spacing: -.02em; }
+.sc-choices { display: grid; grid-template-columns: 1fr 1fr; gap: 14px; margin-top: 18px; }
+.sc-choice { display: grid; align-content: start; gap: 8px; background: var(--panel); border: 1px solid var(--line);
+  border-radius: var(--radius); padding: 18px; }
+.sc-choice.on { border-color: var(--line2); border-top: 2px solid var(--accent); }
+.sc-choice h2 { margin: 0; font-size: 20px; }
+.sc-choice p { margin: 0; }
+.sc-choice .ch-input { margin: 6px 0 0; }
+.sc-choice .ch-input button { border: 0; border-radius: 0; padding: 0 18px; white-space: nowrap; }
+.sc-kicker { font-size: 11px; color: var(--accent); }
+.sc-steps { margin: 0; padding-left: 18px; color: var(--muted); display: flex; gap: 22px; flex-wrap: wrap; }
+
+/* ---------- Shorts massal */
+.idea-list { display: grid; gap: 0; margin-top: 8px; border-top: 1px solid var(--line); }
+.idea-row { display: flex; gap: 10px; align-items: flex-start; padding: 8px 4px; border-bottom: 1px solid var(--line); }
+.idea-row.on { background: var(--accent-soft); }
+.idea-row.made { opacity: .75; }
+.idea-row > input[type=checkbox] { margin-top: 10px; width: 18px; height: 18px; flex: none; accent-color: var(--accent); }
+.ir-num { width: 18px; margin-top: 8px; font-size: 12px; color: var(--accent2); text-align: center; flex: none; }
+.ir-title { width: 100%; font-weight: 600; background: transparent; border: 1px solid transparent; padding: 5px 6px; }
+.ir-title:hover, .ir-title:focus { border-color: var(--line2); background: var(--bg); }
+.ir-hook { color: var(--muted); padding: 0 7px; }
+.ir-more > summary { cursor: pointer; padding: 2px 7px; }
+.idea-row > button { flex: none; margin-top: 4px; }
+.batch-live { border-left: 2px solid var(--accent); display: grid; gap: 8px; }
+.batch-live .pbar { margin: 0; height: 3px; }
+.batch-live .pbar > i { background: var(--accent); transition: width .4s; }
+.batch-go { position: sticky; bottom: 0; z-index: 5; display: flex; gap: 12px; align-items: center; margin-top: 16px;
+  padding: 12px 14px; background: var(--panel2); border: 1px solid var(--line2); border-radius: var(--radius);
+  box-shadow: 0 -8px 24px rgba(0,0,0,.35); }
+.batch-go button.primary { min-width: 180px; padding: 11px 20px; }
+.clip-card.pending .cc-media { aspect-ratio: 9 / 16; }
+.cc-empty { position: absolute; inset: 0; display: grid; place-content: center; gap: 6px; text-align: center; padding: 12px;
+  background: repeating-linear-gradient(135deg, var(--panel2) 0 10px, var(--panel) 10px 20px); color: var(--muted); }
+
+/* ---------- Video panjang: naskah per bab */
+.longform-box { display: flex; gap: 14px; align-items: center; margin: 10px 0; padding: 12px 14px; background: var(--bg);
+  border: 1px solid var(--line); border-left: 2px solid var(--accent); border-radius: var(--r-sm); }
+.chap-head { margin: 18px 0 6px; padding-bottom: 6px; border-bottom: 1px solid var(--line2); display: flex; gap: 8px; align-items: baseline; }
+.chap-head .mono { color: var(--accent); }
+
+@media (max-width: 1023px) { .batch-go { bottom: calc(var(--bot-h) + var(--safe-b) + 6px); } }
+@media (max-width: 767px) {
+  .sc-choices { grid-template-columns: 1fr; }
+  .sc-home h1 { font-size: 24px; }
+  .sc-choice .ch-input { flex-direction: column; }
+  .sc-choice .ch-input button { padding: 12px; }
+  .longform-box { flex-direction: column; align-items: stretch; }
+  .batch-go { flex-wrap: wrap; }
+  .batch-go button.primary { width: 100%; }
+}

@@ -212,9 +212,10 @@ def run(pid: str, params: dict, progress) -> dict:
             raise RuntimeError(f"Timing VO tidak ada untuk scene {', '.join(missing)} — render ulang voice over.")
         # Gaya potongan: "dinamis" (default Shorts) = shot baru tiap kalimat VO, maks 4 dtk per shot,
         # punch-in bergantian → ritme cepat yang menahan penonton; "statis" = 1 shot per scene.
-        cut = p["render"].get("cut_style") or ("dinamis" if p["format"] == "short" else "statis")
+        # Video panjang juga dinamis (maks 6 dtk per shot): satu footage 20-30 dtk tanpa potongan = penonton pergi.
+        cut = p["render"].get("cut_style") or "dinamis"
         shots = _plan_shots(scenes, timings, p["audio"].get("sentences") or [], total,
-                            4.0 if p["format"] == "short" else 7.0, cut == "dinamis")
+                            4.0 if p["format"] == "short" else 6.0, cut == "dinamis")
         # Transisi antar-scene (ala CapCut). Shot terakhir sebelum pergantian scene dirender lebih panjang
         # sebanyak durasi transisi, lalu xfade tumpang-tindih → total durasi tetap = durasi VO.
         trans = p["render"].get("transition") or ("fade" if cut == "dinamis" else "none")
@@ -226,6 +227,10 @@ def run(pid: str, params: dict, progress) -> dict:
             slot = p["assets"]["scenes"].get(s["id"]) or {}
             sel = slot.get("selected") or {}
             asset = sel.get("path") if sel.get("path") and (d / sel["path"]).is_file() else None
+            # Footage variasi (video panjang): shot di dalam scene bergantian memakai beberapa aset yang relevan.
+            pool = [asset] + [x["path"] for x in slot.get("extras") or [] if x.get("path") and (d / x["path"]).is_file()]
+            if asset and len(pool) > 1:
+                asset = pool[sh["shot"] % len(pool)]
             out = f"render/seg_{j:03d}.mp4"
             progress(f"Shot {j + 1}/{len(shots)} · scene {sh['scene'] + 1} ({sh['frames'] / config.FPS:.1f}s)"
                      + ("" if asset else " — tanpa visual, memakai latar polos"))
