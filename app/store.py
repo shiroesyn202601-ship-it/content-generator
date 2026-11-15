@@ -17,6 +17,7 @@ FORMAT DATA KANONIK (dipakai lintas modul — jangan diubah sembarangan):
 """
 import json
 import re
+import shutil
 import threading
 import time
 import uuid
@@ -99,6 +100,37 @@ _lock = threading.RLock()
 
 def now_iso() -> str:
     return datetime.now().isoformat(timespec="seconds")
+
+
+def remove_tree(d: Path) -> bool:
+    """Hapus folder proyek. Di Windows file yang sedang dibuka (video diputar browser / di-stream server)
+    terkunci sehingga rmtree gagal sebagian. Sisa folder diberi penanda .deleted, dicoba ulang di latar
+    (tiap 10 dtk, maks 10 mnt) dan saat aplikasi start (purge_deleted). True = langsung bersih."""
+    shutil.rmtree(d, ignore_errors=True)
+    if not d.exists():
+        return True
+    try:
+        (d / ".deleted").write_text(now_iso(), encoding="utf-8")
+    except OSError:
+        pass
+
+    def retry():
+        for _ in range(60):
+            time.sleep(10)
+            shutil.rmtree(d, ignore_errors=True)
+            if not d.exists():
+                return
+    threading.Thread(target=retry, daemon=True).start()
+    return False
+
+
+def purge_deleted() -> int:
+    """Bersihkan sisa folder proyek yang sudah dihapus tapi sempat terkunci (bertanda .deleted)."""
+    n = 0
+    for m in [*config.PROJECTS_DIR.glob("*/.deleted"), *config.PROJECTS_DIR.glob("*/clips/*/.deleted")]:
+        shutil.rmtree(m.parent, ignore_errors=True)
+        n += not m.parent.exists()
+    return n
 
 
 _nested: dict[str, Path] = {}  # cache lokasi video hasil Clipper: id anak → folder di dalam proyek sumber

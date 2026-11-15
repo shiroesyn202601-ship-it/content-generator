@@ -11,6 +11,7 @@ from .services import (assets, audio_lib, batch, brand, enhance, usage, clipper,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
+store.purge_deleted()  # sisa proyek terhapus yang sempat terkunci (Windows)
 store.nest_children()  # migrasi: video hasil Clipper lama → data/projects/<sumber>/clips/<id>/
 WEB = config.ROOT / "web"
 
@@ -180,14 +181,15 @@ def delete_project(pid: str, with_children: bool = False, drive: bool = False):
                     drive_trashed += 1
             except Exception as e:  # noqa: BLE001
                 drive_error = str(e)[:300]
+    locked = 0
     for k in kids:  # video hasil ada di dalam folder sumber (clips/<id>) — pindahkan dulu bila dipertahankan
         if with_children:
-            shutil.rmtree(store.project_dir(k), ignore_errors=True)
+            locked += not store.remove_tree(store.project_dir(k))
         else:
             store.release_child(k, f"Proyek sumber {pid} dihapus")
-    shutil.rmtree(store.project_dir(pid), ignore_errors=True)
+    locked += not store.remove_tree(store.project_dir(pid))
     return {"ok": True, "children": len(kids), "deleted_children": with_children,
-            "drive_trashed": drive_trashed, "drive_error": drive_error}
+            "drive_trashed": drive_trashed, "drive_error": drive_error, "locked": locked}
 
 
 @app.post("/api/projects/{pid}/fork")

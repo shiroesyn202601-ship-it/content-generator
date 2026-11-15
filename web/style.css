@@ -551,3 +551,21 @@ a.btnlike { border: 1px solid var(--line2); color: var(--text); border-radius: v
 button.danger-solid { background: var(--danger); border-color: var(--danger); color: #fff; font-weight: 600; }
 @media (hover: hover) { button.danger-solid:not(:disabled):hover { filter: brightness(1.1); border-color: var(--danger); } }
 @media (max-width: 639px) { .dl-actions { flex-direction: column-reverse; } .dl-actions button { width: 100%; } }
+
+/* ---------- proses latar: baki indikator + item terkunci (aturan UX: proses lama tidak mengunci layar) */
+#bgtray { position: fixed; right: 16px; bottom: 16px; z-index: 35; display: grid; gap: 6px; width: min(340px, calc(100vw - 32px)); }
+#bgtray[hidden] { display: none; }
+.bg-item { display: grid; grid-template-columns: auto 1fr auto; gap: 10px; align-items: center; padding: 10px 12px;
+  background: var(--panel2); border: 1px solid var(--line2); border-left: 2px solid var(--accent); border-radius: var(--r-sm);
+  box-shadow: 0 8px 24px rgba(0,0,0,.4); }
+.bg-text { display: grid; min-width: 0; }
+.bg-text b { font-size: 13px; }
+.bg-text small { color: var(--muted); font-size: 12px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bg-time { font: 12px var(--mono); color: var(--faint); }
+.spin { display: inline-block; width: 12px; height: 12px; border: 2px solid var(--line2); border-top-color: var(--accent);
+  border-radius: 50%; animation: sb-spin .8s linear infinite; flex: none; vertical-align: -1px; }
+#project-list li.bg-busy { cursor: progress; opacity: .6; }
+#project-list li.bg-busy:hover { background: none; }
+.bg-label { display: flex; gap: 6px; align-items: center; color: var(--accent); }
+.bg-progress { display: flex; gap: 10px; align-items: center; padding: 12px; margin-bottom: 10px; border: 1px solid var(--line); border-radius: var(--radius); background: var(--bg); }
+@media (max-width: 1023px) { #bgtray { left: 12px; right: 12px; width: auto; bottom: calc(var(--bot-h) + var(--safe-b) + 12px); } }

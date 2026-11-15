@@ -284,3 +284,30 @@ end-to-end, Whisper Groq, auto-reframe (video sintetis), thumbnail, riset tren, 
 - Jangan menulis email pribadi user di file repo.
 - Kalau error muncul saat uji pertama, cek dulu modul di `app/services/` yang sesuai tahapnya; peta
   spesifikasi → file ada di `docs/ARCHITECTURE.md` §6.
+
+## 7. Aturan UX — acuan WAJIB untuk setiap fitur baru (permintaan user, 15 Nov 2026)
+Bagian ini adalah standar pengembangan aplikasi. Fitur/layar baru harus memenuhinya; kode lama yang
+melanggar diperbaiki saat disentuh.
+
+1. **Proses lama tidak boleh mengunci layar.** User harus tetap bisa mengerjakan hal lain selama menunggu.
+   - Setiap proses yang bisa lebih dari ±2 detik (hapus, render, upload, unduh, AI, sinkron Drive, dll.)
+     wajib bisa **dikecilkan (minimize)**. Dialog yang menjalankannya punya tombol **"Kecilkan"**;
+     menekan Esc / menutup dialog = dikecilkan, BUKAN membatalkan.
+   - Selama berjalan wajib ada **indikator loading**: spinner + nama proses + nama item + lama berjalan,
+     di baki `#bgtray` (pojok kanan bawah; di HP di atas tab bawah). Job backend tetap memakai bar status.
+   - Item yang sedang diproses **ditandai & dikunci** (redup + spinner + label proses di daftar; tidak bisa
+     dibuka/diedit/dihapus lagi) sampai prosesnya selesai. Bila item itu sedang terbuka saat dikecilkan,
+     layar pindah ke tempat aman (induknya / halaman awal), jangan menampilkan data yang sedang diubah.
+   - Selesai/gagal → toast singkat (bukan dialog yang menghalangi), kunci dilepas otomatis.
+   - Implementasi: `bgTask(ids, label, judul, fn)` di `web/app.js` (state `S.bg`, `bgTray()`, kelas
+     `li.bg-busy`, `openProject` menolak item terkunci). Contoh lengkap: `deleteProject()`.
+2. **Jangan pakai `confirm()` / `alert()` / `prompt()` bawaan browser untuk aksi penting.** Pakai dialog sendiri
+   (`#modal`) yang menjelaskan apa yang terjadi + pilihan yang relevan (contoh: dialog hapus → nasib video
+   hasil & backup Google Drive). Aksi merusak: tombol merah `button.danger-solid`, pilihan berisiko default mati.
+3. **Mobile & tablet setara desktop.** Uji di 390px (HP), 820px (tablet), ≥1024px (desktop). Target sentuh ≥44px,
+   tidak ada scroll horizontal halaman, panel lebar → dialog/lembar bawah, bukan lipatan panjang.
+4. **Tidak terlihat "buatan AI":** tanpa emoji di UI, tanpa gradien ungu/biru, pakai token warna di `:root`
+   (`style.css`), ikon garis SVG (`<symbol>` di `index.html`), label/angka huruf mono.
+5. **Hapus data harus tuntas & jujur.** Di Windows file yang sedang diputar/di-stream terkunci: pakai
+   `store.remove_tree()` (retry di latar + penanda `.deleted` + `store.purge_deleted()` saat start), lepaskan dulu
+   `<video>/<audio>` item itu di halaman, dan laporkan bila ada sisa (`locked`). Jangan `rmtree(ignore_errors=True)` diam-diam.

@@ -392,8 +392,30 @@ const kidsOf = (pid) => (S.all || []).filter((q) => q.parent === pid).sort((a, b
 const kidStatus = (q) => (readyForUpload(q) ? (q.publish.video_id ? 'sudah diunggah' : 'siap upload')
   : `${labelsFor('clipper')[S.meta.stages[q.current_stage]] || ''}`);
 function openProject(id, tab = null) {
+  if (S.bg[id]) { toast(`Sedang diproses: ${S.bg[id].label}. Tunggu sampai selesai.`); return; }
   if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
   loadProject(id, false, tab);
+}
+
+/* ---- Proses latar (ATURAN UX: proses lama tidak boleh mengunci layar).
+   bgTask(ids, label, fn): item (proyek) ditandai & dikunci (tidak bisa dibuka/diubah) sampai fn selesai,
+   indikator tampil di baki #bgtray. Dialog yang menjalankan proses lama wajib punya tombol "Kecilkan". */
+S.bg = {};
+function bgTray() {
+  const t = $('#bgtray'); if (!t) return;
+  const items = Object.entries(S.bg).filter(([, v], i, a) => a.findIndex(([, w]) => w === v) === i);  // satu baris per tugas
+  t.hidden = !items.length; t.innerHTML = '';
+  items.forEach(([, v]) => t.append(h('div', { class: 'bg-item' }, h('span', { class: 'spin' }),
+    h('span', { class: 'bg-text' }, h('b', {}, v.label), h('small', {}, v.title || '')),
+    h('span', { class: 'bg-time', 'data-start': v.start }, fmtDur((Date.now() - v.start) / 1000)))));
+}
+setInterval(() => document.querySelectorAll('#bgtray .bg-time').forEach((el) => { el.textContent = fmtDur((Date.now() - +el.dataset.start) / 1000); }), 1000);
+async function bgTask(ids, label, title, fn) {
+  const task = { label, title, start: Date.now() };
+  ids.forEach((id) => { S.bg[id] = task; });
+  bgTray(); refreshList().catch(() => {});
+  try { return await fn(); }
+  finally { ids.forEach((id) => { if (S.bg[id] === task) delete S.bg[id]; }); bgTray(); refreshList().catch(() => {}); }
 }
 
 /* Dialog hapus: pengganti confirm() bawaan browser. Pilihan: video hasil Clipper ikut dihapus/dipertahankan,
@@ -409,20 +431,41 @@ function deleteProject() {
     h('span', {}, h('b', {}, title), h('small', { class: 'muted' }, desc)));
   const hasFolder = !!(p.drive || {}).folder_id;
   const ytCount = [p, ...kids].filter((q) => (q.publish || {}).video_id).length;
-  const go = h('button', { class: 'danger-solid', onclick: async () => {
-    go.disabled = true; go.textContent = 'Menghapus…';
+  const go = h('button', { class: 'danger-solid', onclick: () => {
     const q = new URLSearchParams();
-    if (kids.length && opt.kids === 'delete') q.set('with_children', 'true');
+    const withKids = kids.length && opt.kids === 'delete';
+    if (withKids) q.set('with_children', 'true');
     if (opt.drive) q.set('drive', 'true');
-    try {
-      const r = await api('DELETE', `/api/projects/${p.id}${q.toString() ? `?${q}` : ''}`);
-      dlg.close();
-      if (r.drive_error) toast(`${noun[0].toUpperCase() + noun.slice(1)} terhapus, tapi backup Drive gagal dihapus: ${r.drive_error}`, true);
-      else toast(`"${p.title}" terhapus${r.drive_trashed ? ` · ${r.drive_trashed} folder Drive dipindah ke Sampah` : ''}`);
-      lsSet(`lastProject_${p.mode}`, null); lsSet('lastProject_publish', null); lsSet('lastProject', null); S.p = null;
-      if (p.parent) { await refreshList(); loadProject(p.parent, false, 'clipper').catch(() => renderWelcome(S.tab)); }
-      else { renderWelcome(S.tab); refreshList(); }
-    } catch (e) { toast(e.message, true); go.disabled = false; go.textContent = `Hapus ${noun}`; }
+    const ids = [p.id, ...(withKids ? kids.map((k) => k.id) : [])];
+    // tampilan progres di dialog; "Kecilkan" menutup dialog, proses jalan terus di latar
+    const token = {}; S.delDlg = token;
+    body.innerHTML = '';
+    body.append(h('div', { class: 'dl-head' }, h('div', { class: 'dl-kicker' }, `Menghapus ${noun}`), h('h2', {}, p.title || p.id)),
+      h('div', { class: 'bg-progress' }, h('span', { class: 'spin' }),
+        h('span', {}, opt.drive ? 'Menghapus file lokal & memindah backup Drive ke Sampah…' : 'Menghapus file lokal…')),
+      h('p', { class: 'muted small' }, 'Boleh dikecilkan — proyek ini dikunci sampai selesai, Anda bisa mengerjakan yang lain.'),
+      h('div', { class: 'dl-actions' }, h('button', { class: 'primary', onclick: () => minimize() }, 'Kecilkan')));
+    const minimize = () => {
+      S.delDlg = null; dlg.close();
+      if (S.p && ids.includes(S.p.id)) {  // jangan biarkan layar menampilkan proyek yang sedang dihapus
+        S.p = null; S.dirty = false;
+        lsSet(`lastProject_${p.mode}`, null); lsSet('lastProject_publish', null); lsSet('lastProject', null);
+        if (p.parent) loadProject(p.parent, false, 'clipper').catch(() => renderWelcome(S.tab)); else renderWelcome(S.tab);
+      }
+    };
+    dlg.addEventListener('close', () => { if (S.delDlg === token) minimize(); }, { once: true });  // Esc = kecilkan
+    // Windows mengunci file yang sedang diputar → lepaskan dulu video/audio proyek ini dari halaman
+    document.querySelectorAll('video, audio').forEach((m) => {
+      if (ids.some((id) => (m.currentSrc || m.src || '').includes(`/media/${id}/`))) { m.pause(); m.removeAttribute('src'); m.load(); }
+    });
+    bgTask(ids, `Menghapus ${noun}`, p.title, () => api('DELETE', `/api/projects/${p.id}${q.toString() ? `?${q}` : ''}`))
+      .then((r) => {
+        if (S.delDlg === token) minimize();
+        if (r.drive_error) toast(`${noun[0].toUpperCase() + noun.slice(1)} terhapus, tapi backup Drive gagal dihapus: ${r.drive_error}`, true);
+        else toast(`"${p.title}" terhapus${r.drive_trashed ? ` · ${r.drive_trashed} folder Drive dipindah ke Sampah` : ''}${r.locked ? ' · beberapa file masih terkunci, dibersihkan otomatis sebentar lagi' : ''}`);
+        if (S.tab !== 'publish' && !S.p && !p.parent) renderWelcome(S.tab);
+      })
+      .catch((e) => { if (S.delDlg === token) { S.delDlg = null; dlg.close(); } toast(`Gagal menghapus "${p.title}": ${e.message}`, true); });
   } }, `Hapus ${noun}`);
   body.append(
     h('div', { class: 'dl-head' }, h('div', { class: 'dl-kicker' }, `Hapus ${noun}`), h('h2', {}, p.title || p.id),
@@ -1589,11 +1632,13 @@ async function refreshList() {
     const status = kids.length && isContainer(p)
       ? `${kids.length} video · ${kids.filter((q) => readyForUpload(q)).length} siap upload`
       : readyForUpload(p) ? (p.publish.video_id ? 'sudah diunggah' : 'siap upload') : labelsFor(p.mode)[S.meta.stages[p.current_stage]];
-    ul.append(h('li', { class: S.p && S.p.id === p.id ? 'active' : '', onclick: () => openProject(p.id) },
+    const bg = S.bg[p.id];
+    ul.append(h('li', { class: `${S.p && S.p.id === p.id ? 'active' : ''} ${bg ? 'bg-busy' : ''}`, onclick: () => openProject(p.id) },
       h('div', {}, p.title),
-      h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'} · ${status}`),
+      bg ? h('div', { class: 'small bg-label' }, h('span', { class: 'spin' }), bg.label)
+        : h('div', { class: 'muted small' }, `${p.format === 'short' ? 'Short' : 'Long'} · ${status}`),
       kids.length && isContainer(p) ? null : h('div', { class: 'pbar' }, h('i', { style: `width:${Math.min(done, PUB) / PUB * 100}%` }))));
-    if (openGroup) kids.forEach((q, n) => ul.append(h('li', { class: `child ${S.p.id === q.id ? 'active' : ''}`, onclick: () => openProject(q.id) },
+    if (openGroup) kids.forEach((q, n) => ul.append(h('li', { class: `child ${S.p.id === q.id ? 'active' : ''} ${S.bg[q.id] ? 'bg-busy' : ''}`, onclick: () => openProject(q.id) },
       h('div', { class: 'small' }, `↳ ${n + 1}. ${q.title}`), h('div', { class: 'muted small' }, kidStatus(q)))));
   });
 }
