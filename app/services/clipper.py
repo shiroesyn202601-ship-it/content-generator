@@ -59,10 +59,26 @@ def transcribe(pid: str, params: dict, progress) -> dict:
 
     def apply(p):
         p["script"]["transcript"] = tr
+        # transkrip baru → hasil sunting lama tidak berlaku (kamus kreator tetap dipakai)
+        for k in ("transcript_raw", "transcript_fixes", "proof_cache", "context", "proof_reject", "transcript_rejected"):
+            p["script"].pop(k, None)
         store.touch_stage(p, "script")
         store.log(p, f"Whisper: {len(tr['segments'])} segmen")
     store.update(pid, apply)
-    return {"segments": len(tr["segments"])}
+    out = {"segments": len(tr["segments"])}
+    if params.get("proofread", True):  # langsung disunting AI dengan konteks percakapan sebelum dicari momennya
+        out.update(proofread_safe(pid, progress))
+    return out
+
+
+def proofread_safe(pid: str, progress) -> dict:
+    """Sunting transkrip; gagal (kuota AI habis dll.) tidak menghentikan Clipper — transkrip mentah tetap dipakai."""
+    from . import proofread
+    try:
+        return proofread.run(pid, {}, progress)
+    except llm.LLMError as e:
+        progress(f"Sunting transkrip dilewati ({str(e)[:100]}) — memakai transkrip Whisper apa adanya")
+        return {"fixes": 0, "failed": 1}
 
 
 def dedupe_segments(segments: list[dict]) -> list[dict]:
@@ -275,13 +291,13 @@ def _mark_signals(p: dict, units: list[dict], progress) -> list[dict]:
 
 
 def _rerank(clips: list[dict], units: list[dict], title: str, lang: str, direction: str, heat: list[dict],
-            progress) -> list[dict]:
+            progress, context: dict | None = None) -> list[dict]:
     """Babak final: satu model membandingkan semua kandidat berdampingan (skor antar-bagian jadi setara).
     Skor akhir = 60% rerank + 40% skor bagian (+ bonus maks 10 dari heatmap YouTube). Gagal → urutan lama."""
     if len(clips) < 3:
         return clips
     progress(f"Babak final: AI membandingkan {len(clips)} kandidat berdampingan…")
-    sys_, usr = prompts.rerank_clips(clips, units, title, lang, direction)
+    sys_, usr = prompts.rerank_clips(clips, units, title, lang, direction, context)
     try:
         rk = llm.chat_json(sys_, usr, temperature=0.2).get("ranking") or []
     except llm.LLMError as e:
@@ -356,7 +372,8 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     for c in cands:  # klip yang tumpang-tindih ≥25% dengan klip berskor lebih tinggi dibuang
         if all(_overlap(c, o) < 0.25 for o in clips):
             clips.append(c)
-    clips = _rerank(clips[:max(want + 4, 12)], units, title, p["language"], direction, heat, progress)
+    clips = _rerank(clips[:max(want + 4, 12)], units, title, p["language"], direction, heat, progress,
+                    p["script"].get("context"))
     # ID stabil (dari rentang waktu), supaya "Cari Momen" ulang tidak menukar klip yang sudah jadi video
     # Klip lama dengan rentang (hampir) sama memakai ID lamanya → video hasil yang sudah ada tetap tertaut.
     old = p["script"].get("clips") or []
@@ -404,8 +421,10 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
 
     def key(ws, we):
         txt = "|".join(u["text"] + u.get("sig", "") for u in units[ws:we])
-        return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{limits}|{txt}".encode()).hexdigest()[:16]
+        return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{limits}|{bool(ctx.get('summary'))}|{txt}"
+                            .encode()).hexdigest()[:16]
 
+    ctx = p["script"].get("context") or {}
     cache = dict(p["script"].get("clip_cache") or {})
     todo = [(k, ws, we) for k, (ws, we) in enumerate(wins) if key(ws, we) not in cache]
     raw = [c for ws, we in wins for c in cache.get(key(ws, we), [])]
@@ -438,7 +457,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
             except queue.Empty:
                 continue  # bagian sedang dikerjakan model lain (bisa dikembalikan bila kena batas)
             sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
-                                            count=per_win, direction=direction, limits=limits)
+                                            count=per_win, direction=direction, limits=limits, context=ctx)
             try:
                 # tanpa schema strict: jawaban panjang gpt-oss sering gagal validasi & membakar kuota token
                 got = llm.chat_json(sys_, usr, "groq" if model else provider, temperature=0.4,
@@ -498,7 +517,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
             errors.clear()
             for k, ws, we in retry:
                 sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
-                                                count=per_win, direction=direction, limits=limits)
+                                                count=per_win, direction=direction, limits=limits, context=ctx)
                 try:
                     got = [c for c in llm.chat_json(sys_, usr, others[0], temperature=0.4, skip=("groq",))
                            .get("clips", []) if isinstance(c, dict)]
@@ -567,7 +586,9 @@ def fork_clip(src_pid: str, idx: int) -> dict:
     p = store.new_project("clipper", src["format"], "", language=src["language"], parent=src_pid)
     p.update({"title": clip.get("title") or src["title"], "current_stage": 1, "voice": src["voice"]})
     p["research"] = src["research"]
-    p["script"] = {**src["script"], "selected_clip": idx, "clip_cache": {}}
+    p["script"] = {k: v for k, v in src["script"].items() if k not in ("transcript_raw", "proof_cache", "transcript_fixes",
+                                                                  "transcript_rejected")}
+    p["script"].update({"selected_clip": idx, "clip_cache": {}})
     tr = src["script"].get("transcript") or {}
     if tr.get("segments"):  # transkrip penuh video 1 jam ±1 MB → anak cukup ±90 dtk di sekitar klipnya
         lo_t, hi_t = clip["start"] - 90, clip["end"] + 90
@@ -734,7 +755,11 @@ def auto_clip(pid: str, params: dict, progress) -> dict:
         return lambda m: progress(f"[{n}/4] {label}: {m}")
 
     p = store.load(pid)
-    opts = {**(p.get("autoclip") or {}), **{k: v for k, v in params.items() if k != "url"}}
+    opts = {**(p.get("autoclip") or {}), **{k: v for k, v in params.items() if k not in ("url", "_retry")}}
+    # "Buat Klip" dari UI membawa opsi (durasi/jumlah/template…) = rencana baru. "Jalankan ulang" job yang terputus
+    # (params kosong / hanya url & _retry) = LANJUTAN: momen terpilih sebelumnya diselesaikan, tidak ditambah.
+    if not params.get("_retry") and set(params) - {"url", "_retry"}:
+        opts.pop("picked", None)
     store.update(pid, lambda q: q.update({"autoclip": {**opts, "status": "running"}}))
     try:
         if params.get("url") and not (p["research"].get("source") or {}).get("path"):
@@ -746,22 +771,40 @@ def auto_clip(pid: str, params: dict, progress) -> dict:
             raise RuntimeError("Video belum ada — tempel link atau unggah file.")
         if p["stage_status"].get("research") != "approved":
             store.update(pid, lambda q: store.approve(q, "research"))
-        if not (p["script"].get("transcript") or {}).get("segments"):
+        tr = p["script"].get("transcript") or {}
+        if not tr.get("segments"):
             transcribe(pid, {}, step(2, "Transkrip"))
+        elif not tr.get("proofread") or tr["proofread"].get("failed"):
+            proofread_safe(pid, step(2, "Menyunting transkrip"))
         else:
-            progress("[2/4] Transkrip sudah ada")
-        lim = DURATIONS.get(opts.get("duration") or "auto")
-        fp = {"direction": opts.get("direction") or ""}
-        if lim:
-            fp.update({"lo": lim[0], "hi": lim[1]})
-        find_clips(pid, fp, step(3, "Mencari momen viral"))
+            progress("[2/4] Transkrip sudah ada & sudah disunting")
+        # Klip yang sudah jadi video = anak yang SUDAH punya hasil render. Anak tanpa render (terputus di tengah,
+        # mis. server restart) dihapus lalu dibuat ulang — kalau tidak, momen itu dianggap selesai selamanya.
+        kids = [q for q in store.list_projects() if q.get("parent") == pid]
+        done_ids = {q.get("clip_id") for q in kids if q.get("output")}
+        broken = [q for q in kids if not q.get("output")]
+        p = store.load(pid)
+        plan = opts.get("picked") or []  # opts, bukan p lama: "Buat Klip" baru sudah membuang rencana sebelumnya
+        if plan and p["script"].get("clips"):
+            # percobaan ulang: lanjutkan rencana awal — tidak mencari momen lagi & tidak menambah klip baru
+            progress("[3/4] Momen sudah dipilih sebelumnya — melanjutkan klip yang belum jadi")
+        else:
+            lim = DURATIONS.get(opts.get("duration") or "auto")
+            fp = {"direction": opts.get("direction") or ""}
+            if lim:
+                fp.update({"lo": lim[0], "hi": lim[1]})
+            find_clips(pid, fp, step(3, "Mencari momen viral"))
         p = store.load(pid)
         clips = p["script"]["clips"]
-        n = int(opts.get("count") or 0) or len(clips)
-        # klip yang sudah jadi video (mis. percobaan sebelumnya sempat gagal di tengah) tidak dibuat ulang
-        done_ids = {q.get("clip_id") for q in store.list_projects() if q.get("parent") == pid}
-        idx = [i for i in sorted(range(len(clips)), key=lambda i: -(clips[i].get("score") or 0))
-               if clips[i].get("id") not in done_ids][:n]
+        if not plan:
+            n = int(opts.get("count") or 0) or len(clips)
+            plan = [clips[i]["id"] for i in sorted(range(len(clips)), key=lambda i: -(clips[i].get("score") or 0))
+                    if clips[i].get("id") not in done_ids][:n]
+            store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"picked": plan}))
+        idx = [i for i, c in enumerate(clips) if c.get("id") in plan and c.get("id") not in done_ids]
+        for q in broken:
+            if q.get("clip_id") in {clips[i]["id"] for i in idx}:
+                store.remove_tree(store.project_dir(q["id"]))
         if not idx:
             progress("[4/4] Semua klip terbaik sudah jadi video")
             store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"status": "done", "error": ""}))

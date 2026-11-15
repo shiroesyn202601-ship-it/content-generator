@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, brand, longform, shorts, enhance, usage, clipper, fonts, prompts, render, research, scriptgen, story,
+from .services import (assets, audio_lib, batch, brand, longform, shorts, enhance, usage, clipper, fonts, prompts, proofread, render, research, scriptgen, story,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
@@ -83,6 +83,7 @@ ACTIONS = {
     "script.narrate":      (scriptgen.narrate, "script", True),
     "script.split":        (scriptgen.split, "script", True),
     "script.transcribe":   (clipper.transcribe, "script", True),
+    "script.proofread":    (proofread.run, "script", True),     # Clipper: sunting transkrip dengan konteks
     "script.find_clips":   (clipper.find_clips, "script", True),
     "assets.search":       (assets.search_scene, "assets", True),
     "assets.select":       (assets.select_candidate, "assets", True),

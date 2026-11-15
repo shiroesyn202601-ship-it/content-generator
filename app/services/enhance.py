@@ -23,7 +23,7 @@ from pathlib import Path
 
 from .. import config, store
 from . import ffmpeg_utils as ff
-from . import llm, usage
+from . import llm, prompts, usage
 
 DEFAULTS = {"commentary": "both",   # both | intro | outro | off
             "persona": "",          # gaya bicara kreator, mis. "santai, kritis, sedikit humor"
@@ -155,7 +155,9 @@ def make_plan(p: dict, words: list[dict], sents: list[list[int]], opts: dict, pr
     persona = opts.get("persona") or "santai, kritis, jujur, sedikit humor — seperti teman yang paham topiknya"
     user = (f"Judul video sumber: {src.get('title', '')}\nChannel sumber: {src.get('channel', '')}\n"
             f"Judul klip: {clip.get('title', '')}\nHook klip: {clip.get('hook', '')}\n"
-            f"Gaya bicara kreator: {persona}\n\nTranskrip klip per kalimat:\n{numbered}")
+            f"Gaya bicara kreator: {persona}\n"
+            f"{prompts.video_context(p['script'].get('context'), clip.get('start'), clip.get('end'))}"
+            f"\nTranskrip klip per kalimat:\n{numbered}")
     progress("AI menyusun komentar, konteks & B-roll…")
     raw = llm.chat_json(PLAN_SYS, user, temperature=0.8, effort="low")
     return _clean_plan(raw, len(sents))

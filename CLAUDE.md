@@ -289,6 +289,26 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       setujui tahap sisa sampai thumbnail (long tanpa naskah → ditulis per bab dulu).
     - Dialog konfirmasi sendiri `askDialog(title, text, okLabel, danger)` (pengganti `confirm()`).
 
+20. **15 Nov 2026 — Clipper memahami konteks: sunting transkrip sebelum cari momen** (keluhan user: potongan tidak
+    paham konteks). Dulu transkrip Whisper mentah langsung dinilai per bagian, tiap bagian tanpa tahu isi video.
+    Alur kini: unduh → Whisper → **`proofread.py`** → cari momen. Dipanggil otomatis di akhir `clipper.transcribe`
+    (`proofread_safe`: gagal kuota tidak menghentikan Clipper) & di langkah [2/4] `auto_clip` bila belum/gagal sebagian.
+    - Konteks (1 panggilan): judul/channel/deskripsi/chapter + cuplikan merata transkrip → `script.context`
+      {topic, format, summary, speakers, glossary}; + `outline` per bagian (ringkasan tiap potongan koreksi).
+    - Koreksi paralel per ±6rb karakter (lane Groq `clipper._lanes`): AI hanya mengembalikan `{n, from, to, why}`, kode
+      mengganti kata ber-timestamp (`_replace_at`, waktu dibagi per panjang huruf) + teks segmen. Effort "medium" lalu
+      otomatis "low" bila 400 json_validate_failed ("medium" saja = 17 mnt untuk video 62 mnt; kini ±1-2 mnt).
+    - Pengaman (`_ok_fix`): alasan ragu dibuang; HAPUS ucapan hanya untuk halusinasi jelas (`HALU`/huruf non-Latin);
+      tolak yang cuma menambah/membuang kata; bagian yang berubah harus mirip bunyi (`MIN_SIMILAR` 0.55 — menolak
+      "Gunaderma"→"Gadjah Mada"). Transkrip asli di `script.transcript_raw`, sunting selalu mulai dari situ;
+      cache per bagian `proof_cache`. Kamus kreator `transcript_dict` (ganti di seluruh transkrip, tanpa AI) dan
+      batal per koreksi `proof_reject` (`reject`/`unreject`). UI: `proofPanel` di Mode lanjutan. Anak tidak membawa
+      transcript_raw/cache.
+    - `prompts.video_context(ctx, t0, t1)` masuk ke `viral_clips` (+ "sebelum bagian ini" / "bagian ini membahas"),
+      `rerank_clips`, dan rencana `enhance`. Aturan baru: klip harus masuk akal tanpa menonton video asli.
+    - `auto_clip` dijalankan ulang (`_retry` dari tombol "Jalankan ulang" sesi lain) = lanjutkan `autoclip.picked`
+      (tidak cari momen lagi); anak tanpa `output` dihapus & dibuat ulang.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

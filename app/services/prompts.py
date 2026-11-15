@@ -423,8 +423,33 @@ Balas JSON: {{"picks": [{{"id": "s1", "index": 0, "fit": "cocok", "reason": "...
     return system, user
 
 
+def video_context(ctx: dict | None, t0: float | None = None, t1: float | None = None) -> str:
+    """Blok konteks seluruh video (hasil proofread.py) untuk prompt Clipper. t0/t1 = rentang bagian yang sedang
+    dinilai → ditambah "apa yang dibahas sebelumnya" supaya AI tahu posisi bagian ini dalam cerita besar."""
+    if not ctx or not (ctx.get("summary") or ctx.get("topic")):
+        return ""
+    sp = "; ".join(f"{s['name']} ({s['role']})" if s.get("role") else s["name"]
+                   for s in ctx.get("speakers") or [] if s.get("name"))
+    out = ["KONTEKS SELURUH VIDEO (pahami dulu sebelum memilih):"]
+    if ctx.get("topic"):
+        out.append(f"- Topik: {ctx['topic']}" + (f" ({ctx['format']})" if ctx.get("format") else ""))
+    if ctx.get("summary"):
+        out.append(f"- Alur: {ctx['summary']}")
+    if sp:
+        out.append(f"- Pembicara: {sp}")
+    ol = ctx.get("outline") or []
+    if t0 is not None and ol:
+        prev = [o for o in ol if o["end"] <= t0 + 2][-2:]
+        here = [o for o in ol if o["end"] > t0 and o["start"] < (t1 if t1 is not None else t0)]
+        if prev:
+            out.append("- Sebelum bagian ini: " + " ".join(o["summary"] for o in prev))
+        if here:
+            out.append("- Bagian ini membahas: " + " ".join(o["summary"] for o in here))
+    return "\n".join(out) + "\n"
+
+
 def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int = 0, count: int = 5,
-                direction: str = "", limits: tuple | None = None) -> tuple[str, str]:
+                direction: str = "", limits: tuple | None = None, context: dict | None = None) -> tuple[str, str]:
     """Rubrik penilaian klip (diadaptasi dari Anil-matcha & openshorts). Satuan = kalimat bernomor,
     jadi AI memilih nomor kalimat, bukan menebak detik."""
     lo, hi = limits or ((20, 59) if fmt == "short" else (90, 600))
@@ -439,14 +464,20 @@ def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int 
     system = ("Kamu editor klip viral profesional untuk YouTube Shorts/TikTok. Kamu jujur menilai: "
               "kebanyakan bagian video BIASA saja, hanya sedikit yang benar-benar layak diklip.")
     arah = f"\nARAHAN KREATOR (utamakan ini): {direction.strip()}\n" if direction.strip() else ""
-    user = f"""Video sumber: "{title}". Transkrip per KALIMAT bernomor ([nomor] menit:detik mulai):
+    ctx = video_context(context, units[0]["start"], units[-1]["end"]) if units else ""
+    user = f"""Video sumber: "{title}".
+{ctx}
+Transkrip (sudah dikoreksi) per KALIMAT bernomor ([nomor] menit:detik mulai):
 {lines}
 {arah}{tanda}
 Pilih sampai {count} momen terbaik. Setiap klip:
 - mulai di kalimat "start_unit" dan berakhir di kalimat "end_unit" (nomor di kurung siku), durasi {lo}-{hi} detik (hitung dari waktu mulai kalimat);
 - kalimat PERTAMA harus bisa dipahami tanpa konteks sebelumnya (jangan mulai dengan "jadi", "nah itu", "makanya",
   "dia" yang merujuk hal sebelumnya) dan langsung memancing rasa penasaran;
-- kalimat TERAKHIR terasa tuntas (punchline, kesimpulan, jawaban) — jangan berhenti di tengah cerita.
+- kalimat TERAKHIR terasa tuntas (punchline, kesimpulan, jawaban) — jangan berhenti di tengah cerita;
+- klip harus masuk akal bagi penonton yang TIDAK menonton video aslinya. Pahami siapa bicara & apa yang sedang
+  dibahas: bila momen kuat merujuk hal sebelumnya ("itu", "dia", "tadi"), mulai lebih awal agar rujukannya ikut,
+  atau lewati momen itu. Pertanyaan + jawabannya harus ada dalam satu klip.
 
 Nilai tiap klip 0-100 (jujur; 80+ hanya untuk yang benar-benar kuat):
 - "hook": seberapa kuat 3 detik pertama menahan penonton (pertanyaan, klaim mengejutkan, konflik, emosi);
@@ -461,7 +492,8 @@ Balas JSON: {{"clips": [{{"start_unit": 0, "end_unit": 5, "title": "...", "hook"
     return system, user
 
 
-def rerank_clips(cands: list[dict], units: list[dict], title: str, lang: str, direction: str = "") -> tuple[str, str]:
+def rerank_clips(cands: list[dict], units: list[dict], title: str, lang: str, direction: str = "",
+                 context: dict | None = None) -> tuple[str, str]:
     """Babak final: SEMUA kandidat dibandingkan berdampingan oleh satu model → skor setara antar-bagian video
     (tiap bagian tadinya dinilai model berbeda, jadi skor mentahnya tidak bisa dibandingkan langsung)."""
     def txt(c):
@@ -470,12 +502,14 @@ def rerank_clips(cands: list[dict], units: list[dict], title: str, lang: str, di
     rows = "\n\n".join(f"#{i} ({c['end'] - c['start']:.0f} dtk) judul: {c['title']}\n{txt(c)}" for i, c in enumerate(cands))
     arah = f"\nARAHAN KREATOR: {direction.strip()}" if direction.strip() else ""
     system = "Kamu kurator Shorts/TikTok yang sangat selektif. Bandingkan kandidat secara berdampingan dan jujur."
-    user = f"""Video sumber: "{title}". Berikut {len(cands)} kandidat klip (#nomor, durasi, judul, isi ucapan):
+    user = f"""Video sumber: "{title}".
+{video_context(context)}
+Berikut {len(cands)} kandidat klip (#nomor, durasi, judul, isi ucapan):
 
 {rows}
 {arah}
 Beri tiap kandidat skor 0-100: seberapa besar peluangnya ditonton sampai habis & dibagikan, DIBANDINGKAN kandidat lain
-(hook 3 detik pertama, cerita utuh & tuntas, emosi/humor/insight, bisa dipahami tanpa konteks).
+(hook 3 detik pertama, cerita utuh & tuntas, emosi/humor/insight, bisa dipahami tanpa menonton video aslinya).
 Sebar skornya (yang terbaik 85+, yang biasa < 50). Bahasa alasan: {LANG_NAME.get(lang, lang)}.
 Balas JSON: {{"ranking": [{{"n": 0, "score": 80, "why": "alasan singkat"}}]}}"""
     return system, user

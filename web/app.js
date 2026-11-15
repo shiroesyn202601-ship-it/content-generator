@@ -83,8 +83,8 @@ const ACTION_LABEL = {
   'research.auto_clip': 'Membuat klip',
   'research.shorts_batch': 'Shorts massal', 'research.autopilot': 'Lanjutkan otomatis', 'script.longform': 'Menulis naskah per bab',
   'assets.story_setup': 'Menyusun karakter & prompt', 'assets.story_chars': 'Membuat gambar karakter',
-  'assets.story_scenes': 'Membuat gambar scene', 'script.transcribe': 'Transkrip audio (Whisper)',
-  'script.find_clips': 'Mencari momen viral', 'assets.search': 'Mencari stock footage',
+  'assets.story_scenes': 'Membuat gambar scene', 'script.transcribe': 'Transkrip & sunting',
+  'script.find_clips': 'Mencari momen viral', 'script.proofread': 'Menyunting transkrip', 'assets.search': 'Mencari stock footage',
   'assets.select': 'Memasang aset', 'assets.auto_all': 'Mengisi aset semua scene',
   'assets.cut_clip': 'Memotong klip', 'audio.render_vo': 'Membuat voice over',
   'audio.auto_plan': 'Memilih musik & SFX', 'subtitles.build': 'Membuat subtitle',
@@ -937,8 +937,9 @@ function rScriptClipper() {
   if (child) {
     box.append(hint('Ini satu video hasil dari proyek sumber. Atur waktu & bingkai klip ini, potong, lalu "Setujui & Lanjut". Klip lain & video baru dibuat di proyek sumber (link ← di atas).'));
   } else box.append(h('div', { class: 'row' },
-    btn('1 · Transkrip (Whisper)', () => runAction('script.transcribe'), d.transcript ? '' : 'primary'),
-    btn('2 · Cari Momen Viral (AI)', () => runAction('script.find_clips', { direction: d.direction || '' }), d.transcript ? 'primary' : ''),
+    btn('1 · Transkrip + sunting', () => runAction('script.transcribe'), d.transcript ? '' : 'primary'),
+    d.transcript ? btn('2 · Sunting ulang (AI)', () => runAction('script.proofread'), (d.transcript.proofread ? '' : 'primary')) : null,
+    btn('3 · Cari Momen Viral (AI)', () => runAction('script.find_clips', { direction: d.direction || '' }), d.transcript && d.transcript.proofread ? 'primary' : ''),
     btn('+ Klip manual', () => { d.clips = d.clips || []; const t = vid.currentTime || 0; d.clips.push({ id: `m${Date.now().toString(36)}`, start: t, end: t + 30, title: 'Klip manual', hook: '', reason: '', score: 0, keywords: [] }); markDirty(); render(); }, 'ghost')));
   if (!child) box.append(field('Arahan AI (opsional)', d, 'direction', { placeholder: 'mis. cari momen lucu / fokus ke tips praktis / bagian tentang modal usaha' }));
   if (!child) box.append(hint('AI menilai tiap momen 0-100 dari hook, alur, nilai, dan potensi dibagikan. Klip selalu mulai & berakhir di batas kalimat (ditambah jeda napas), jadi tidak ada kata yang terpotong. Setelah mengubah waktu manual, klik "Snap".'));
@@ -986,6 +987,7 @@ function rScriptClipper() {
       c.reason ? h('div', { class: 'muted small' }, 'Alasan AI: ', c.reason) : null,
       sel === i && !container ? cutPanel(c) : null));
   });
+  if (d.transcript && !child) box.append(proofPanel(d, vid));
   if (d.transcript) {
     const segs = d.transcript.segments || [];
     box.append(h('details', {}, h('summary', {}, `Transkrip (${segs.length} segmen, bahasa: ${d.transcript.language})`),
@@ -997,6 +999,46 @@ function rScriptClipper() {
           btn('⇥ akhir', () => { d.clips[sel].end = s.end; markDirty(); render(); }, 'small ghost')) : null)))));
   }
   return box;
+}
+
+/* Hasil sunting transkrip (proofread.py): konteks video yang dipahami AI, koreksi per kata, dan kamus koreksi
+   kreator (diterapkan ke seluruh transkrip tanpa AI, juga ikut dipakai setiap kali disunting ulang). */
+function proofPanel(d, vid) {
+  const ctx = d.context || {}, fx = d.transcript_fixes || [], pr = d.transcript.proofread;
+  const kamus = d.transcript_dict || [];
+  const from = h('input', { placeholder: 'tertulis, mis. joko we' }), to = h('input', { placeholder: 'seharusnya, mis. Jokowi' });
+  const sp = (ctx.speakers || []).map((x) => x.role ? `${x.name} (${x.role})` : x.name).join(' · ');
+  const title = !pr ? 'Transkrip belum disunting — klik "Sunting ulang (AI)" supaya AI memahami konteks dulu'
+    : `Transkrip sudah disunting · ${fx.filter((f) => f.by === 'ai').length} koreksi AI`
+      + (kamus.length ? ` · ${kamus.length} kata di kamus` : '') + (pr.failed ? ` · ${pr.failed} bagian belum dicek (kuota)` : '');
+  return h('details', { class: 'card' }, h('summary', {}, h('b', {}, title)),
+    ctx.summary ? h('div', { class: 'small' }, h('b', {}, 'Yang dipahami AI: '), ctx.topic ? `${ctx.topic}. ` : '', ctx.summary) : null,
+    sp ? h('div', { class: 'small' }, h('b', {}, 'Pembicara: '), sp) : null,
+    (ctx.glossary || []).length ? h('div', { class: 'row small' }, h('b', {}, 'Nama & istilah:'),
+      ctx.glossary.slice(0, 30).map((g) => h('span', { class: 'chip' }, g))) : null,
+    fx.length ? h('div', { class: 'scroll' }, fx.map((f) => h('div', { class: 'segment' },
+      h('span', { class: 't', onclick: () => { vid.currentTime = f.t; vid.play(); } }, fmtT(f.t)),
+      h('span', { class: 'grow' }, h('s', { class: 'muted' }, f.from), ' → ', h('b', {}, f.to || '(dihapus)'),
+        f.why ? h('span', { class: 'muted small' }, ` — ${f.why}`) : null),
+      f.by === 'ai' ? h('a', { href: '#', class: 'small', title: 'Koreksi ini salah — kembalikan ke tulisan asli Whisper',
+        onclick: (e) => { e.preventDefault(); runAction('script.proofread', { ai: false, reject: { t: f.t, from: f.from } }); } }, 'batalkan') : null))) : null,
+    (d.transcript_rejected || []).length ? h('details', {}, h('summary', { class: 'small' }, `Koreksi yang dibatalkan (${d.transcript_rejected.length})`),
+      d.transcript_rejected.map((f) => h('div', { class: 'segment' }, h('span', { class: 't' }, fmtT(f.t)),
+        h('span', { class: 'grow' }, `${f.from} → ${f.to || '(dihapus)'}`),
+        h('a', { href: '#', class: 'small', onclick: (e) => { e.preventDefault();
+          runAction('script.proofread', { ai: false, unreject: { t: f.t, from: f.from } }); } }, 'pakai lagi')))) : null,
+    h('div', { class: 'small' }, h('b', {}, 'Kamus koreksi'),
+      h('span', { class: 'muted' }, ' — kata yang masih salah? Tambahkan di sini, diganti di seluruh transkrip & subtitle.')),
+    kamus.length ? h('div', { class: 'row small' }, kamus.map((k, i) => h('span', { class: 'chip' }, `${k.from} → ${k.to || '(hapus)'} `,
+      h('a', { href: '#', title: 'Hapus dari kamus', onclick: (e) => { e.preventDefault();
+        runAction('script.proofread', { ai: false, dict: kamus.filter((_, j) => j !== i) }); } }, 'hapus')))) : null,
+    h('div', { class: 'row' }, from, to, btn('Tambah & terapkan', () => {
+      if (!from.value.trim()) return toast('Isi kata yang tertulis salah dulu', true);
+      runAction('script.proofread', { ai: false, replace: [{ from: from.value.trim(), to: to.value.trim() }] });
+    }, 'small')),
+    h('div', { class: 'row' },
+      btn('Sunting ulang dari awal (AI)', () => runAction('script.proofread', { force: true }), 'small ghost'),
+      h('span', { class: 'muted small' }, 'Transkrip asli Whisper tetap disimpan; sunting selalu dimulai dari situ.')));
 }
 
 // ================================================================ TAHAP 3 — Cerita AI
@@ -1713,7 +1755,7 @@ async function refreshList() {
 /* Satu halaman: tempel link → "Buat Klip" → galeri klip jadi. Wizard per tahap tetap ada sebagai
    "Mode lanjutan" & untuk mengedit satu klip. */
 S.adv = {};
-const CLIP_PHASES = ['Mengunduh video', 'Transkrip suara', 'Mencari momen viral', 'Membuat klip'];
+const CLIP_PHASES = ['Mengunduh video', 'Transkrip & sunting', 'Mencari momen viral', 'Membuat klip'];
 const clipOpts = () => {
   let o = {};
   try { o = JSON.parse(lsGet('clipOpts') || '{}'); } catch (_) {}
