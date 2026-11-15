@@ -266,6 +266,15 @@ a.btnlike { border: 1px solid var(--line); background: var(--panel2); color: var
 .more-moments > summary { cursor: pointer; font-weight: 600; }
 .mm-row { display: flex; gap: 10px; align-items: center; padding: 8px 0; border-top: 1px solid var(--line); }
 
+/* ---- langkah "Atur tampilan" sebelum membuat klip ---- */
+.clip-setup { display: grid; gap: 12px; max-width: 1200px; }
+.clip-setup h1 { margin: 2px 0; }
+.cs-src { font-size: 13px; word-break: break-all; padding: 8px 12px; border: 1px solid var(--line); border-radius: 8px; background: var(--panel); }
+.cs-step h2 { margin: 0 0 4px; font-size: 17px; }
+.cs-go { display: flex; justify-content: space-between; gap: 10px; position: sticky; bottom: 0; padding: 12px 0;
+  background: linear-gradient(transparent, var(--bg) 35%); }
+.cs-go .ch-go { min-width: 220px; }
+
 /* ---- nilai tambah Clipper ---- */
 .enh-opts { display: grid; gap: 10px; margin-top: 8px; }
 .enh-flags { display: grid; grid-template-columns: repeat(auto-fill, minmax(230px, 1fr)); gap: 6px 14px; }
@@ -283,7 +292,18 @@ a.btnlike { border: 1px solid var(--line); background: var(--panel2); color: var
 .bp-prev .bp-bg { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; }
 .bp-prev .bp-layer { position: absolute; height: auto; pointer-events: none; }
 .bp-prev .bp-sub { position: absolute; left: 0; right: 0; bottom: 28%; text-align: center; font: 800 13px Arial; color: #fff; text-shadow: 0 0 3px #000, 0 0 3px #000; }
-.bp-prev .bp-off { position: absolute; left: 6px; right: 6px; top: 6px; padding: 3px 6px; border-radius: 6px; background: rgba(200,40,40,.85); color: #fff; font: 700 11px Arial; text-align: center; }
+.bp-prev .bp-off { position: absolute; right: 6px; top: 6px; width: 24px; height: 24px; display: grid; place-items: center; border-radius: 50%; background: rgba(200,40,40,.9); color: #fff; font-size: 12px; }
+.bp-prev .bp-tint { inset: 0; }
+.bp-thumb { width: 40px; height: 40px; object-fit: contain; border-radius: 6px; background: repeating-conic-gradient(#3a3f4a 0 25%, #2a2e36 0 50%) 0 0 / 12px 12px; flex: none; }
+.bp-icon { display: grid; gap: 8px; padding: 10px; border: 1px solid var(--line); border-radius: 10px; }
+.bp-colors { flex-wrap: wrap; gap: 5px; }
+.bp-swatch { width: 24px; height: 24px; min-width: 0; padding: 0; border-radius: 50%; border: 2px solid var(--line); }
+.bp-swatch.on { outline: 2px solid var(--accent); outline-offset: 1px; }
+.bp-colors input[type=color] { width: 30px; height: 26px; padding: 0; border: none; background: none; }
+.bp-styles { display: grid; grid-template-columns: repeat(4, 1fr); gap: 5px; }
+.bp-style { display: grid; gap: 3px; justify-items: center; padding: 4px; }
+.bp-style.on { border-color: var(--accent); box-shadow: 0 0 0 1px var(--accent); }
+.bp-sw { width: 30px; height: 44px; border-radius: 4px; background-color: #8a94a6; border: 1px solid var(--line); }
 .bp-cols { display: flex; gap: 18px; flex-wrap: wrap; flex: 1; min-width: 260px; }
 .bp-col { display: grid; gap: 8px; align-content: start; min-width: 240px; flex: 1; }
 .bp-col h3 { margin: 0; font-size: 15px; }

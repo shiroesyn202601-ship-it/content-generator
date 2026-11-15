@@ -520,9 +520,7 @@ def brand_delete(slot: str):
 
 @app.get("/brand/{name}")
 def brand_file(name: str):
-    b = brand.load()
-    files = {b[s]["file"] for s in brand.SLOTS if b[s]["file"]}
-    if name not in files:
+    if name not in brand.files():
         raise HTTPException(404)
     return FileResponse(brand.DIR / name, headers={"Cache-Control": "no-cache"})
 
