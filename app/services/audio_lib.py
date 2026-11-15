@@ -12,6 +12,7 @@ import time
 from pathlib import Path
 
 from .. import config, store
+from . import usage
 
 LOCAL_LIB = config.DATA_DIR / "library"
 AUDIO_EXT = (".mp3", ".wav", ".m4a", ".ogg", ".aac", ".flac")
@@ -114,6 +115,7 @@ def dominant_mood(p: dict) -> str:
     return max(score, key=score.get) if score else "santai"
 
 
+@usage.stepped("Musik latar")
 def auto_plan(pid: str, params: dict, progress) -> dict:
     """Pilih musik latar (mood dominan) + SFX di awal tiap scene. User bisa mengganti di UI."""
     p = store.load(pid)

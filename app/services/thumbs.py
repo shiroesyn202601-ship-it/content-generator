@@ -11,7 +11,7 @@ import time
 
 from .. import config, store
 from . import ffmpeg_utils as ff
-from . import fonts
+from . import fonts, usage
 
 SIZES = {"short": (1080, 1920), "long": (1280, 720)}
 
@@ -488,6 +488,7 @@ def remove(pid: str, params: dict, progress) -> dict:
     return {}
 
 
+@usage.stepped("Thumbnail")
 def auto(pid: str, params: dict, progress) -> dict:
     """Otomatis: kandidat frame → frame terbaik → 3 variasi template (untuk A/B test). Bisa diedit kemudian."""
     p = store.load(pid)

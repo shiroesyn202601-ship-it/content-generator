@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, brand, enhance, clipper, fonts, prompts, render, research, scriptgen, story,
+from .services import (assets, audio_lib, batch, brand, enhance, usage, clipper, fonts, prompts, render, research, scriptgen, story,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
@@ -238,6 +238,38 @@ def save_voice(pid: str, body: dict = Body(...)):
     return store.update(pid, apply)
 
 
+def _reported(name: str, fn):
+    """Bungkus job: catat langkah, AI yang dipakai & durasinya (services/usage.py) lalu simpan ke proyek."""
+    def run(pid, params, progress):
+        rep = usage.begin(name)
+
+        def prog(msg):
+            rep.feed(msg)
+            progress(msg)
+        ok = False
+        try:
+            res = fn(pid, params, progress=prog)
+            ok = True
+            return res
+        finally:
+            rep.close()
+            usage.end()
+            _save_report(pid, name, rep, ok)
+    return run
+
+
+def _save_report(pid: str, name: str, rep, ok: bool) -> None:
+    try:
+        d = {**rep.as_dict(), "ok": ok, "action": name}
+        store.update(pid, lambda q: q.setdefault("reports", {}).__setitem__(name, d))
+        kids = {s["pid"] for s in d["steps"] if s["pid"] and s["pid"] != pid}
+        for k in kids:
+            sl = {**rep.slice_for(k), "ok": ok, "action": name, "source": pid}
+            store.update(k, lambda q, sl=sl: q.__setitem__("report", sl))
+    except Exception as e:  # noqa: BLE001 — laporan tidak boleh menggagalkan pekerjaan
+        print("laporan gagal disimpan:", e)
+
+
 @app.post("/api/projects/{pid}/action/{name}")
 def action(pid: str, name: str, params: dict = Body(default={})):
     if name not in ACTIONS:
@@ -252,7 +284,7 @@ def action(pid: str, name: str, params: dict = Body(default={})):
     if clash:
         raise HTTPException(409, f"Proses '{next(iter(clash))}' masih berjalan untuk proyek ini. Tunggu sampai selesai.")
     if as_job:
-        return {"job": jobs.submit(pid, name, fn, pid, params)}
+        return {"job": jobs.submit(pid, name, _reported(name, fn), pid, params)}
     try:
         return {"result": fn(pid, params, lambda m: None), "project": store.load(pid)}
     except Exception as e:

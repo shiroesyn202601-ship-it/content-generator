@@ -22,7 +22,7 @@ from pathlib import Path
 
 from .. import config, store
 from . import ffmpeg_utils as ff
-from . import llm
+from . import llm, usage
 
 DEFAULTS = {"commentary": "both",   # both | intro | outro | off
             "persona": "",          # gaya bicara kreator, mis. "santai, kritis, sedikit humor"
@@ -210,6 +210,7 @@ def _wiki_role(name: str) -> dict | None:
         m = re.search(r"\b(?:adalah|merupakan|ialah)\s+(.*)", sent)
         if not m:
             continue
+        usage.ai("Sumber", "Wikipedia", ex["title"], None, "kartu konteks")
         role = re.split(r"[.;(]", m.group(1))[0].strip()
         role = re.sub(r"^(seorang|sebuah|salah satu)\s+", "", role)
         if len(role) > 70:
@@ -244,6 +245,7 @@ def _fact_cards(plan: dict, progress) -> list[dict]:
             except Exception:  # noqa: BLE001
                 ex = None
             if ex:
+                usage.ai("Sumber", "Wikipedia", ex["title"], None, "cek fakta")
                 srcs.append(f"[{ex['title']}] {ex['text'][:2200]}")
         blocks.append(f"KLAIM {k}: {c['claim']}\nSUMBER:\n" + ("\n\n".join(srcs) or "(tidak ditemukan)"))
     try:
@@ -288,6 +290,8 @@ def _broll_asset(item: dict, d: Path, k: int, fmt: str) -> dict | None:
             assets._download(c["url"], dest)
             from PIL import Image
             Image.open(dest).convert("RGB").save(dest, "JPEG", quality=90)
+            usage.ai("Gambar", {"commons": "Wikimedia Commons", "pixabay": "Pixabay", "ai": "Pollinations AI"}.get(
+                c.get("provider"), c.get("provider") or "?"), item["query_en"], None, "B-roll")
             return {"file": f"assets/broll_{k}.jpg", "provider": c.get("provider"), "page_url": c.get("page_url"),
                     "author": c.get("author"), "license": c.get("license"), "title": c.get("title"),
                     "requires_attribution": c.get("requires_attribution", False)}
@@ -312,6 +316,7 @@ def _emoji_png(e: str) -> Path | None:
         try:
             assets._download(url, f)
             if f.stat().st_size > 200:
+                usage.ai("Gambar", "Noto Emoji (Google)" if "gstatic" in url else "Twemoji", e, None, "emoji")
                 return f
         except Exception:  # noqa: BLE001
             pass
@@ -352,7 +357,9 @@ def _speak(p: dict, text: str, out_wav: Path, offset: float, tag: str) -> tuple[
     spoken_tokens = [tts.apply_pron_text(t["text"], pron) for t in tokens]
     rate, pitch, vol = tts.sentence_params(v, "netral", False)
     mp3 = out_wav.with_suffix(".mp3")
-    bounds = tts.synth(" ".join(spoken_tokens), v.get("voice") or "id-ID-ArdiNeural", rate, pitch, vol, mp3)
+    voice = v.get("voice") or "id-ID-ArdiNeural"
+    with usage.timed("Suara", "Edge-TTS (Microsoft)", voice, f"komentar {tag}"):
+        bounds = tts.synth(" ".join(spoken_tokens), voice, rate, pitch, vol, mp3)
     ff.to_wav(mp3, out_wav, 48000)
     dur = ff.duration(out_wav)
     aligned = tts.align(tokens, [len(x.split()) for x in spoken_tokens], bounds, dur)
@@ -393,6 +400,7 @@ def vary_style(style: dict, seed: int) -> dict:
 
 
 # ---------------------------------------------------------------- utama
+@usage.stepped("Nilai tambah")
 def run(pid: str, params: dict, progress) -> dict:
     """params: {opts: {...}, plan: {...} (opsional, hasil edit user → AI tidak dipanggil), seed}"""
     from . import subtitles

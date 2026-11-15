@@ -8,7 +8,7 @@ clipper : clip.mp4 (audio asli) + musik opsional (ducking) + SFX -> burn-in subt
 from pathlib import Path
 
 from .. import config, store
-from . import audio_lib, brand, fonts, subtitles
+from . import audio_lib, brand, fonts, subtitles, usage
 from . import ffmpeg_utils as ff
 
 IMG_EXT = (".jpg", ".jpeg", ".png", ".webp")
@@ -185,6 +185,7 @@ def _extra_audio_inputs(p: dict, first_idx: int):
     return args, music, sfx
 
 
+@usage.stepped("Render video")
 def run(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     d = store.project_dir(pid)
@@ -262,6 +263,7 @@ def run(pid: str, params: dict, progress) -> dict:
         enc = ff.run_encode(["-i", clip, *extra, *b_args, "-filter_complex", ";".join(graph), "-map", "[vout]", "-map", "[aout]"],
                             [*ff.AUDIO_ARGS, "-t", f"{total:.3f}", "-movflags", "+faststart", "render/final.mp4"], cwd=d)
 
+    usage.ai("Render", "FFmpeg", enc, None, "encoder video")
     drive_id = None
     drive_bg = config.google_enabled() and params.get("drive_background")
     if config.google_enabled() and not drive_bg:

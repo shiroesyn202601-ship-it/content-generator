@@ -9,6 +9,7 @@ Output:       subs.ass (burn-in, karaoke + penekanan warna/ukuran) dan subs.srt
 import re
 
 from .. import config, store
+from . import usage
 from .tts import PUNCT, tokenize
 
 SENT_END = re.compile(r"[.!?…]$")
@@ -64,6 +65,7 @@ def _line(words: list[dict], i0: int, i1: int) -> dict:
             "text": " ".join(f"*{w['text']}*" if w.get("emphasis") else w["text"] for w in ws)}
 
 
+@usage.stepped("Subtitle")
 def build(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     from . import enhance
