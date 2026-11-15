@@ -33,21 +33,24 @@ def _norm(w: str) -> str:
 
 
 def _synthesize(text: str, voice: str, progress) -> bytes:
-    if not config.GEMINI_API_KEY:
+    """Gemini TTS dengan rotasi semua GEMINI_API_KEY & model cadangan (lihat llm.gemini_post)."""
+    from . import keys
+    from .llm import LLMError, gemini_post
+    if not keys.has("gemini"):
         raise RuntimeError("GEMINI_API_KEY kosong.")
     last = ""
+    body = {"contents": [{"parts": [{"text": text}]}],
+            "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {
+                "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}}
     for model in MODELS:
         progress(f"Gemini TTS ({model}, suara {voice}) membacakan naskah… ±10-40 dtk")
-        r = httpx.post(f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent",
-                       params={"key": config.GEMINI_API_KEY}, timeout=httpx.Timeout(240, connect=15),
-                       json={"contents": [{"parts": [{"text": text}]}],
-                             "generationConfig": {"responseModalities": ["AUDIO"], "speechConfig": {
-                                 "voiceConfig": {"prebuiltVoiceConfig": {"voiceName": voice}}}}})
-        if r.status_code == 200:
-            part = r.json()["candidates"][0]["content"]["parts"][0]["inlineData"]
+        try:
+            j = gemini_post(model, body, "Gemini TTS", timeout=httpx.Timeout(240, connect=15))
+            part = j["candidates"][0]["content"]["parts"][0]["inlineData"]
             return base64.b64decode(part["data"])
-        last = f"{model} → {r.status_code}: {r.text[:200]}"
-        progress(f"Gemini TTS {model} gagal ({r.status_code}) — mencoba model berikutnya…")
+        except (LLMError, KeyError, IndexError) as e:
+            last = f"{model} → {str(e)[:200]}"
+            progress(f"Gemini TTS {model} gagal — mencoba model berikutnya…")
     raise RuntimeError(f"Gemini TTS gagal: {last}")
 
 

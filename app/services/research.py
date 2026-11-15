@@ -164,6 +164,8 @@ def download_source(pid: str, params: dict, progress) -> dict:
         "progress_hooks": [hook],
         "quiet": True,
         "noplaylist": True,
+        # koneksi putus / fragmen gagal → ulangi, bukan langsung gagal; fragmen diunduh paralel
+        "retries": 10, "fragment_retries": 10, "concurrent_fragment_downloads": 4, "socket_timeout": 30,
     }
     if config.FFMPEG != "ffmpeg":
         opts["ffmpeg_location"] = str(Path(config.FFMPEG).parent)
@@ -187,7 +189,12 @@ def download_source(pid: str, params: dict, progress) -> dict:
         final = files[0]
     src = {"url": url, "title": info.get("title"), "channel": info.get("channel"),
            "duration": info.get("duration"), "path": f"source/{final.name}",
-           "license": info.get("license")}
+           "license": info.get("license"), "description": (info.get("description") or "")[:2000],
+           # sinyal penonton gratis: grafik "paling sering diputar ulang" & bab video
+           "heatmap": [{"s": round(h.get("start_time", 0), 1), "e": round(h.get("end_time", 0), 1),
+                        "v": round(h.get("value", 0), 3)} for h in info.get("heatmap") or [] if isinstance(h, dict)],
+           "chapters": [{"s": round(c.get("start_time", 0), 1), "title": c.get("title", "")}
+                        for c in info.get("chapters") or [] if isinstance(c, dict)]}
 
     def apply(p):
         p["research"]["source"] = src

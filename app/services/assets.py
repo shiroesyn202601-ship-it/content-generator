@@ -379,7 +379,7 @@ def auto_all(pid: str, params: dict, progress) -> dict:
 
     # 3b) Juri visual: AI MELIHAT lembar kontak thumbnail, hanya untuk scene yang belum "cocok".
     #     Model vision gratis punya batas per menit yang ketat → maks VISION_MAX scene per proses.
-    if params.get("vision", True) and config.GROQ_API_KEY:
+    if params.get("vision", True) and llm.vision_available():
         doubtful = [s for s in scenes if cands[s["id"]] and (picks.get(s["id"]) or {}).get("fit") != "cocok"]
         for i, s in enumerate(doubtful[:VISION_MAX]):
             progress(f"AI melihat thumbnail kandidat scene {scenes.index(s) + 1} "

@@ -16,7 +16,7 @@ from urllib.parse import quote
 import httpx
 
 from .. import config, store
-from . import llm
+from . import llm, keys
 
 GEN = "https://gen.pollinations.ai"
 CLASSIC = "https://image.pollinations.ai/prompt/"
@@ -38,7 +38,7 @@ SETUP_SCHEMA = llm.strict({
 
 
 def has_key() -> bool:
-    return bool(config.POLLINATIONS_KEY)
+    return keys.has("pollinations")
 
 
 def _size(p: dict) -> tuple[int, int]:
@@ -101,6 +101,18 @@ def _retry_wait(r: httpx.Response) -> float:
     return float(m.group(1)) if m else float(r.headers.get("retry-after") or 0)
 
 
+def _pkey() -> str | None:
+    """Key Pollinations berikutnya (rotasi semua POLLINATIONS_KEY*); None = tanpa key / semua sedang habis."""
+    return keys.take("pollinations") if keys.pool("pollinations") else None
+
+
+def _pcool(pk: str, status: int, wait: float) -> None:
+    if status in (401, 403):
+        keys.kill("pollinations", pk, str(status))
+    else:  # 402 saldo pollen habis (pulih per jam/hari), 429 batas per menit
+        keys.cool("pollinations", pk, "", 3600 if status == 402 else max(wait, 20))
+
+
 def _crop_watermark(img: bytes) -> bytes:
     """Endpoint gratis tanpa key menaruh watermark kecil di kanan bawah → buang 6% bawah."""
     import io
@@ -116,16 +128,21 @@ def _crop_watermark(img: bytes) -> bytes:
 
 def _text2img(prompt: str, w: int, h: int, seed: int, progress) -> bytes:
     for attempt in range(4):
-        if has_key():
+        pk = _pkey()
+        if pk:
             r = httpx.get(f"{GEN}/image/{quote(prompt)}", params={"model": config.STORY_IMAGE_MODEL, "width": w,
-                          "height": h, "seed": seed}, headers={"Authorization": f"Bearer {config.POLLINATIONS_KEY}"},
+                          "height": h, "seed": seed}, headers={"Authorization": f"Bearer {pk}"},
                           timeout=180, follow_redirects=True)
         else:
             r = httpx.get(CLASSIC + quote(prompt), params={"width": w, "height": h, "seed": seed, "nologo": "true",
                           "model": "flux"}, timeout=180, follow_redirects=True)
         if r.status_code == 200 and r.headers.get("content-type", "").startswith("image"):
-            return r.content if has_key() else _crop_watermark(r.content)
+            return r.content if pk else _crop_watermark(r.content)
         wait = _retry_wait(r) or (20 if r.status_code in (402, 429, 502, 503) else 0)
+        if pk and r.status_code in (401, 402, 403, 429):
+            _pcool(pk, r.status_code, wait)
+            if keys.candidates("pollinations"):
+                continue  # key lain masih punya saldo/kuota → langsung coba
         if not wait or attempt == 3:
             raise RuntimeError(f"Pollinations {r.status_code}: {r.text[:200]}")
         progress(f"Server gambar sibuk/batas gratis ({r.status_code}) — menunggu {wait:.0f} dtk…")
@@ -137,7 +154,10 @@ def _edit_with_refs(prompt: str, refs: list[bytes], w: int, h: int, seed: int, p
     """Gambar baru dari prompt + gambar referensi karakter (konsistensi wajah & pakaian)."""
     images = [{"image_url": "data:image/jpeg;base64," + base64.b64encode(b).decode()} for b in refs]
     for attempt in range(4):
-        r = httpx.post(f"{GEN}/v1/images/edits", headers={"Authorization": f"Bearer {config.POLLINATIONS_KEY}"},
+        pk = _pkey()
+        if not pk:
+            raise RuntimeError("Semua POLLINATIONS_KEY habis saldo/kuota untuk sementara.")
+        r = httpx.post(f"{GEN}/v1/images/edits", headers={"Authorization": f"Bearer {pk}"},
                        json={"model": config.STORY_IMAGE_MODEL, "prompt": prompt, "image": images,
                              "size": f"{w}x{h}", "seed": seed, "response_format": "b64_json"}, timeout=240)
         if r.status_code == 200:
@@ -148,6 +168,10 @@ def _edit_with_refs(prompt: str, refs: list[bytes], w: int, h: int, seed: int, p
                 return httpx.get(d["url"], timeout=120, follow_redirects=True).content
             raise RuntimeError(f"Respons gambar tak terduga: {r.text[:200]}")
         wait = _retry_wait(r) or (20 if r.status_code in (429, 502, 503) else 0)
+        if r.status_code in (401, 402, 403, 429):
+            _pcool(pk, r.status_code, wait)
+            if keys.candidates("pollinations"):
+                continue
         if not wait or attempt == 3:
             raise RuntimeError(f"Pollinations edit {r.status_code}: {r.text[:300]}")
         progress(f"Server gambar sibuk ({r.status_code}) — menunggu {wait:.0f} dtk…")

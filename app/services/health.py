@@ -75,20 +75,39 @@ def check(ping_llm: bool = False) -> list[dict]:
         out.append(_item("Sistem", pkg, "ok" if ver else "fail", ver or "belum terpasang",
                          "" if ver else "python -m pip install -r requirements.txt"))
 
-    # --- AI
-    keys = {"gemini": bool(config.GEMINI_API_KEY), "groq": bool(config.GROQ_API_KEY), "ollama": True}
-    chain = [config.LLM_PROVIDER] + [p for p in config.LLM_FALLBACK_PROVIDERS if p != config.LLM_PROVIDER]
-    for i, prov in enumerate(chain):
-        role = "utama" if i == 0 else "cadangan"
+    # --- AI: rantai cadangan + jumlah key per layanan (tanpa membuka isi key)
+    from . import keys as kp
+    from . import llm
+    st = kp.status()
+    signup = {"groq": "console.groq.com/keys", "gemini": "aistudio.google.com/apikey",
+              "cerebras": "cloud.cerebras.ai", "openrouter": "openrouter.ai/keys", "mistral": "console.mistral.ai"}
+    model_of = {"gemini": config.GEMINI_MODEL, "groq": config.GROQ_MODEL, "cerebras": ",".join(config.CEREBRAS_MODELS[:1]),
+                "openrouter": ",".join(config.OPENROUTER_MODELS[:1]), "mistral": ",".join(config.MISTRAL_MODELS[:1])}
+    rantai = llm.chain()
+    for prov in [*rantai, *[p for p in llm.CLOUD if p not in rantai]]:
+        role = "utama" if rantai and prov == rantai[0] else ("cadangan" if prov in rantai else "belum diisi")
         if prov == "ollama":
             out.append(_item("AI", f"Ollama ({role})", "ok", f"lokal di {config.OLLAMA_URL}"))
             continue
-        model = {"gemini": config.GEMINI_MODEL, "groq": config.GROQ_MODEL}.get(prov, "")
-        out.append(_item("AI", f"{prov.title()} ({role})", "ok" if keys.get(prov) else ("fail" if i == 0 else "warn"),
-                         f"model {model}" if keys.get(prov) else "API key kosong",
-                         "" if keys.get(prov) else f"Isi {prov.upper()}_API_KEY di .env"))
+        rows = st.get(prov, [])
+        alive = [r for r in rows if not r["dead"]]
+        cooling = [r for r in alive if r["cooling"]]
+        if not rows:
+            out.append(_item("AI", f"{llm.PROVIDER_LABEL[prov]} ({role})", "fail" if role == "utama" else "warn",
+                             "API key kosong", f"Gratis di {signup[prov]} → isi {kp.ENV[prov]} di .env"))
+            continue
+        detail = f"{len(alive)}/{len(rows)} key aktif · model {model_of[prov]}"
+        if cooling:
+            detail += " · sedang pulih: " + ", ".join(f"key {r['n']}" for r in cooling)
+        dead = [f"key {r['n']} ({r['tail']}) ditolak" for r in rows if r["dead"]]
+        out.append(_item("AI", f"{llm.PROVIDER_LABEL[prov]} ({role})", "ok" if alive else "fail",
+                         detail + (" · " + "; ".join(dead) if dead else ""),
+                         "" if len(rows) > 1 else f"Tambah {kp.ENV[prov]}_2 dari akun lain → kuota berlipat & tidak macet"))
+    n_cloud = sum(1 for p in llm.CLOUD if kp.has(p))
+    out.append(_item("AI", "Cadangan AI", "ok" if n_cloud >= 2 else "warn",
+                     f"{n_cloud} layanan AI cloud siap · rantai: " + " → ".join(llm.PROVIDER_LABEL[p] for p in rantai),
+                     "" if n_cloud >= 2 else "Isi minimal 2 layanan (mis. Groq + Gemini/Cerebras) supaya tidak bergantung satu AI"))
     if ping_llm:
-        from . import llm
         t = time.time()
         try:
             llm.chat_json("Answer in JSON.", 'Return {"ok": true}', temperature=0)

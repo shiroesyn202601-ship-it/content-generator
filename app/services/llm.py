@@ -1,18 +1,41 @@
-"""Satu antarmuka untuk 3 LLM gratis: Gemini (free tier), Groq (free tier), Ollama (lokal).
+"""Satu antarmuka untuk LLM gratis: Groq, Gemini, Cerebras, OpenRouter, Mistral (free tier) + Ollama (lokal).
+
+Tahan banting — tidak bergantung pada satu AI:
+  1. Tiap layanan boleh punya BANYAK API key (lihat keys.py). Key yang kena batas didinginkan,
+     key berikutnya langsung dipakai.
+  2. Tiap layanan punya beberapa model cadangan (404/503/kuota → model berikutnya).
+  3. Bila satu layanan habis total → layanan berikutnya di rantai (LLM_PROVIDER → LLM_FALLBACK_PROVIDERS →
+     layanan lain yang key-nya terisi). Ollama hanya dipakai bila disebut di .env.
 Semua pemanggilan meminta output JSON agar bisa langsung dipakai tahap berikutnya."""
 import json
 import re
+import threading
 import time
 
 import httpx
 
 from .. import config
 from ..jobs import report
+from . import keys
 
 TIMEOUT = httpx.Timeout(180.0, connect=15.0)
-PROVIDER_LABEL = {"gemini": "Gemini", "groq": "Groq", "ollama": "Ollama (lokal)"}
-STATUS_REASON = {429: "kuota gratis habis", 500: "error di server Google", 503: "server Google sedang sibuk",
+PROVIDER_LABEL = {"gemini": "Gemini", "groq": "Groq", "cerebras": "Cerebras", "openrouter": "OpenRouter",
+                  "mistral": "Mistral", "ollama": "Ollama (lokal)"}
+CLOUD = ("groq", "gemini", "cerebras", "openrouter", "mistral")
+STATUS_REASON = {429: "kuota gratis habis", 500: "error di server", 503: "server sedang sibuk",
                  404: "model sudah tidak tersedia"}
+
+
+_last = threading.local()
+
+
+def last_used() -> dict:
+    """{"provider", "model"} jawaban AI terakhir di thread ini (untuk laporan "AI apa yang dipakai")."""
+    return dict(getattr(_last, "info", None) or {})
+
+
+def _mark(provider: str, model: str) -> None:
+    _last.info = {"provider": provider, "model": model}
 
 
 class LLMError(RuntimeError):
@@ -20,7 +43,7 @@ class LLMError(RuntimeError):
 
 
 class RateLimited(LLMError):
-    """Model kena batas token/menit dan harus menunggu lebih lama dari max_wait (pemanggil boleh oper ke model lain)."""
+    """Semua key model ini kena batas token/menit & harus menunggu > max_wait (pemanggil boleh oper ke model lain)."""
 
     def __init__(self, model: str, wait: float):
         super().__init__(f"Groq {model}: batas per menit, pulih dalam {wait:.0f} dtk")
@@ -28,8 +51,21 @@ class RateLimited(LLMError):
 
 
 def _configured(provider: str) -> bool:
-    """Provider cadangan hanya dicoba kalau memang sudah disiapkan (API key terisi)."""
-    return {"gemini": bool(config.GEMINI_API_KEY), "groq": bool(config.GROQ_API_KEY), "ollama": True}.get(provider, False)
+    """Provider cadangan hanya dicoba kalau memang sudah disiapkan (API key terisi & belum ditolak semua)."""
+    return True if provider == "ollama" else keys.has(provider)
+
+
+def chain(primary: str | None = None) -> list[str]:
+    """Urutan provider yang dicoba: utama → LLM_FALLBACK_PROVIDERS → layanan cloud lain yang key-nya terisi."""
+    primary = (primary or config.LLM_PROVIDER).lower()
+    order = [primary, *config.LLM_FALLBACK_PROVIDERS, *CLOUD]
+    out = []
+    for p in order:
+        if p in PROVIDER_LABEL and p not in out and (p == primary or _configured(p)):
+            if p == "ollama" and p != primary and p not in config.LLM_FALLBACK_PROVIDERS:
+                continue
+            out.append(p)
+    return out
 
 
 def strict(props: dict, required: list | None = None) -> dict:
@@ -47,25 +83,35 @@ INT = {"type": "integer"}
 
 def chat_json(system: str, user: str, provider: str | None = None, temperature: float = 0.8,
               schema: dict | None = None, groq_model: str | None = None, effort: str | None = None,
-              fallback: bool = True, max_wait: float | None = None) -> dict:
+              fallback: bool = True, max_wait: float | None = None, skip: tuple = (),
+              only_model: bool = False) -> dict:
     """schema (opsional): JSON schema strict → Groq menjamin bentuk jawaban (field & enum) valid.
     groq_model: model Groq yang dicoba pertama (tiap model punya kuota token/menit sendiri → tugas besar
     bisa dibagi ke beberapa model). effort: reasoning_effort gpt-oss (low/medium/high).
-    fallback=False: jangan pindah ke provider cadangan (mis. Gemini yang lambat) — pemanggil menangani gagal."""
-    providers = {"gemini": _gemini, "groq": _groq, "ollama": _ollama}
+    fallback=False: jangan pindah ke provider cadangan — pemanggil menangani gagal.
+    skip: provider yang dilewati (mis. pemanggil baru saja gagal di Groq).
+    only_model: hanya groq_model (jalur paralel tidak boleh memakai kuota model jalur lain).
+    Provider & model yang akhirnya menjawab tersedia di llm.last_used() (per thread)."""
     primary = (provider or config.LLM_PROVIDER).lower()
-    if primary not in providers:
+    if primary not in PROVIDER_LABEL:
         raise LLMError(f"Provider LLM tidak dikenal: {primary}")
-    # Provider utama dulu, lalu cadangan (LLM_FALLBACK_PROVIDERS) yang sudah dikonfigurasi.
-    chain = [primary] + ([p for p in config.LLM_FALLBACK_PROVIDERS
-                          if p != primary and p in providers and _configured(p)] if fallback else [])
+    order = chain(primary) if fallback else [primary]
+    order = [p for p in order if p not in skip] or order
     errors = []
-    for i, name in enumerate(chain):
+    for i, name in enumerate(order):
         if errors:
-            report(f"{PROVIDER_LABEL[chain[i - 1]]} gagal → beralih ke cadangan {PROVIDER_LABEL[name]}…")
+            report(f"{PROVIDER_LABEL[order[i - 1]]} gagal → beralih ke cadangan {PROVIDER_LABEL[name]}…")
         try:
-            raw = (_groq(system, user, temperature, schema, prefer=groq_model, effort=effort, max_wait=max_wait)
-                   if name == "groq" else providers[name](system, user, temperature, schema))
+            if name == "groq":
+                raw = _groq(system, user, temperature, schema, prefer=groq_model, effort=effort, max_wait=max_wait,
+                            only=only_model)
+            elif name == "gemini":
+                raw = _gemini(system, user, temperature, schema)
+            elif name == "ollama":
+                raw = _ollama(system, user, temperature, schema)
+            else:
+                raw = _compat(name, system, user, temperature)
+            data = parse_json(raw)
         except RateLimited:
             raise  # pemanggil (mis. antrean paralel) yang memutuskan: oper ke model lain / tunggu
         except (LLMError, httpx.HTTPError) as e:
@@ -74,85 +120,123 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
         if errors:
             print(f"LLM: {primary} gagal, memakai cadangan '{name}'.")
         report(f"Jawaban AI ({PROVIDER_LABEL[name]}) diterima, membaca hasilnya…")
-        return parse_json(raw)
-    hint = ("" if len(chain) > 1 else
-            "\n\nSolusi cepat: isi GROQ_API_KEY di .env (gratis, https://console.groq.com/keys) — "
-            "aplikasi otomatis memakai Groq saat Gemini gagal.")
+        return data
+    hint = ("" if len(order) > 1 else
+            "\n\nSolusi: isi API key cadangan di .env — GROQ_API_KEY_2 / GEMINI_API_KEY_2 (akun kedua), atau "
+            "CEREBRAS_API_KEY / OPENROUTER_API_KEY / MISTRAL_API_KEY (semua gratis). Aplikasi otomatis pindah saat "
+            "yang lain habis.")
     raise LLMError("\n\n".join(errors) + hint)
 
 
 def parse_json(raw: str) -> dict:
-    """Toleran terhadap ```json fences``` atau teks pembuka dari model kecil."""
-    raw = raw.strip()
+    """Toleran terhadap ```json fences```, blok <think>, atau teks pembuka dari model kecil."""
+    raw = re.sub(r"<think>.*?</think>", "", raw or "", flags=re.S).strip()
     raw = re.sub(r"^```(?:json)?\s*|\s*```$", "", raw)
     try:
         return json.loads(raw)
     except json.JSONDecodeError:
         m = re.search(r"\{.*\}", raw, re.S)
         if m:
-            return json.loads(m.group(0))
+            try:
+                return json.loads(m.group(0))
+            except json.JSONDecodeError:
+                pass
         raise LLMError(f"Output LLM bukan JSON valid:\n{raw[:500]}")
 
 
-GEMINI_RETRY_STATUS = {429, 500, 503}  # sibuk / kuota per menit: coba lagi, lalu pindah model
-GEMINI_SKIP_STATUS = {404}             # model dipensiunkan / tidak tersedia: langsung pindah model
+def _tag(service: str, key: str) -> str:
+    lb = keys.label(service, key)
+    return f" ({lb})" if lb else ""
+
+
+# ---------------------------------------------------------------- Gemini
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 GEMINI_TIMEOUT = httpx.Timeout(90.0, connect=15.0)  # lebih pendek: model yang menggantung → pindah model
 
 
-def _gemini(system: str, user: str, temperature: float, schema: dict | None = None) -> str:
-    if not config.GEMINI_API_KEY:
+def gemini_models() -> list[str]:
+    return list(dict.fromkeys([config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS]))
+
+
+def gemini_post(model: str, body: dict, what: str = "Gemini", timeout=GEMINI_TIMEOUT) -> dict:
+    """POST generateContent dengan rotasi key. Mengembalikan JSON respons (status 200).
+    429 → key didinginkan (harian ±1 jam) & key lain dicoba; key ditolak → dinonaktifkan;
+    503/500 → coba ulang singkat. Lempar LLMError (dengan .status) bila model ini tidak bisa dipakai."""
+    tried, busy = 0, 0
+    while True:
+        key = keys.take("gemini", model)
+        if key is None:
+            w = keys.wait_time("gemini", model)
+            err = LLMError(f"{model} → semua key kena batas" + (f" (pulih ±{w / 60:.0f} mnt)" if w < 1e9 else ""))
+            err.status = 429
+            raise err
+        tried += 1
+        report(f"Menunggu {what} {model}{_tag('gemini', key)} — biasanya 10–30 dtk…")
+        try:
+            r = httpx.post(GEMINI_URL.format(model=model), params={"key": key}, json=body, timeout=timeout)
+        except httpx.TimeoutException:
+            err = LLMError(f"{model} → timeout")
+            err.status = 504
+            raise err
+        if r.status_code == 200:
+            return r.json()
+        if r.status_code == 429:
+            w = keys.gemini_429_wait(r.text)
+            keys.cool("gemini", key, model, w)
+            report(f"Gemini {model}{_tag('gemini', key)}: kuota habis → mencoba key lain…")
+            continue
+        if r.status_code in (401, 403) or (r.status_code == 400 and re.search(r"API_KEY_INVALID|API key not valid", r.text)):
+            keys.kill("gemini", key, f"{r.status_code} {r.text[:80]}")
+            continue
+        if r.status_code in (500, 503) and busy < 2:
+            busy += 1
+            report(f"Gemini {model}: {STATUS_REASON[r.status_code]} — mencoba lagi dalam {2 * busy} dtk…")
+            time.sleep(2 * busy)
+            continue
+        err = LLMError(f"{model} → {r.status_code}: {r.text[:300]}")
+        err.status = r.status_code
+        raise err
+
+
+def _gemini_run(body: dict, what: str = "Gemini") -> str:
+    if not keys.has("gemini"):
         raise LLMError("GEMINI_API_KEY belum diisi di .env (gratis di aistudio.google.com)")
+    errors = []
+    models = gemini_models()
+    for idx, model in enumerate(models):
+        try:
+            j = gemini_post(model, body, what)
+        except LLMError as e:
+            errors.append(str(e).split(":")[0])
+            st = getattr(e, "status", 0)
+            if st not in (404, 429, 500, 503, 504):
+                raise
+            if idx + 1 < len(models):
+                report(f"Gemini {model}: {STATUS_REASON.get(st, 'gagal')} → mencoba {models[idx + 1]}…")
+            continue
+        try:
+            _mark("gemini", model)
+            return j["candidates"][0]["content"]["parts"][0]["text"]
+        except (KeyError, IndexError):
+            raise LLMError(f"Respons Gemini ({model}) tak terduga: {json.dumps(j)[:400]}")
+    if any("batas" in e for e in errors):
+        why = (f"Kuota gratis semua key Gemini ({len(keys.pool('gemini'))}) habis. Tambahkan GEMINI_API_KEY_2 dari "
+               "akun Google lain, atau tunggu kuota pulih (harian: sekitar pukul 14.00–15.00 WIB).")
+    else:
+        why = "Server Google sibuk / model tidak tersedia. Coba lagi nanti, atau ganti GEMINI_MODEL di .env."
+    raise LLMError(f"Semua model Gemini gagal ({'; '.join(errors)}). {why}")
+
+
+def _gemini(system: str, user: str, temperature: float, schema: dict | None = None) -> str:
     body = {
         "systemInstruction": {"parts": [{"text": system}]},
         "contents": [{"role": "user", "parts": [{"text": user}]}],
         "generationConfig": {"temperature": temperature, "responseMimeType": "application/json"},
     }
-    models = list(dict.fromkeys([config.GEMINI_MODEL, *config.GEMINI_FALLBACK_MODELS]))
-    errors = []
-    for idx, model in enumerate(models):
-        url = f"https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
-        r = None
-        for attempt in range(3):
-            tag = "" if attempt == 0 else f" (percobaan {attempt + 1}/3)"
-            report(f"Menunggu jawaban AI dari Gemini {model}{tag} — biasanya 10–30 dtk, maks 90 dtk…")
-            try:
-                r = httpx.post(url, params={"key": config.GEMINI_API_KEY}, json=body, timeout=GEMINI_TIMEOUT)
-            except httpx.TimeoutException:
-                r = None  # model menggantung (biasanya karena overload) → langsung pindah model
-                break
-            if r.status_code == 200:
-                try:
-                    return r.json()["candidates"][0]["content"]["parts"][0]["text"]
-                except (KeyError, IndexError):
-                    raise LLMError(f"Respons Gemini ({model}) tak terduga: {r.text[:400]}")
-            # 429 "kuota habis" tidak pulih dalam hitungan detik → jangan buang kuota, langsung pindah model.
-            if r.status_code in GEMINI_RETRY_STATUS and attempt < 2 and r.status_code != 429:
-                wait = 2 * (attempt + 1)
-                report(f"Gemini {model}: {STATUS_REASON.get(r.status_code, f'error {r.status_code}')} "
-                       f"— mencoba lagi dalam {wait} dtk…")
-                time.sleep(wait)
-                continue
-            break
-        nxt = f" → mencoba {models[idx + 1]}…" if idx + 1 < len(models) else ""
-        if r is None:
-            errors.append(f"{model} → timeout")
-            report(f"Gemini {model} tidak menjawab dalam 90 dtk{nxt}")
-            continue
-        if r.status_code in GEMINI_RETRY_STATUS | GEMINI_SKIP_STATUS:
-            report(f"Gemini {model}: {STATUS_REASON.get(r.status_code, f'error {r.status_code}')}{nxt}")
-        errors.append(f"{model} → {r.status_code}")
-        if r.status_code not in GEMINI_RETRY_STATUS | GEMINI_SKIP_STATUS:
-            raise LLMError(f"Gemini {r.status_code} ({model}): {r.text[:400]}")
-    if any("→ 429" in e for e in errors):
-        why = ("Kuota gratis Gemini untuk API key ini habis (429). Kuota per menit pulih dalam ±1 menit, "
-               "kuota harian pulih besok (sekitar pukul 14.00–15.00 WIB). Cek pemakaian: https://ai.dev/rate-limit")
-    elif all("→ 503" in e or "timeout" in e for e in errors):
-        why = "Server Google sedang sibuk. Coba lagi beberapa menit lagi."
-    else:
-        why = "Model tidak tersedia atau error di server Google. Coba lagi nanti, atau ganti GEMINI_MODEL di .env."
-    raise LLMError(f"Semua model Gemini gagal ({', '.join(errors)}). {why}")
+    return _gemini_run(body)
 
 
+# ---------------------------------------------------------------- Groq
 GROQ_URL = "https://api.groq.com/openai/v1/chat/completions"
 STRICT_MODELS = ("openai/gpt-oss-120b", "openai/gpt-oss-20b", "qwen/qwen3.8-27b")
 
@@ -180,7 +264,7 @@ def _retry_after(r: httpx.Response) -> float:
     return 0.0
 
 
-def _groq_post(model: str, messages: list, temperature: float, schema: dict | None,
+def _groq_post(key: str, model: str, messages: list, temperature: float, schema: dict | None,
                effort: str | None = None) -> httpx.Response:
     rf = {"type": "json_object"}
     if schema and model in STRICT_MODELS:
@@ -188,87 +272,178 @@ def _groq_post(model: str, messages: list, temperature: float, schema: dict | No
     body = {"model": model, "temperature": temperature, "response_format": rf, "messages": messages}
     if model.startswith("openai/gpt-oss"):
         body["reasoning_effort"] = effort or "medium"
-    return httpx.post(GROQ_URL, headers={"Authorization": f"Bearer {config.GROQ_API_KEY}"}, json=body,
-                      timeout=TIMEOUT)
+    return httpx.post(GROQ_URL, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=TIMEOUT)
 
 
 def groq_models() -> list[str]:
     return list(dict.fromkeys([config.GROQ_MODEL, *config.GROQ_FALLBACK_MODELS]))
 
 
+def groq_call(model: str, messages: list, temperature: float, schema: dict | None = None,
+              effort: str | None = None, max_wait: float | None = None, first: bool = True,
+              max_sleeps: int = 3) -> httpx.Response | None:
+    """Satu model Groq, berputar di semua key. 429 → key didinginkan, key lain langsung dicoba; bila semua
+    key menunggu ≤60 dtk → tidur lalu ulang. Mengembalikan respons terakhir (bukan 429) atau None bila
+    semua key kena batas lebih lama."""
+    use_schema, sleeps = schema, 0
+    while True:
+        key = keys.take("groq", model)
+        if key is None:
+            w = keys.wait_time("groq", model)
+            if w == float("inf"):
+                raise LLMError("Semua GROQ_API_KEY ditolak (tidak valid). Cek key di console.groq.com/keys.")
+            if max_wait is not None and first and w > max_wait:
+                raise RateLimited(model, min(w, 60.0))
+            if w <= 60 and sleeps < max_sleeps:
+                sleeps += 1
+                report(f"Groq {model}: semua key kena batas per menit — menunggu {w:.0f} dtk…")
+                time.sleep(max(w, 3.0) + 0.5)
+                continue
+            return None
+        report(f"Menunggu jawaban AI dari Groq {model}{_tag('groq', key)} — biasanya 1–10 dtk…")
+        r = _groq_post(key, model, messages, temperature, use_schema, effort)
+        if r.status_code == 429:
+            # Groq gratis: batas token/permintaan PER MENIT (pulih < 60 dtk) atau per hari (lama).
+            keys.cool("groq", key, model, max(_retry_after(r), 3.0))
+            if len(keys.pool("groq")) > 1:
+                report(f"Groq {model}{_tag('groq', key)}: batas tercapai → pindah ke key lain…")
+            continue
+        if r.status_code in (401, 403):
+            keys.kill("groq", key, f"{r.status_code} {r.text[:80]}")
+            continue
+        # Skema strict kadang gagal divalidasi (jawaban panjang) → ulangi dalam mode JSON biasa.
+        if r.status_code == 400 and "json_validate_failed" in r.text and use_schema:
+            report(f"Groq {model}: format terkunci gagal — mengulang dengan format JSON biasa…")
+            use_schema = None
+            continue
+        return r
+
+
 def _groq(system: str, user: str, temperature: float, schema: dict | None = None,
-          prefer: str | None = None, effort: str | None = None, max_wait: float | None = None) -> str:
-    if not config.GROQ_API_KEY:
+          prefer: str | None = None, effort: str | None = None, max_wait: float | None = None,
+          only: bool = False) -> str:
+    if not keys.has("groq"):
         raise LLMError("GROQ_API_KEY belum diisi di .env (gratis di console.groq.com)")
     models = groq_models()
     if prefer:
-        models = list(dict.fromkeys([prefer, *models]))
+        models = [prefer] if only else list(dict.fromkeys([prefer, *models]))
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
-    errors, r = [], None
+    errors, last = [], ""
     for idx, model in enumerate(models):
-        use_schema = schema
-        for attempt in range(4):
-            report(f"Menunggu jawaban AI dari Groq {model} — biasanya 1–10 dtk…")
-            r = _groq_post(model, messages, temperature, use_schema, effort)
-            # 429 di Groq gratis biasanya batas token PER MENIT (pulih < 60 dtk) → tunggu lalu ulangi model
-            # yang sama; ini lebih cepat & lebih baik daripada jatuh ke model lain yang juga kena batas.
-            wait = _retry_after(r)
-            if r.status_code == 429 and max_wait is not None and idx == 0 and wait > max_wait:
-                raise RateLimited(model, min(wait, 60.0))
-            if r.status_code == 429 and attempt < 3 and 0 < wait <= 60:
-                wait = max(wait, 3.0)  # header kadang "0.2s" → langsung coba lagi = kena 429 lagi
-                report(f"Groq {model}: batas token per menit tercapai — menunggu {wait:.0f} dtk lalu mencoba lagi…")
-                time.sleep(wait + 0.5)
-                continue
-            # Skema strict kadang gagal divalidasi (jawaban panjang) → ulangi model yang sama dalam mode JSON biasa.
-            if r.status_code == 400 and "json_validate_failed" in r.text and use_schema:
-                report(f"Groq {model}: format terkunci gagal — mengulang dengan format JSON biasa…")
-                use_schema = None
-                continue
-            break
+        r = groq_call(model, messages, temperature, schema, effort, max_wait, first=idx == 0)
+        if r is None:
+            errors.append(f"{model} → 429 (semua key)")
+            if idx + 1 < len(models):
+                report(f"Groq {model}: kuota semua key habis → mencoba {models[idx + 1]}…")
+            continue
         if r.status_code == 200:
+            _mark("groq", model)
             return r.json()["choices"][0]["message"]["content"]
         errors.append(f"{model} → {r.status_code}")
+        last = r.text[:300]
         json_fail = r.status_code == 400 and "json_validate_failed" in r.text
-        # Model dipensiunkan (404), kuota (429), JSON gagal divalidasi (400), server error → model berikutnya.
-        if r.status_code not in (404, 429, 500, 502, 503) and not json_fail:
-            raise LLMError(f"Groq {r.status_code} ({model}): {r.text[:400]}")
+        # Model dipensiunkan (404), JSON gagal divalidasi (400), terlalu besar (413), server error → model berikutnya.
+        if r.status_code not in (404, 413, 500, 502, 503) and not json_fail:
+            raise LLMError(f"Groq {r.status_code} ({model}): {last}")
         if idx + 1 < len(models):
-            reason = {404: "model sudah tidak tersedia", 429: "kuota habis"}.get(
+            reason = {404: "model sudah tidak tersedia", 413: "permintaan terlalu besar"}.get(
                 r.status_code, "JSON tidak valid" if json_fail else "server sibuk")
             report(f"Groq {model}: {reason} → mencoba {models[idx + 1]}…")
-    raise LLMError(f"Semua model Groq gagal ({', '.join(errors)}). Detail terakhir: {r.text[:300]}")
+    raise LLMError(f"Semua model Groq gagal ({', '.join(errors)}). {last}")
 
 
+# ---------------------------------------------------------------- layanan kompatibel OpenAI (free tier)
+COMPAT = {
+    "cerebras": ("https://api.cerebras.ai/v1/chat/completions", lambda: config.CEREBRAS_MODELS),
+    "openrouter": ("https://openrouter.ai/api/v1/chat/completions", lambda: config.OPENROUTER_MODELS),
+    "mistral": ("https://api.mistral.ai/v1/chat/completions", lambda: config.MISTRAL_MODELS),
+}
+
+
+def _compat(service: str, system: str, user: str, temperature: float) -> str:
+    url, models = COMPAT[service]
+    if not keys.has(service):
+        raise LLMError(f"{service.upper()}_API_KEY belum diisi.")
+    messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
+    errors = []
+    for model in models():
+        rf = True
+        while True:
+            key = keys.take(service, model)
+            if key is None:
+                errors.append(f"{model} → semua key kena batas")
+                break
+            report(f"Menunggu jawaban AI dari {PROVIDER_LABEL[service]} {model}{_tag(service, key)}…")
+            body = {"model": model, "temperature": temperature, "messages": messages}
+            if rf:
+                body["response_format"] = {"type": "json_object"}
+            try:
+                r = httpx.post(url, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=TIMEOUT)
+            except httpx.TimeoutException:
+                errors.append(f"{model} → timeout")
+                break
+            if r.status_code == 200:
+                try:
+                    _mark(service, model)
+                    return r.json()["choices"][0]["message"]["content"] or ""
+                except (KeyError, IndexError, TypeError):
+                    errors.append(f"{model} → respons kosong")
+                    break
+            if r.status_code == 429:
+                keys.cool(service, key, model, max(_retry_after(r), 30.0))
+                continue
+            if r.status_code in (401, 403):
+                keys.kill(service, key, f"{r.status_code} {r.text[:80]}")
+                continue
+            if r.status_code == 400 and rf and "response_format" in r.text:
+                rf = False  # model tidak mendukung mode JSON → minta JSON lewat prompt saja
+                continue
+            errors.append(f"{model} → {r.status_code}")
+            break
+    raise LLMError(f"{PROVIDER_LABEL[service]} gagal ({'; '.join(errors)})")
+
+
+# ---------------------------------------------------------------- vision (Groq → cadangan Gemini)
 VISION_MODEL = "qwen/qwen3.8-27b"
 
 
+def vision_available() -> bool:
+    return keys.has("groq") or keys.has("gemini")
+
+
 def vision_json(prompt: str, image_jpeg: bytes, schema: dict | None = None) -> dict:
-    """Tanya model vision Groq tentang satu gambar (mis. lembar kontak thumbnail). JSON wajib."""
-    if not config.GROQ_API_KEY:
-        raise LLMError("Penilaian visual butuh GROQ_API_KEY.")
+    """Tanya model vision tentang satu gambar (mis. lembar kontak thumbnail). JSON wajib.
+    Groq (semua key) dulu; bila habis/gagal → Gemini (semua key)."""
     import base64
-    url = "data:image/jpeg;base64," + base64.b64encode(image_jpeg).decode()
-    messages = [{"role": "user", "content": [{"type": "text", "text": prompt},
-                                             {"type": "image_url", "image_url": {"url": url}}]}]
-    report(f"AI melihat gambar kandidat ({VISION_MODEL})…")
-    use_schema = schema
-    for attempt in range(3):
-        r = _groq_post(VISION_MODEL, messages, 0.1, use_schema)
-        wait = _retry_after(r)
-        if r.status_code == 429 and attempt < 2 and 0 < wait <= 60:
-            report(f"Batas per menit model vision — menunggu {wait:.0f} dtk…")
-            time.sleep(wait + 0.5)
-            continue
-        if r.status_code == 400 and "JSON" in r.text and use_schema:
-            use_schema = None  # skema strict tidak cocok untuk jawaban vision → JSON biasa
-            continue
-        break
-    if r.status_code != 200:
-        raise LLMError(f"Vision Groq {r.status_code}: {r.text[:300]}")
-    return parse_json(r.json()["choices"][0]["message"]["content"])
+    b64 = base64.b64encode(image_jpeg).decode()
+    errors = []
+    if keys.has("groq"):
+        messages = [{"role": "user", "content": [{"type": "text", "text": prompt},
+                                                 {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + b64}}]}]
+        report(f"AI melihat gambar kandidat ({VISION_MODEL})…")
+        try:
+            r = groq_call(VISION_MODEL, messages, 0.1, schema, max_sleeps=2)
+            if r is not None and r.status_code == 400 and "JSON" in r.text and schema:
+                r = groq_call(VISION_MODEL, messages, 0.1, None, max_sleeps=2)
+            if r is not None and r.status_code == 200:
+                _mark("groq", VISION_MODEL)
+                return parse_json(r.json()["choices"][0]["message"]["content"])
+            errors.append(f"Groq vision {r.status_code if r is not None else '429'}")
+        except LLMError as e:
+            errors.append(str(e))
+    if keys.has("gemini"):
+        report("Vision Groq tidak tersedia → memakai Gemini untuk melihat gambar…")
+        body = {"contents": [{"role": "user", "parts": [{"text": prompt},
+                                                        {"inline_data": {"mime_type": "image/jpeg", "data": b64}}]}],
+                "generationConfig": {"temperature": 0.1, "responseMimeType": "application/json"}}
+        try:
+            return parse_json(_gemini_run(body, "Gemini vision"))
+        except LLMError as e:
+            errors.append(str(e))
+    raise LLMError("Penilaian visual gagal: " + (" | ".join(errors) or "butuh GROQ_API_KEY atau GEMINI_API_KEY."))
 
 
+# ---------------------------------------------------------------- Ollama (lokal)
 def _ollama(system: str, user: str, temperature: float, schema: dict | None = None) -> str:
     report(f"Menunggu jawaban AI lokal Ollama {config.OLLAMA_MODEL} — bisa 1–5 menit di CPU…")
     try:
@@ -287,4 +462,5 @@ def _ollama(system: str, user: str, temperature: float, schema: dict | None = No
         raise LLMError("Ollama tidak berjalan. Jalankan `ollama serve` dan `ollama pull <model>`.")
     if r.status_code != 200:
         raise LLMError(f"Ollama {r.status_code}: {r.text[:400]}")
+    _mark("ollama", config.OLLAMA_MODEL)
     return r.json()["message"]["content"]

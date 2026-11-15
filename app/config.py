@@ -15,6 +15,20 @@ def _env(key: str, default: str = "") -> str:
     return os.getenv(key, default).strip()
 
 
+def _first_key(base: str) -> str:
+    """Key pertama dari kolam (KEY=a,b atau KEY_2=…) — hanya untuk cek "sudah diisi?". Pemakaian nyata
+    lewat services/keys.py yang merotasi semua key."""
+    for name in [base] + [f"{base}_{i}" for i in range(2, 21)]:
+        for k in os.getenv(name, "").replace(";", ",").split(","):
+            if k.strip():
+                return k.strip()
+    return ""
+
+
+def _list(key: str, default: str) -> list[str]:
+    return [m.strip() for m in _env(key, default).split(",") if m.strip()]
+
+
 DATA_DIR = ROOT / "data"
 PROJECTS_DIR = DATA_DIR / "projects"
 CACHE_DIR = DATA_DIR / "cache"          # cache library audio dari Drive
@@ -23,16 +37,21 @@ for _d in (PROJECTS_DIR, CACHE_DIR):
 
 LLM_PROVIDER = _env("LLM_PROVIDER", "gemini").lower()
 # Provider cadangan bila provider utama gagal (dilewati otomatis kalau API key-nya kosong).
-LLM_FALLBACK_PROVIDERS = [p.strip().lower() for p in _env("LLM_FALLBACK_PROVIDERS", "groq").split(",") if p.strip()]
-GEMINI_API_KEY = _env("GEMINI_API_KEY")
+# Layanan cloud lain yang key-nya terisi otomatis ikut di belakang rantai ini (lihat llm.chain).
+LLM_FALLBACK_PROVIDERS = [p.lower() for p in _list("LLM_FALLBACK_PROVIDERS", "groq,gemini,cerebras,openrouter,mistral")]
+GEMINI_API_KEY = _first_key("GEMINI_API_KEY")
 GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.8-flash")
 # Dicoba berurutan bila model utama sibuk (503/429) atau sudah dipensiunkan (404).
 GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-flash-latest")
                           .split(",") if m.strip()]
-GROQ_API_KEY = _env("GROQ_API_KEY")
+GROQ_API_KEY = _first_key("GROQ_API_KEY")
 GROQ_MODEL = _env("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_FALLBACK_MODELS = [m.strip() for m in _env("GROQ_FALLBACK_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b")
                         .split(",") if m.strip()]
+# Cadangan gratis tambahan (kompatibel OpenAI). Kosongkan key = tidak dipakai. Model dicoba berurutan.
+CEREBRAS_MODELS = _list("CEREBRAS_MODELS", "gpt-oss-120b,llama-3.3-70b,qwen-3-32b")
+OPENROUTER_MODELS = _list("OPENROUTER_MODELS", "openrouter/free,meta-llama/llama-3.3-70b-instruct:free")
+MISTRAL_MODELS = _list("MISTRAL_MODELS", "mistral-small-latest,open-mistral-nemo")
 OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b")
 
@@ -72,7 +91,7 @@ def _find_bin(name: str, configured: str) -> str:
 # Mode tablet/LAN (HOST=0.0.0.0): perangkat lain wajib PIN. Kosong + HOST non-lokal → PIN acak tiap start.
 APP_PIN = _env("APP_PIN")
 # Mode "Cerita AI": key gratis dari https://enter.pollinations.ai → gambar scene memakai referensi karakter
-POLLINATIONS_KEY = _env("POLLINATIONS_KEY")
+POLLINATIONS_KEY = _first_key("POLLINATIONS_KEY")
 STORY_IMAGE_MODEL = _env("STORY_IMAGE_MODEL", "black-forest-labs/flux.2-klein-4b")
 VIDEO_ENCODER = _env("VIDEO_ENCODER", "auto")
 # Transkrip: auto = Whisper lokal, bila diblokir/tidak ada → Whisper Groq | local | groq

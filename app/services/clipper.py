@@ -1,9 +1,11 @@
 """Jalur 2 (Clipper): transkrip Whisper -> pilih segmen viral -> potong tanpa memutus kalimat."""
+import hashlib
+import re
 import threading
 import time
 
 from .. import config, store
-from . import ffmpeg_utils as ff
+from . import ffmpeg_utils as ff, keys
 from . import llm, prompts
 
 _model = None
@@ -20,10 +22,10 @@ def _whisper():
     return _model
 
 
-def transcribe_file(path, language: str | None, progress, total: float = 0) -> dict:
+def transcribe_file(path, language: str | None, progress, total: float = 0, hint: str = "") -> dict:
     """Transkrip dengan timestamp kata: Whisper lokal bila bisa, kalau tidak Whisper Groq (lihat stt.py)."""
     from . import stt
-    return stt.transcribe(path, language, progress, total)
+    return stt.transcribe(path, language, progress, total, hint)
 
 
 def transcribe_local(path, language: str | None, progress, total: float = 0) -> dict:
@@ -50,7 +52,10 @@ def transcribe(pid: str, params: dict, progress) -> dict:
     p = store.load(pid)
     src = store.source_file(p)
     lang = params.get("language") or p["language"]
-    tr = transcribe_file(src, lang, progress, p["research"]["source"].get("duration") or 0)
+    so = p["research"].get("source") or {}
+    # judul + channel + awal deskripsi sebagai "prompt" Whisper → nama orang/merek/istilah ditulis benar
+    hint = ". ".join(x for x in [so.get("title"), so.get("channel"), (so.get("description") or "")[:200]] if x)
+    tr = transcribe_file(src, lang, progress, so.get("duration") or 0, hint)
 
     def apply(p):
         p["script"]["transcript"] = tr
@@ -60,8 +65,23 @@ def transcribe(pid: str, params: dict, progress) -> dict:
     return {"segments": len(tr["segments"])}
 
 
+def dedupe_segments(segments: list[dict]) -> list[dict]:
+    """Transkrip lama (sebelum perbaikan stt._assign_words) bisa memuat kata yang sama di dua segmen
+    bertetangga → subtitle & kalimat dobel. Kata dengan waktu mulai yang sudah terpakai dibuang."""
+    seen, out = set(), []
+    for s in segments:
+        ws = []
+        for w in s.get("words", []):
+            k = (round(w["start"], 2), w["text"].strip().lower())
+            if k not in seen:
+                seen.add(k)
+                ws.append(w)
+        out.append({**s, "words": ws})
+    return out
+
+
 def _all_words(segments: list[dict]) -> list[dict]:
-    return [w for s in segments for w in s.get("words", [])]
+    return [w for s in dedupe_segments(segments) for w in s.get("words", [])]
 
 
 _END = (".", "?", "!", "…")
@@ -94,7 +114,7 @@ def sentences(segments: list[dict]) -> list[dict]:
     """Satuan kalimat dari kata ber-timestamp: putus di . ? ! atau jeda ≥0.8 dtk; kalimat sangat panjang dipecah
     di koma/jeda terdekat. Inilah satuan yang dipilih AI, sehingga klip selalu mulai & berakhir di batas kalimat.
     [{start, end, text}]; transkrip tanpa timestamp kata memakai segmen apa adanya."""
-    words = [w for s in segments for w in _punct_words(s)]
+    words = [w for s in dedupe_segments(segments) for w in _punct_words(s)]
     if not words:
         return [{"start": s["start"], "end": s["end"], "text": s["text"]} for s in segments]
     out, cur = [], []
@@ -149,13 +169,23 @@ def _num(v, default: float = 0.0) -> float:
         return default
 
 
+CONNECTIVE = re.compile(r"^(jadi|nah|terus|trus|makanya|karena itu|soalnya|tapi|dan|lalu|kemudian|habis itu|"
+                        r"so|and|but|because|then)\b", re.I)
+
+
 def _fit_range(units: list[dict], a: int, b: int, lo: float, hi: float) -> tuple[int, int]:
     """Perlebar/persempit rentang kalimat supaya durasi klip masuk batas format."""
     while units[b]["end"] - units[a]["start"] < lo and b + 1 < len(units) \
             and units[b + 1]["end"] - units[a]["start"] <= hi:
         b += 1
     while units[b]["end"] - units[a]["start"] > hi and b > a:
-        b -= 1
+        # terlalu panjang: kalimat pembuka yang cuma kata sambung ("jadi…", "nah…") dibuang lebih dulu,
+        # supaya punchline di akhir tidak ikut terpotong
+        if a < b and CONNECTIVE.match(units[a]["text"].strip()) \
+                and units[b]["end"] - units[a + 1]["start"] >= lo * 0.75:
+            a += 1
+        else:
+            b -= 1
     return a, b
 
 
@@ -185,6 +215,92 @@ def _overlap(a: dict, b: dict) -> float:
     return max(0.0, inter) / max(0.1, min(a["end"] - a["start"], b["end"] - b["start"]))
 
 
+def _heat_at(heat: list[dict], st: float, en: float) -> float:
+    """Rata-rata nilai heatmap YouTube (0..1) di rentang [st, en]; 0 bila tidak ada data."""
+    vals = [h["v"] for h in heat if h["e"] > st and h["s"] < en]
+    return sum(vals) / len(vals) if vals else 0.0
+
+
+def _loudness(p: dict, progress) -> list[float]:
+    """RMS suara per 0.5 dtk (dB) dari seluruh video — satu kali decode audio, disimpan di source/.stt/."""
+    import json
+    import subprocess
+    src = store.source_file(p)
+    cache = src.parent / ".stt" / f"loud_{src.stem}_{src.stat().st_size}.json"
+    if cache.is_file():
+        try:
+            return json.loads(cache.read_text())
+        except ValueError:
+            pass
+    progress("Mengukur energi suara (tawa, teriakan, momen heboh)…")
+    try:
+        import numpy as np
+        raw = subprocess.run([config.FFMPEG, "-v", "error", "-i", str(src), "-vn", "-ac", "1", "-ar", "8000",
+                              "-f", "s16le", "-"], capture_output=True, timeout=900).stdout
+        a = np.frombuffer(raw, dtype=np.int16).astype(np.float32) / 32768.0
+        n = len(a) // 4000
+        if not n:
+            return []
+        rms = np.sqrt((a[:n * 4000].reshape(n, 4000) ** 2).mean(axis=1) + 1e-9)
+        out = [round(float(x), 1) for x in 20 * np.log10(rms)]
+    except Exception:  # noqa: BLE001 — sinyal tambahan; gagal = tidak dipakai
+        return []
+    cache.parent.mkdir(exist_ok=True)
+    cache.write_text(json.dumps(out))
+    return out
+
+
+def _mark_signals(p: dict, units: list[dict], progress) -> list[dict]:
+    """Tandai kalimat dengan sinyal nyata untuk AI: 🔥 = 20% teratas heatmap "paling sering diputar ulang"
+    YouTube, 🔊 = suara jauh lebih keras dari biasanya. Mengembalikan heatmap untuk bonus skor."""
+    heat = (p["research"].get("source") or {}).get("heatmap") or []
+    if heat:
+        hv = [_heat_at(heat, u["start"], u["end"]) for u in units]
+        cut = sorted(hv)[int(len(hv) * 0.8)] if hv else 1
+        for u, v in zip(units, hv):
+            if v >= cut and v > 0.3:
+                u["sig"] = u.get("sig", "") + " 🔥"
+    loud = _loudness(p, progress)
+    if len(loud) > 20:
+        import statistics
+        speech = [x for x in loud if x > -50]  # abaikan hening
+        if len(speech) > 20:
+            mu, sd = statistics.mean(speech), statistics.pstdev(speech) or 1.0
+            for u in units:  # rata-rata jauh di atas biasa, atau satu lonjakan tajam (tawa/teriak)
+                seg = loud[int(u["start"] * 2):int(u["end"] * 2) + 1]
+                if seg and ((statistics.mean(seg) - mu) / sd >= 0.9
+                            or ((max(seg) - mu) / sd >= 1.5 and statistics.mean(seg) > mu)):
+                    u["sig"] = u.get("sig", "") + " 🔊"
+    return heat
+
+
+def _rerank(clips: list[dict], units: list[dict], title: str, lang: str, direction: str, heat: list[dict],
+            progress) -> list[dict]:
+    """Babak final: satu model membandingkan semua kandidat berdampingan (skor antar-bagian jadi setara).
+    Skor akhir = 60% rerank + 40% skor bagian (+ bonus maks 10 dari heatmap YouTube). Gagal → urutan lama."""
+    if len(clips) < 3:
+        return clips
+    progress(f"Babak final: AI membandingkan {len(clips)} kandidat berdampingan…")
+    sys_, usr = prompts.rerank_clips(clips, units, title, lang, direction)
+    try:
+        rk = llm.chat_json(sys_, usr, temperature=0.2).get("ranking") or []
+    except llm.LLMError as e:
+        progress(f"Babak final dilewati ({str(e)[:80]}) — memakai skor per bagian")
+        rk = []
+    got = {int(_num(r.get("n"), -1)): r for r in rk if isinstance(r, dict)}
+    for i, c in enumerate(clips):
+        r = got.get(i)
+        if r is not None:
+            c["window_score"] = c["score"]
+            c["score"] = int(round(0.6 * max(0, min(100, _num(r.get("score")))) + 0.4 * c["score"]))
+            if r.get("why"):
+                c["reason"] = str(r["why"])[:200]
+        if heat:
+            c["heat"] = round(_heat_at(heat, c["start"], c["end"]), 2)
+            c["score"] = min(100, c["score"] + int(round(10 * c["heat"])))
+    return sorted(clips, key=lambda c: -c["score"])
+
+
 def _schema() -> dict:
     sub = llm.strict({k: llm.INT for k in WEIGHTS})
     clip = llm.strict({"start_unit": llm.INT, "end_unit": llm.INT, "title": llm.STR, "hook": llm.STR,
@@ -203,11 +319,12 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     title = p["research"]["source"].get("title", "")
     units = sentences(segs)
     words = _all_words(segs)
+    heat = _mark_signals(p, units, progress)
     dur = units[-1]["end"] - units[0]["start"]
     want = max(3, min(10, int(dur // 90) + 2))  # jumlah klip wajar sesuai panjang video
     # Ukuran jendela menyesuaikan: sebisa mungkin 1 jendela per model Groq → semua dinilai bersamaan tanpa antre,
     # dan instruksi prompt tidak diulang berkali-kali (hemat kuota token/menit).
-    lanes = len(llm.groq_models()) if config.GROQ_API_KEY else 1
+    lanes = len(_lanes()) if keys.has("groq") else 1
     total = sum(len(u["text"]) + 20 for u in units)
     wins = _windows(units, int(min(WINDOW_MAX, max(WINDOW_CHARS, total * 1.15 / lanes))))
     per_win = max(3, min(6, -(-want * 2 // len(wins))))
@@ -239,7 +356,15 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     for c in cands:  # klip yang tumpang-tindih ≥25% dengan klip berskor lebih tinggi dibuang
         if all(_overlap(c, o) < 0.25 for o in clips):
             clips.append(c)
-    clips = [{"id": f"c{i + 1}", **c} for i, c in enumerate(clips[:want])]
+    clips = _rerank(clips[:max(want + 4, 12)], units, title, p["language"], direction, heat, progress)
+    # ID stabil (dari rentang waktu), supaya "Cari Momen" ulang tidak menukar klip yang sudah jadi video
+    # Klip lama dengan rentang (hampir) sama memakai ID lamanya → video hasil yang sudah ada tetap tertaut.
+    old = p["script"].get("clips") or []
+
+    def cid(c):
+        same = next((o for o in old if abs(o["start"] - c["start"]) < 0.6 and abs(o["end"] - c["end"]) < 0.6), None)
+        return same["id"] if same else "c" + hashlib.sha1(f"{c['start']:.1f}-{c['end']:.1f}".encode()).hexdigest()[:8]
+    clips = [{**c, "id": cid(c)} for c in clips[:want]]
     if not clips:
         raise RuntimeError(f"AI tidak menemukan klip berdurasi {lo}-{hi} dtk. Coba lagi, atau pilih manual.")
 
@@ -260,6 +385,13 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     return {"count": len(clips), "failed_parts": len(failed), "parts": len(wins)}
 
 
+def _lanes() -> list[str]:
+    """Jalur paralel penilai momen: tiap model Groq × jumlah key (tiap akun = kuota token/menit sendiri),
+    maks 9 jalur supaya tidak membanjiri server."""
+    n = max(1, len(keys.pool("groq")))
+    return [m for _ in range(n) for m in llm.groq_models()][:9]
+
+
 def _score_windows(pid, p, units, wins, title, per_win, direction, provider, progress, limits=None):
     """Nilai tiap jendela transkrip. Jendela dibagi bergiliran ke model-model Groq dan dikerjakan PARALEL
     (tiap model punya kuota token/menit sendiri, ±8rb di tier gratis). Hasil tiap jendela disimpan di
@@ -271,7 +403,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
     from .. import jobs
 
     def key(ws, we):
-        txt = "|".join(u["text"] for u in units[ws:we])
+        txt = "|".join(u["text"] + u.get("sig", "") for u in units[ws:we])
         return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{limits}|{txt}".encode()).hexdigest()[:16]
 
     cache = dict(p["script"].get("clip_cache") or {})
@@ -280,8 +412,8 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
     if not todo:
         return raw, []
     use_groq = (provider or config.LLM_PROVIDER).lower() == "groq" or (
-        not provider and "groq" in config.LLM_FALLBACK_PROVIDERS and config.GROQ_API_KEY)
-    models = llm.groq_models() if use_groq and config.GROQ_API_KEY else [None]
+        not provider and "groq" in llm.chain() and keys.has("groq"))
+    models = _lanes() if use_groq and keys.has("groq") else [None]
     # Antrean bersama: model yang bebas langsung mengambil bagian berikutnya; model yang kena batas
     # token/menit mengembalikan bagiannya ke antrean (diambil model lain) lalu istirahat sampai pulih.
     import queue
@@ -291,6 +423,7 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
         q.put(t)
     pending = [len(todo)]
     done, errors, lock = [len(wins) - len(todo)], [], threading.Lock()
+    tries: dict[int, int] = {}
     parent_progress, parent_jid = getattr(jobs._local, "progress", None), getattr(jobs._local, "jid", None)
     progress(f"AI menilai {len(todo)} bagian video" + (f" paralel di {len(models)} model Groq…" if len(models) > 1 else "…"))
 
@@ -309,9 +442,17 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
             try:
                 # tanpa schema strict: jawaban panjang gpt-oss sering gagal validasi & membakar kuota token
                 got = llm.chat_json(sys_, usr, "groq" if model else provider, temperature=0.4,
-                                    groq_model=model, effort="low", fallback=model is None,
+                                    groq_model=model, effort="low", fallback=model is None, only_model=bool(model),
                                     max_wait=3 if model and len(models) > 1 else None).get("clips", [])
             except llm.RateLimited as e:
+                with lock:
+                    tries[k] = tries.get(k, 0) + 1
+                    give_up = tries[k] > 2 * len(models)
+                    if give_up:  # kuota harian habis / semua jalur terus penuh → serahkan ke layanan lain
+                        errors.append(f"Bagian {k + 1}: kuota Groq habis")
+                        pending[0] -= 1
+                if give_up:
+                    continue
                 q.put((k, ws, we))  # oper ke model lain
                 progress(f"AI menilai momen viral: {done[0]}/{len(wins)} bagian selesai — kuota gratis per menit "
                          f"{e.model.split('/')[-1]} habis, sisa bagian dilanjutkan ±{e.wait:.0f} dtk lagi…")
@@ -347,6 +488,26 @@ def _score_windows(pid, p, units, wins, title, per_win, direction, provider, pro
         futs = [ex.submit(lane, m) for m in models]
         for f in futs:
             f.result()
+    # Bagian yang gagal di semua model/key Groq → nilai ulang lewat layanan lain (Gemini, Cerebras, …)
+    # supaya Clipper tidak bergantung pada satu AI.
+    if errors and models != [None]:
+        others = [x for x in llm.chain() if x != "groq"]
+        retry = [(k, ws, we) for k, ws, we in todo if key(ws, we) not in cache]
+        if others and retry:
+            progress(f"{len(retry)} bagian gagal di Groq → dinilai ulang dengan {llm.PROVIDER_LABEL[others[0]]}…")
+            errors.clear()
+            for k, ws, we in retry:
+                sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
+                                                count=per_win, direction=direction, limits=limits)
+                try:
+                    got = [c for c in llm.chat_json(sys_, usr, others[0], temperature=0.4, skip=("groq",))
+                           .get("clips", []) if isinstance(c, dict)]
+                except llm.LLMError as e:
+                    errors.append(f"Bagian {k + 1}: {str(e)[:300]}")
+                    continue
+                raw.extend(got)
+                cache[key(ws, we)] = got
+                store.update(pid, lambda pp, kk=key(ws, we), g=got: pp["script"].setdefault("clip_cache", {}).__setitem__(kk, g))
     # buang cache jendela yang sudah tidak dipakai (transkrip / arahan berubah)
     keep = {key(ws, we) for ws, we in wins}
 
@@ -407,6 +568,11 @@ def fork_clip(src_pid: str, idx: int) -> dict:
     p.update({"title": clip.get("title") or src["title"], "current_stage": 1, "voice": src["voice"]})
     p["research"] = src["research"]
     p["script"] = {**src["script"], "selected_clip": idx, "clip_cache": {}}
+    tr = src["script"].get("transcript") or {}
+    if tr.get("segments"):  # transkrip penuh video 1 jam ±1 MB → anak cukup ±90 dtk di sekitar klipnya
+        lo_t, hi_t = clip["start"] - 90, clip["end"] + 90
+        p["script"]["transcript"] = {**tr, "segments": dedupe_segments(
+            [g for g in tr["segments"] if g["end"] >= lo_t and g["start"] <= hi_t])}
     p["subtitles"]["style"] = dict(src["subtitles"].get("style") or p["subtitles"]["style"])
     p["assets"]["crop_mode"] = src["assets"].get("crop_mode") or p["assets"]["crop_mode"]
     p["stage_status"].update({"research": "approved", "script": "draft"})
@@ -559,7 +725,14 @@ def auto_clip(pid: str, params: dict, progress) -> dict:
         p = store.load(pid)
         clips = p["script"]["clips"]
         n = int(opts.get("count") or 0) or len(clips)
-        idx = sorted(range(len(clips)), key=lambda i: -(clips[i].get("score") or 0))[:n]
+        # klip yang sudah jadi video (mis. percobaan sebelumnya sempat gagal di tengah) tidak dibuat ulang
+        done_ids = {q.get("clip_id") for q in store.list_projects() if q.get("parent") == pid}
+        idx = [i for i in sorted(range(len(clips)), key=lambda i: -(clips[i].get("score") or 0))
+               if clips[i].get("id") not in done_ids][:n]
+        if not idx:
+            progress("[4/4] Semua klip terbaik sudah jadi video")
+            store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"status": "done", "error": ""}))
+            return {"created": [], "failed": []}
         style = opts.get("sub_style")
         if not style and opts.get("template"):
             t = store.SUB_TEMPLATES.get(opts["template"]) or store.user_templates().get(opts["template"])

@@ -428,14 +428,19 @@ def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int 
     jadi AI memilih nomor kalimat, bukan menebak detik."""
     lo, hi = limits or ((20, 59) if fmt == "short" else (90, 600))
     # ringkas (hemat token): nomor + menit:detik mulai; durasi klip dihitung ulang oleh kode
-    lines = "\n".join(f"[{i + offset}] {int(s['start'] // 60)}:{int(s['start'] % 60):02d} {s['text']}"
+    lines = "\n".join(f"[{i + offset}] {int(s['start'] // 60)}:{int(s['start'] % 60):02d} {s['text']}{s.get('sig', '')}"
                       for i, s in enumerate(units))
+    sig = [x for x in ("🔥", "🔊") if any(x in (u.get("sig") or "") for u in units)]
+    tanda = ("\nTANDA dari data nyata (bukan tebakan): "
+             + ("🔥 = bagian yang paling sering DIPUTAR ULANG penonton YouTube; " if "🔥" in sig else "")
+             + ("🔊 = suara tiba-tiba keras/heboh (tawa, teriak, debat); " if "🔊" in sig else "")
+             + "utamakan momen di sekitar tanda ini bila isinya memang kuat.\n") if sig else ""
     system = ("Kamu editor klip viral profesional untuk YouTube Shorts/TikTok. Kamu jujur menilai: "
               "kebanyakan bagian video BIASA saja, hanya sedikit yang benar-benar layak diklip.")
     arah = f"\nARAHAN KREATOR (utamakan ini): {direction.strip()}\n" if direction.strip() else ""
     user = f"""Video sumber: "{title}". Transkrip per KALIMAT bernomor ([nomor] menit:detik mulai):
 {lines}
-{arah}
+{arah}{tanda}
 Pilih sampai {count} momen terbaik. Setiap klip:
 - mulai di kalimat "start_unit" dan berakhir di kalimat "end_unit" (nomor di kurung siku), durasi {lo}-{hi} detik (hitung dari waktu mulai kalimat);
 - kalimat PERTAMA harus bisa dipahami tanpa konteks sebelumnya (jangan mulai dengan "jadi", "nah itu", "makanya",
@@ -452,6 +457,26 @@ Nilai tiap klip 0-100 (jujur; 80+ hanya untuk yang benar-benar kuat):
 Bahasa judul/hook/alasan: {LANG_NAME.get(lang, lang)}.
 Balas JSON: {{"clips": [{{"start_unit": 0, "end_unit": 5, "title": "...", "hook": "...", "reason": "...",
   "scores": {{"hook": 70, "alur": 60, "nilai": 65, "bagikan": 55}}, "keywords": ["..."]}}]}}"""
+    return system, user
+
+
+def rerank_clips(cands: list[dict], units: list[dict], title: str, lang: str, direction: str = "") -> tuple[str, str]:
+    """Babak final: SEMUA kandidat dibandingkan berdampingan oleh satu model → skor setara antar-bagian video
+    (tiap bagian tadinya dinilai model berbeda, jadi skor mentahnya tidak bisa dibandingkan langsung)."""
+    def txt(c):
+        body = " ".join(u["text"] for u in units if u["start"] >= c["start"] - 0.5 and u["end"] <= c["end"] + 0.5)
+        return body if len(body) <= 700 else body[:450] + " … " + body[-220:]
+    rows = "\n\n".join(f"#{i} ({c['end'] - c['start']:.0f} dtk) judul: {c['title']}\n{txt(c)}" for i, c in enumerate(cands))
+    arah = f"\nARAHAN KREATOR: {direction.strip()}" if direction.strip() else ""
+    system = "Kamu kurator Shorts/TikTok yang sangat selektif. Bandingkan kandidat secara berdampingan dan jujur."
+    user = f"""Video sumber: "{title}". Berikut {len(cands)} kandidat klip (#nomor, durasi, judul, isi ucapan):
+
+{rows}
+{arah}
+Beri tiap kandidat skor 0-100: seberapa besar peluangnya ditonton sampai habis & dibagikan, DIBANDINGKAN kandidat lain
+(hook 3 detik pertama, cerita utuh & tuntas, emosi/humor/insight, bisa dipahami tanpa konteks).
+Sebar skornya (yang terbaik 85+, yang biasa < 50). Bahasa alasan: {LANG_NAME.get(lang, lang)}.
+Balas JSON: {{"ranking": [{{"n": 0, "score": 80, "why": "alasan singkat"}}]}}"""
     return system, user
 
 

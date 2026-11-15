@@ -232,6 +232,33 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     urutan bisa diubah, judul AI untuk yang kosong) → `POST /api/publish/bulk` (`youtube.bulk`, job berurutan;
     `upload:false` = simpan jadwal saja). Jadwal masa lalu ditolak di awal sebelum ada yang terunggah.
 
+16. **15 Nov 2026 — AI tanpa ketergantungan satu layanan + Clipper versi riset 2:**
+    - `keys.py`: kolam API key per layanan (`X_API_KEY=a,b` atau `X_API_KEY_2..20`). Key dipilih bergiliran
+      (LRU), 429 → key didinginkan PER MODEL (Gemini harian ±1 jam, per menit dari retryDelay), 401/403 → mati
+      sampai restart. Status (tanpa isi key) di Cek Kesiapan. `config.*_API_KEY` = key pertama (hanya cek "terisi").
+    - `llm.py` ditulis ulang: rotasi key Groq (`groq_call`) & Gemini (`gemini_post`, dipakai juga Gemini TTS),
+      provider baru kompatibel OpenAI **Cerebras / OpenRouter / Mistral** (`_compat`), `llm.chain()` = utama →
+      LLM_FALLBACK_PROVIDERS → layanan cloud lain yang key-nya terisi. Vision: Groq → cadangan Gemini.
+      `llm.last_used()` = provider+model yang menjawab (per thread). `only_model` untuk jalur paralel.
+    - Whisper Groq & Pollinations ikut rotasi key; Pollinations tanpa key tersisa → endpoint gratis klasik.
+    - Clipper: jalur paralel = model Groq × jumlah key (maks 9); bagian yang gagal di Groq dinilai ulang lewat
+      layanan lain; batas percobaan per bagian (dulu bisa loop selamanya saat kuota harian habis).
+      Sinyal nyata di prompt: 🔥 heatmap "paling sering diputar ulang" YouTube (yt-dlp `heatmap`, disimpan di
+      `research.source.heatmap` + `chapters` + `description`), 🔊 lonjakan energi suara (RMS 0.5 dtk, cache
+      `source/.stt/loud_*.json`). **Babak final rerank** (`prompts.rerank_clips`): semua kandidat dibandingkan
+      satu model, skor = 60% rerank + 40% skor bagian + bonus heatmap. ID klip stabil (hash rentang; klip lama
+      dengan rentang sama mempertahankan ID). auto_clip tidak memproduksi ulang klip yang sudah jadi video.
+      `_fit_range` membuang kalimat pembuka kata sambung dulu sebelum memotong akhir.
+    - STT: kata masuk tepat satu segmen (`stt._assign_words`; transkrip lama dibersihkan `clipper.dedupe_segments`),
+      segmen halusinasi Whisper dibuang (no_speech_prob/avg_logprob/compression_ratio), potongan 30 mnt disimpan
+      di `source/.stt/` (ulang = lanjut), judul+channel sebagai `prompt` Whisper. Anak hanya membawa transkrip
+      ±90 dtk di sekitar klipnya. yt-dlp: retries/fragment_retries/concurrent_fragment_downloads.
+    - Uji nyata: video 72 mnt → 10 momen dalam 47 dtk (4 bagian paralel + rerank 3 dtk); key Groq palsu
+      otomatis dinonaktifkan; Gemini gagal → Groq.
+    - Belum (hasil riset, prioritas berikut): deteksi pembicara aktif dari landmark mulut YuNet + layout split
+      2 pembicara, render satu kali encode (potong+reframe langsung di graf render), cut_clip pakai encoder GPU,
+      teks auto-caption YouTube sebagai cadangan transkrip, "cold open" teaser, produksi klip paralel.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).
