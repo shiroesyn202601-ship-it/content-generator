@@ -149,15 +149,35 @@ def download_source(pid: str, params: dict, progress) -> dict:
         shutil.rmtree(out_dir, ignore_errors=True)
     out_dir.mkdir(exist_ok=True)
 
+    part = {"n": 0}
+
     def hook(d):
+        # Angka dihitung sendiri dari byte (string _percent_str/_eta_str yt-dlp berisi kode warna ANSI).
         if d.get("status") == "downloading":
-            progress(f"Mengunduh {d.get('_percent_str', '').strip()} ({d.get('_eta_str', '')})")
+            got = d.get("downloaded_bytes") or 0
+            tot = d.get("total_bytes") or d.get("total_bytes_estimate") or 0
+            spd, eta = d.get("speed") or 0, d.get("eta")
+            inf = d.get("info_dict") or {}
+            if inf.get("vcodec") == "none":
+                what = "audio"
+            else:
+                fps = inf.get("fps")
+                what = "video" + (f" {inf['height']}p" if inf.get("height") else "") + (f"{fps:.0f}" if fps else "")
+            bits = [f"{got / tot * 100:.1f}%" if tot else "", f"{got / 1e9:.2f}/{tot / 1e9:.2f} GB" if tot > 1e9
+                    else f"{got / 1e6:.0f}/{tot / 1e6:.0f} MB" if tot else f"{got / 1e6:.0f} MB",
+                    f"{spd / 1e6:.1f} MB/dtk" if spd else "",
+                    (f"sisa {int(eta // 60)} mnt {int(eta % 60)} dtk" if eta >= 60 else f"sisa {int(eta)} dtk")
+                    if isinstance(eta, (int, float)) else ""]
+            progress(f"Mengunduh {what}: " + " · ".join(b for b in bits if b))
         elif d.get("status") == "finished":
-            progress("Menggabungkan audio+video...")
+            part["n"] += 1
+            progress("Menggabungkan audio + video…" if part["n"] >= 2 else "Bagian video selesai, mengunduh audio…")
 
     opts = {
         # Utamakan H.264 (avc1): AV1/VP9 sangat berat di-decode CPU laptop saat potong & render.
-        "format": ("bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
+        # 60 fps ±2x ukuran file tanpa beda berarti untuk Shorts → utamakan ≤30 fps (unduhan ±separuh lebih cepat).
+        "format": ("bv*[height<=1080][fps<=30][vcodec^=avc1]+ba[ext=m4a]/"
+                   "bv*[height<=1080][vcodec^=avc1]+ba[ext=m4a]/bv*[height<=1080][ext=mp4]+ba[ext=m4a]/"
                    "b[height<=1080][ext=mp4]/b"),
         "merge_output_format": "mp4",
         "outtmpl": str(out_dir / "source.%(ext)s"),
