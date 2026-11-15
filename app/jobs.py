@@ -85,6 +85,21 @@ def _load() -> None:
     _save()
 
 
+def bind(fn):
+    """Bungkus fungsi untuk thread pembantu (mis. produksi klip paralel) supaya report() & cancelled()
+    tetap merujuk ke job yang sama."""
+    progress, jid = getattr(_local, "progress", None), getattr(_local, "jid", None)
+
+    def run(*a, **kw):
+        prev = (getattr(_local, "progress", None), getattr(_local, "jid", None))
+        _local.progress, _local.jid = progress, jid
+        try:
+            return fn(*a, **kw)
+        finally:
+            _local.progress, _local.jid = prev
+    return run
+
+
 def submit(project_id: str, kind: str, fn, *args, **kwargs) -> str:
     jid = uuid.uuid4().hex[:10]
     now = time.time()

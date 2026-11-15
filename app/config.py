@@ -57,6 +57,11 @@ OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b")
 
 PEXELS_API_KEY = _env("PEXELS_API_KEY")
 PIXABAY_API_KEY = _env("PIXABAY_API_KEY")
+# Produksi massal Clipper: berapa klip dikerjakan bersamaan (CPU/GPU + menunggu AI). 1 = berurutan.
+try:
+    CLIP_WORKERS = max(1, min(6, int(_env("CLIP_WORKERS", "3") or 3)))
+except ValueError:
+    CLIP_WORKERS = 3
 
 WHISPER_MODEL = _env("WHISPER_MODEL", "small")
 WHISPER_DEVICE = _env("WHISPER_DEVICE", "cpu")

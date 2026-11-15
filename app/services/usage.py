@@ -34,6 +34,7 @@ class Report:
         self.windows: list[dict] = []  # {n, of, t0, t1, pid}
         self.steps: list[dict] = []    # {name, pid, t0, t1, ok}
         self.calls: list[dict] = []    # {kind, service, model, seconds, purpose, pid, t}
+        self.links: dict[int, str] = {}  # nomor klip (Video n/N) → pid video hasil
         self._lock = threading.Lock()
 
     # --- deteksi fase dari pesan progres
@@ -50,12 +51,14 @@ class Report:
                     self.phases[-1]["t1"] = t
                 self.phases.append({"name": name, "t0": t, "t1": None})
         v = self._VIDEO.search(msg or "")
-        if v:
+        if v:  # klip bisa berjalan bersamaan → jendela = pesan pertama s.d. pesan terakhir klip itu
             n, of = int(v.group(1)), int(v.group(2))
-            if not self.windows or self.windows[-1]["n"] != n:
-                if self.windows and self.windows[-1]["t1"] is None:
-                    self.windows[-1]["t1"] = t
-                self.windows.append({"n": n, "of": of, "t0": t, "t1": None, "pid": None})
+            with self._lock:
+                w = next((x for x in self.windows if x["n"] == n), None)
+                if w is None:
+                    self.windows.append({"n": n, "of": of, "t0": t, "t1": t, "pid": None})
+                else:
+                    w["t1"] = t
 
     def _pid_now(self) -> str | None:
         st = getattr(_tls, "pid", None)
@@ -69,9 +72,12 @@ class Report:
             if x["t1"] is None:
                 x["t1"] = t
         # jendela klip ↔ pid: pid pertama yang tercatat di dalam jendela waktunya
-        for w in self.windows:
-            hit = next((s["pid"] for s in self.steps if s["pid"] and w["t0"] <= s["t0"] <= w["t1"]), None)
-            w["pid"] = hit
+        for w in self.windows:  # pid klip dari usage.link(n, pid); jendela diperluas s.d. langkah terakhirnya
+            w["pid"] = self.links.get(w["n"]) or w["pid"]
+            if w["pid"]:
+                ends = [s["t1"] for s in self.steps if s["pid"] == w["pid"] and s["t1"]]
+                if ends:
+                    w["t1"] = max(w["t1"], max(ends))
         return self
 
     # --- keluaran
@@ -108,8 +114,8 @@ class Report:
         win = next((c for c in d["clips"] if c["pid"] == pid), None)
         steps = [s for s in d["steps"] if s["pid"] == pid]
         known = sum(s["seconds"] for s in steps)
-        if win and win["seconds"] - known > 1:
-            steps.insert(0, {"name": "Potong & auto-reframe", "pid": pid,
+        if win and win["seconds"] - known > 2:
+            steps.insert(0, {"name": "Persiapan & antre", "pid": pid,
                              "seconds": round(win["seconds"] - known, 1), "ok": True})
         return {"title": self.title, "started": d["started"], "total": win["seconds"] if win else round(known, 1),
                 "steps": steps, "ai": d["ai_by_pid"].get(pid, []),
@@ -185,6 +191,13 @@ def step(name: str, pid: str | None = None):
         s["t1"] = _now()
         stack.pop()
         names.pop()
+
+
+def link(n: int, pid: str) -> None:
+    """Tautkan "Video n/N" di pesan progres dengan proyek video hasilnya (produksi paralel)."""
+    rep = current()
+    if rep is not None:
+        rep.links[int(n)] = pid
 
 
 def stepped(name: str):

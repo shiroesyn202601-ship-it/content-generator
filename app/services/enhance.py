@@ -18,6 +18,7 @@ Rencana AI (p["enhance"]["plan"]) bisa diedit user lalu diterapkan ulang tanpa m
 """
 import random
 import re
+import threading
 from pathlib import Path
 
 from .. import config, store
@@ -34,6 +35,7 @@ PAD_W = 0.08         # napas di sekitar kata yang dipertahankan
 GAP_KEEP = 0.45      # jeda (setelah padding) di atas ini dibuang
 MIN_SHOT = 1.6       # punch-in hanya bila potongan cukup panjang
 BROLL_DUR, EMOJI_DUR = 2.4, 1.3
+_cache_lock = threading.Lock()  # produksi paralel: emoji/SFX yang sama jangan diunduh/dibuat bersamaan
 _WORD = re.compile(r"[^\wÀ-ÿ'-]+", re.U)
 
 
@@ -159,6 +161,20 @@ def make_plan(p: dict, words: list[dict], sents: list[list[int]], opts: dict, pr
     return _clean_plan(raw, len(sents))
 
 
+# B-roll yang TIDAK boleh dicari otomatis (instruksi di prompt saja tidak cukup — AI kadang tetap mengusulkan).
+# Foto stok untuk istilah ini berisiko melanggar kebijakan konten YouTube (seksual/kekerasan/medis grafis).
+SENSITIVE = re.compile(
+    r"\b(pubic|genital\w*|penis|vagina\w*|vulva|testic\w*|scrot\w*|anus|anal|buttock\w*|nipple\w*|breast\w*|"
+    r"nude|naked|nudity|sex\w*|erotic|porn\w*|lingerie|underwear|bikini|condom\w*|intimate|crotch|groin|"
+    r"blood\w*|gore|corpse|dead body|wound\w*|injur\w*|surgery|surgical|weapon\w*|gun\w*|knife|drug\w*|"
+    r"syringe|vomit\w*|feces|poop|urine|kelamin\w*|kemaluan\w*|payudara\w*|telanjang|bugil|seks\w*|darah\w*|mayat\w*|manuk\w*|jembut\w*|selangkang\w*)\b",
+    re.I)
+
+
+def _sensitive(text: str) -> bool:
+    return bool(SENSITIVE.search(text or ""))
+
+
 def _clean_plan(raw: dict, n_sent: int) -> dict:
     def s(v, n=300):
         return str(v or "").strip()[:n]
@@ -182,7 +198,8 @@ def _clean_plan(raw: dict, n_sent: int) -> dict:
                       for x in (raw.get("claims") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("claim"))][:2],
            "broll": [{"sent": int(x["sent"]), "word": s(x.get("word"), 40), "query_en": s(x.get("query_en"), 60),
                       "kind": x.get("kind") if x.get("kind") in ("photo", "commons", "ai") else "photo"}
-                     for x in (raw.get("broll") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("query_en"))][:4],
+                     for x in (raw.get("broll") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("query_en"))
+                     and not _sensitive(f"{x.get('query_en')} {x.get('word')}")][:4],
            "emoji": [{"sent": int(x["sent"]), "word": s(x.get("word"), 40), "emoji": s(x.get("emoji"), 12)}
                      for x in (raw.get("emoji") or []) if isinstance(x, dict) and sent_ok(x)
                      and s(x.get("emoji")) and not s(x.get("emoji")).isascii()][:5]}
@@ -302,6 +319,11 @@ def _broll_asset(item: dict, d: Path, k: int, fmt: str) -> dict | None:
 
 def _emoji_png(e: str) -> Path | None:
     """Emoji Noto (Apache 2.0) 512 px, di-cache di data/cache/emoji."""
+    with _cache_lock:
+        return _emoji_png_locked(e)
+
+
+def _emoji_png_locked(e: str) -> Path | None:
     cps = "_".join(f"{ord(ch):x}" for ch in e if ord(ch) != 0xFE0F)
     if not re.fullmatch(r"[0-9a-f_]{2,40}", cps):
         return None
@@ -336,6 +358,11 @@ def _sfx(name: str) -> Path | None:
     d = config.DATA_DIR / "cache" / "sfx_builtin"
     d.mkdir(parents=True, exist_ok=True)
     f = d / f"{name}.wav"
+    with _cache_lock:
+        return _sfx_make(name, f)
+
+
+def _sfx_make(name: str, f: Path) -> Path | None:
     if not f.is_file():
         src = {"whoosh": "anoisesrc=d=0.45:c=pink:a=0.6,highpass=f=500,lowpass=f=5000,"
                          "afade=t=in:d=0.22,afade=t=out:st=0.22:d=0.23,volume=0.55",

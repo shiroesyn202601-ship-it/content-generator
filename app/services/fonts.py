@@ -51,10 +51,18 @@ def available(name: str) -> bool:
     return False
 
 
+_ensure_lock = __import__("threading").Lock()
+
+
 def ensure(name: str) -> str | None:
     """Pastikan font tersedia. Kembalikan pesan peringatan bila tidak bisa dipastikan, else None."""
     if not name:
         return None
+    with _ensure_lock:  # produksi paralel: dua klip bisa minta font yang sama sekaligus
+        return _ensure(name)
+
+
+def _ensure(name: str) -> str | None:
     FONT_DIR.mkdir(parents=True, exist_ok=True)
     if available(name):
         return None

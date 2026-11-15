@@ -585,8 +585,13 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
     """Produksi massal Clipper: tiap klip yang dicentang → proyek sendiri → potong + reframe → subtitle →
     (musik) → render → thumbnail. Hasil masuk tab Upload & Jadwal untuk dicek sebelum diunggah —
     gerbang manusia tetap ada di sana (dan tiap proyek tetap bisa dibuka & diedit per tahap).
-    Berurutan (render berat). Satu klip gagal tidak menghentikan yang lain."""
-    from . import audio_lib, render, subtitles, thumbs
+    Beberapa klip dikerjakan BERSAMAAN (config.CLIP_WORKERS, default 3): sementara satu klip menunggu AI/
+    jaringan, klip lain memakai CPU/GPU. Satu klip gagal tidak menghentikan yang lain."""
+    import threading
+    from concurrent.futures import ThreadPoolExecutor
+
+    from .. import jobs
+    from . import audio_lib, render, subtitles, thumbs, usage
 
     src = store.load(pid)
     clips = src["script"].get("clips") or []
@@ -604,13 +609,21 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
         if style:
             q["subtitles"]["style"] = style
     store.update(pid, save_src)
-    created, failed = [], []
-    for n, i in enumerate(idx, 1):
+    results: dict[int, tuple] = {}
+    lock = threading.Lock()
+    workers = max(1, min(int(params.get("workers") or config.CLIP_WORKERS), len(idx)))
+    done = [0]
+    if workers > 1:
+        progress(f"Membuat {len(idx)} video, {workers} sekaligus…")
+
+    def one(n, i):
         clip = clips[i]
         tag = f"Video {n}/{len(idx)}"
         progress(f"{tag}: menyiapkan proyek '{clip.get('title', '')[:40]}'…")
-        p = fork_clip(pid, i)
+        with lock:  # fork membaca & menulis proyek sumber — satu per satu
+            p = fork_clip(pid, i)
         qid = p["id"]
+        usage.link(n, qid)
         step = "persiapan"
 
         def sub(msg, tag=tag):
@@ -618,7 +631,8 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
         try:
             store.update(qid, lambda q: store.approve(q, "script"))
             step = "potong"
-            cut_clip(qid, {"crop_mode": crop}, sub)
+            with usage.step("Potong & auto-reframe", qid):
+                cut_clip(qid, {"crop_mode": crop}, sub)
             if eopts and (eopts["commentary"] != "off" or any(eopts[k] for k in
                                                               ("context", "facts", "broll", "tighten", "punch", "emoji"))):
                 step = "nilai tambah"
@@ -648,13 +662,32 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
             step = "thumbnail"
             thumbs.auto(qid, {}, sub)
             store.update(qid, lambda q: store.approve(q, "thumbnail"))
-            created.append({"id": qid, "title": p["title"], "score": clip.get("score")})
+            res = ("ok", {"id": qid, "title": p["title"], "score": clip.get("score")})
         except Exception as e:  # noqa: BLE001
-            from .. import jobs
             if isinstance(e, jobs.JobCancelled):
                 raise
-            failed.append({"id": qid, "title": p["title"], "step": step, "error": str(e)[:200]})
+            res = ("fail", {"id": qid, "title": p["title"], "step": step, "error": str(e)[:200]})
             store.update(qid, lambda q, e=e, step=step: store.log(q, f"Produksi massal berhenti di tahap {step}: {e}"))
+        with lock:
+            done[0] += 1
+            progress(f"{done[0]}/{len(idx)} video selesai")
+        return res
+
+    task = jobs.bind(usage.bind(usage.current(), one))
+    cancelled = None
+    with ThreadPoolExecutor(max_workers=workers, thread_name_prefix="klip") as ex:
+        futs = {ex.submit(task, n, i): n for n, i in enumerate(idx, 1)}
+        for f, n in futs.items():
+            try:
+                results[n] = f.result()
+            except jobs.JobCancelled as e:
+                cancelled = e
+            except Exception as e:  # noqa: BLE001 — galat tak terduga di luar try per klip
+                results[n] = ("fail", {"id": "", "title": clips[idx[n - 1]].get("title", ""), "step": "?", "error": str(e)[:200]})
+    if cancelled:
+        raise cancelled
+    created = [r[1] for n, r in sorted(results.items()) if r[0] == "ok"]
+    failed = [r[1] for n, r in sorted(results.items()) if r[0] == "fail"]
     store.update(pid, lambda q: store.log(q, f"Produksi massal: {len(created)} video jadi"
                                              + (f", {len(failed)} perlu dicek manual" if failed else "")))
     return {"created": created, "failed": failed}
