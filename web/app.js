@@ -137,8 +137,19 @@ function loadFonts() {
 }
 
 // ---------------------------------------------------------------- data flow
+/* keepView=true tanpa tab = MUAT ULANG di latar (job selesai, polling, unggah file). Muat ulang seperti itu
+   tidak boleh memindahkan tab / menimpa proyek yang sedang dibuka: kalau sementara itu pengguna sudah pindah
+   tab atau membuka proyek lain (S.nav berubah), hasilnya dibuang. Dulu: pindah Dari Nol → Clipper,
+   lalu polling Shorts massal selesai belakangan dan menarik tampilan kembali ke Dari Nol. */
+S.nav = 0;
 async function loadProject(pid, keepView = false, tab = null) {
-  S.p = await api('GET', `/api/projects/${pid}`);
+  const refresh = keepView && !tab;
+  const nav = refresh ? S.nav : ++S.nav;
+  const was = S.p && S.p.id;
+  const p = await api('GET', `/api/projects/${pid}`);
+  if (S.nav !== nav) return;                       // ada navigasi yang lebih baru → abaikan hasil lama
+  if (refresh && (was !== pid || (S.tab !== 'publish' && p.mode !== S.tab))) return;
+  S.p = p;
   // Tab tujuan: yang diminta, atau tetap di Upload bila proyek sudah siap upload, selain itu tab jalurnya.
   const want = tab || (S.tab === 'publish' && readyForUpload(S.p) ? 'publish' : S.p.mode);
   if (S.tab !== want) { S.tab = want; lsSet('tab', want); renderSidebarTab(); }
@@ -2672,6 +2683,7 @@ function setTab(mode) {
   if (mode === S.tab) return;
   if (S.dirty && !confirm('Ada perubahan belum disimpan. Tinggalkan?')) return;
   S.tab = mode; lsSet('tab', mode); S.dirty = false;
+  S.nav++;  // batalkan muat-ulang yang masih tertunda dari tab sebelumnya
   renderSidebarTab();
   const last = lsGet(`lastProject_${mode}`);
   const blank = () => { S.p = null; renderWelcome(mode); refreshList(); };
