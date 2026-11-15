@@ -16,6 +16,8 @@ import re
 import threading
 import time
 
+from .. import config  # noqa: F401 — memastikan .env sudah dimuat ke os.environ
+
 _lock = threading.Lock()
 _cool: dict[tuple[str, str, str], float] = {}   # (layanan, key, model) → pulih pada (epoch)
 _dead: dict[tuple[str, str], str] = {}          # (layanan, key) → alasan
