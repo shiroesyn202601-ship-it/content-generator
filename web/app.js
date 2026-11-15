@@ -2036,6 +2036,8 @@ function renderClipSource() {
     kids.sort((a, b) => ((b.clip || {}).score || 0) - ((a.clip || {}).score || 0));
     main.append(h('div', { class: 'row between', style: 'margin-top:14px' }, h('h2', {}, `${kids.length} klip jadi`),
       h('span', { class: 'muted small' }, 'Klik video untuk memutar. Skor = potensi viral menurut AI.')));
+    const rl = sourceReportLine(p);
+    if (rl) main.append(rl);
     const top = kids.find((c) => c.thumb);
     main.append(h('div', { class: 'row', style: 'margin:4px 0 2px' }, brandButton(
       { format: p.format, thumb: top ? U(`/media/${top.id}/${top.thumb}`) : null },
@@ -2077,6 +2079,71 @@ function renderClipSource() {
   document.querySelectorAll('video').forEach((v) => { v.style.objectFit = v === fs ? 'contain' : ''; });
 }));
 
+// ---------------------------------------------------------------- laporan produksi (AI apa + berapa lama)
+
+function reportSteps(rows) {
+  const max = Math.max(1, ...rows.map((r) => r.seconds || 0));
+  return h('div', { class: 'rp-steps' }, rows.map((r) => h('div', { class: `rp-step ${r.ok === false ? 'fail' : ''}` },
+    h('span', { class: 'rp-name' }, r.name), h('span', { class: 'rp-bar' }, h('i', { style: `width:${Math.max(2, (r.seconds || 0) / max * 100)}%` })),
+    h('span', { class: 'rp-sec' }, fmtDur(r.seconds)))));
+}
+
+function reportAI(list) {
+  if (!list || !list.length) return h('p', { class: 'muted small' }, 'Tidak ada pemanggilan AI yang tercatat.');
+  const rows = [...list].sort((a, b) => (b.seconds || 0) - (a.seconds || 0));
+  return h('div', { class: 'rp-table-wrap' }, h('table', { class: 'rp-table' },
+    h('thead', {}, h('tr', {}, ['Jenis', 'Layanan', 'Model / detail', 'Untuk', 'Panggilan', 'Waktu'].map((x) => h('th', {}, x)))),
+    h('tbody', {}, rows.map((a) => h('tr', {},
+      h('td', {}, a.kind), h('td', {}, a.service), h('td', { class: 'rp-model' }, a.model || '-'), h('td', {}, a.purpose || '-'),
+      h('td', { class: 'num' }, String(a.count)), h('td', { class: 'num' }, a.seconds ? fmtDur(a.seconds) : '-'))))));
+}
+
+function openReport(title, rep, extra) {
+  const body = $('#modal-body'); body.innerHTML = '';
+  const close = h('button', { class: 'ghost small', onclick: () => $('#modal').close() }, 'Tutup');
+  body.append(h('div', { class: 'row between' }, h('h2', {}, title), close));
+  if (!rep) {
+    body.append(h('p', { class: 'muted' }, 'Belum ada laporan — laporan dicatat untuk klip yang dibuat setelah fitur ini aktif.'));
+  } else {
+    const when = rep.started ? new Date(rep.started).toLocaleString('id-ID', { dateStyle: 'medium', timeStyle: 'short' }) : '';
+    body.append(h('div', { class: 'rp-head' },
+      h('div', { class: 'rp-total' }, fmtDur(rep.total), h('small', {}, rep.shared ? 'waktu klip ini' : 'total proses')),
+      h('div', { class: 'muted small' }, [rep.action ? actionLabel(rep.action) : '', when, rep.ok === false ? 'berhenti karena error' : ''].filter(Boolean).join(' · '))));
+    if (extra) body.append(extra);
+    if (rep.phases && rep.phases.length) body.append(h('h3', {}, 'Tahapan'), reportSteps(rep.phases));
+    if (rep.clips && rep.clips.length) {
+      const names = Object.fromEntries((S.all || []).map((c) => [c.id, c.title]));
+      body.append(h('h3', {}, `Per klip (${rep.clips.length})`), reportSteps(rep.clips.map((c) => ({ name: names[c.pid] || `Klip ${c.n}`, seconds: c.seconds }))));
+    }
+    if (rep.steps && rep.steps.length && !rep.clips) body.append(h('h3', {}, 'Langkah klip ini'), reportSteps(rep.steps));
+    body.append(h('h3', {}, 'AI & layanan yang dipakai'), reportAI(rep.ai));
+    if (rep.shared && rep.shared.length) {
+      body.append(h('h3', {}, 'Dikerjakan sekali untuk semua klip dari video ini'),
+        h('p', { class: 'muted small' }, 'Tidak termasuk waktu klip di atas.'), reportSteps(rep.shared));
+      if ((rep.shared_ai || []).length) body.append(reportAI(rep.shared_ai));
+    }
+  }
+  if (!$('#modal').open) $('#modal').showModal();
+}
+
+async function openClipReport(c) {
+  try {
+    const p = await api('GET', `/api/projects/${c.id}`);
+    openReport(`Laporan: ${c.title || c.id}`, p.report);
+  } catch (e) { toast(e.message, true); }
+}
+
+function sourceReportLine(p) {
+  const reps = p.reports || {};
+  const rep = reps['research.auto_clip'] || reps['script.produce_clips'];
+  if (!rep) return null;
+  const ph = (rep.phases || []).map((x) => `${x.name.toLowerCase()} ${fmtDur(x.seconds)}`).join(' · ');
+  const n = new Set((rep.ai || []).map((a) => `${a.service} ${a.model}`)).size;
+  return h('div', { class: 'rp-line' },
+    h('span', {}, `Proses terakhir ${fmtDur(rep.total)}${ph ? ` — ${ph}` : ''} · ${n} AI/layanan`),
+    h('button', { class: 'ghost small', onclick: () => openReport(`Laporan proses: ${p.title || 'video'}`, rep) }, 'Lihat laporan'));
+}
+
 function clipCard(c) {
   const src = c.output ? U(`/media/${c.id}/${c.output}`) : '';
   const poster = c.thumb ? U(`/media/${c.id}/${c.thumb}`) : undefined;
@@ -2094,6 +2161,7 @@ function clipCard(c) {
     h('div', { class: 'cc-actions' },
       src ? h('a', { class: 'btnlike', href: src, download: `${(c.title || c.id).replace(/[\\/:*?"<>|]+/g, '').slice(0, 60)}.mp4`, title: 'Unduh MP4' }, 'Unduh') : null,
       h('button', { title: 'Judul, deskripsi & jadwal upload', onclick: () => loadProject(c.id, false, 'publish') }, up ? 'Detail' : 'Jadwalkan'),
+      h('button', { title: 'AI apa saja yang dipakai & berapa lama tiap langkah', onclick: () => openClipReport(c) }, 'Laporan'),
       h('button', { title: 'Edit subtitle, bingkai, thumbnail…', onclick: () => { loadProject(c.id, false, 'clipper').then(() => setView(S.meta.stages.indexOf('subtitles'))); } }, 'Edit'),
       h('button', { class: 'danger', title: 'Hapus klip', onclick: async () => {
         if (!confirm(`Hapus klip "${c.title}"?`)) return;
