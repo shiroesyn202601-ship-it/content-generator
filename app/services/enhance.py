@@ -6,8 +6,8 @@ Dijalankan setelah klip dipotong (assets/clip.mp4) dan sebelum subtitle. Menghas
 
   [intro komentar kreator]  +  [klip dirapatkan + punch-in]  +  [outro komentar kreator]
         TTS di atas frame             jeda panjang & "eh/anu"          TTS opini + pertanyaan
-        pertama yang di-blur          dibuang; zoom bergantian           untuk kolom komentar
-                                      per kalimat (jump cut)
+        pertama yang di-blur          dibuang; punch-in ke wajah          untuk kolom komentar
+                                      hanya di kalimat penekanan
 
   + B-roll layar penuh saat narasumber menyebut sesuatu (Wikimedia/Pixabay/AI), emoji (Noto) di kata
     penting, SFX whoosh/pop. Kartu konteks ("siapa dia") & kartu fakta (dicek ke Wikipedia) ditulis
@@ -34,6 +34,8 @@ FILLERS = {"eh", "ehm", "em", "emm", "hmm", "hm", "ee", "eee", "eeh", "anu", "um
 PAD_W = 0.08         # napas di sekitar kata yang dipertahankan
 GAP_KEEP = 0.45      # jeda (setelah padding) di atas ini dibuang
 MIN_SHOT = 1.6       # punch-in hanya bila potongan cukup panjang
+PUNCH_EVERY = 9.0    # rata-rata paling banyak 1 punch-in per 9 dtk klip
+PUNCH_GAP = 5.0      # jarak minimum antar-punch-in (dtk)
 BROLL_DUR, EMOJI_DUR = 2.4, 1.3
 _cache_lock = threading.Lock()  # produksi paralel: emoji/SFX yang sama jangan diunduh/dibuat bersamaan
 _WORD = re.compile(r"[^\wÀ-ÿ'-]+", re.U)
@@ -123,6 +125,46 @@ def _find_word(words: list[dict], sent: list[int], word: str) -> int:
         if c and (c == target or (toks and c == toks[0]) or (len(c) > 3 and c in target)):
             return i
     return sent[0]
+
+
+def _punch_plan(p: dict, clip: Path, shots: list[list[float]], rnd) -> dict:
+    """Punch-in yang sesuai konteks (dulu: zoom bergantian tiap kalimat & selalu di tengah layar → terasa acak).
+    Kini hanya di potongan dengan suara paling bertenaga (penekanan), saat SATU orang di layar, tidak melintasi
+    potong kamera, berjarak ≥ PUNCH_GAP dtk dan tidak pernah di dua potongan berurutan. Zoom diarahkan ke wajah
+    pembicara dan diperkecil bila bingkai auto-reframe sudah diperbesar. {indeks potongan: (zoom, fx, fy)}"""
+    from . import reframe
+    info = p["assets"].get("reframe") if p["assets"].get("crop_mode") == "face" else None
+    framed = bool(info and info.get("segments"))
+    try:
+        env = list(reframe._audio_env(clip, 0.0, ff.duration(clip), 10.0))
+    except Exception:  # noqa: BLE001
+        env = []
+
+    def energy(a: float, b: float) -> float:
+        vals = env[int(a * 10):max(int(a * 10) + 1, int(b * 10))]
+        return sum(vals) / len(vals) if vals else -99.0
+    cands, start, t = [], [], 0.0
+    for k, (a, b) in enumerate(shots):
+        start.append(t)
+        t += b - a
+        if b - a < MIN_SHOT:
+            continue
+        face = reframe.face_in(info, a, b) if framed else (0.5, 0.42, 1.0)
+        if face is not None:
+            cands.append((energy(a, b), k) + tuple(face))
+    if not cands:
+        return {}
+    budget = max(1, int(t / PUNCH_EVERY))
+    floor = sorted(c[0] for c in cands)[len(cands) // 2]   # hanya yang di atas median energi
+    chosen: dict = {}
+    for e, k, fx, fy, room in sorted(cands, reverse=True):
+        if len(chosen) >= budget or e < floor:
+            break
+        if k - 1 in chosen or k + 1 in chosen or any(abs(start[k] - start[j]) < PUNCH_GAP for j in chosen):
+            continue
+        z = round(rnd.uniform(1.10, 1.15), 3) if room > 0.85 else 1.06
+        chosen[k] = (z, fx, fy)
+    return chosen
 
 
 # ---------------------------------------------------------------- rencana AI
@@ -498,7 +540,10 @@ def run(pid: str, params: dict, progress) -> dict:
             spans[-1][1] = clip_dur
     else:
         spans = [[0.0, clip_dur]]
-    cuts = sorted(words[s[0]]["start"] for s in sents[1:])
+    cuts = [words[s[0]]["start"] for s in sents[1:]]
+    if p["assets"].get("crop_mode") == "face":  # batas potong kamera auto-reframe ikut jadi batas potongan
+        cuts += [sg["t0"] for sg in ((p["assets"].get("reframe") or {}).get("segments") or [])[1:]]
+    cuts = sorted(set(cuts))
     shots = []
     for a, b in spans:
         cur = a
@@ -508,7 +553,7 @@ def run(pid: str, params: dict, progress) -> dict:
                 cur = t
         shots.append([cur, b])
     r = random.Random(params.get("seed") or pid)
-    zoom = round(r.uniform(1.08, 1.14), 3)
+    punch = _punch_plan(p, clip, shots, r) if opts["punch"] else {}
     progress(f"Merapatkan klip: {clip_dur:.1f} → {sum(b - a for a, b in shots):.1f} dtk, {len(shots)} potongan")
 
     # --- 2) komentar kreator (TTS)
@@ -521,9 +566,9 @@ def run(pid: str, params: dict, progress) -> dict:
         intro_dur, intro_words = _speak(p, plan["intro"], tmp / "intro.wav", 0.0, "intro")
         _still(clip, shots[0][0], tmp / "intro.mp4", W, H, intro_dur, tmp / "intro.wav", d)
     body_dur = 0.0
-    timeline = []  # [a, b, out_start, zoom]
+    timeline = []  # [a, b, out_start, punch-in (zoom, fx, fy) | None]
     for k, (a, b) in enumerate(shots):
-        timeline.append([a, b, intro_dur + body_dur, zoom if opts["punch"] and k % 2 == 1 and b - a >= MIN_SHOT else 1.0])
+        timeline.append([a, b, intro_dur + body_dur, punch.get(k)])
         body_dur += b - a
 
     def m(t: float) -> float | None:
@@ -620,8 +665,12 @@ def run(pid: str, params: dict, progress) -> dict:
                  f"[{n_in}:a]aformat=sample_rates=48000:channel_layouts=stereo[ia]")
         seq.append("[iv][ia]")
         n_in += 1
-    for k, (a, b, _, z) in enumerate(timeline):
-        vz = f",scale={round(W * z / 2) * 2}:{round(H * z / 2) * 2},crop={W}:{H}" if z > 1 else ""
+    for k, (a, b, _, pz) in enumerate(timeline):
+        vz = ""
+        if pz:  # perbesar ke arah wajah: titik wajah tetap di posisi layar yang sama (seperti zoom lensa)
+            z, fx, fy = pz
+            zw, zh = round(W * z / 2) * 2, round(H * z / 2) * 2
+            vz = f",scale={zw}:{zh},crop={W}:{H}:{int(fx * (zw - W))}:{int(fy * (zh - H))}"
         g.append(f"[vs{k}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS{vz},fps={config.FPS},format=yuv420p,setsar=1[v{k}]")
         if has_a:
             fo = max(0.0, b - a - 0.012)
@@ -675,7 +724,7 @@ def run(pid: str, params: dict, progress) -> dict:
     enh = {"opts": opts, "plan": plan, "path": out_rel, "src_mtime": clip.stat().st_mtime,
            "clip_range": p["assets"].get("clip_range"), "duration": round(total, 2),
            "intro_dur": round(intro_dur, 2), "outro_dur": round(outro_dur, 2),
-           "removed": round(clip_dur - body_dur, 2), "shots": len(timeline),
+           "removed": round(clip_dur - body_dur, 2), "shots": len(timeline), "punch": len(punch),
            "words": intro_words + clip_words + outro_words, "cards": cards,
            "broll": broll, "emoji": [{k: v for k, v in e.items() if k != "file"} for e in emojis]}
 

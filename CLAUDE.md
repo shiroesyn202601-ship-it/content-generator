@@ -324,6 +324,26 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
     - `auto_clip` dijalankan ulang (`_retry` dari tombol "Jalankan ulang" sesi lain) = lanjutkan `autoclip.picked`
       (tidak cari momen lagi); anak tanpa `output` dihapus & dibuat ulang.
 
+21. **16 Nov 2026 — Clipper podcast 2+ orang: sorot yang BICARA** (keluhan user: yang disorot bukan yang bicara,
+    zoom keluar-masuk tanpa konteks). Riset: OpusClip/podcli/opensource-clipping memakai diarization pyannote / model
+    ASD (TalkNet, Light-ASD) — semuanya torch → diblokir Smart App Control. `reframe.py` ditulis ulang tanpa torch:
+    - Decode lewat pipa FFmpeg 30 fps (±3x lebih cepat dari OpenCV untuk 1080p60), YuNet + 5 landmark 15x/dtk, track per shot.
+    - Pembicara aktif = **korelasi gerak bibir dengan naik-turun suara** (log-RMS) dalam jendela ±1 dtk. Gerak bibir =
+      selisih patch mulut (dibatasi di dalam kotak wajah → wajah menyamping tidak ikut latar) dikurangi gerak patch mata.
+      Diuji di podcast asli: gerak bibir saja sering salah memilih pendengar; korelasi audio memisahkan dengan jelas.
+    - Viterbi per 0.5 dtk dengan penalti pindah (`SWITCH`), giliran < `MIN_HOLD` dilebur, titik potong digeser ke saat
+      paling sunyi (`_snap_cut`). Kamera = potong keras + bingkai DIAM per giliran (bukan geser pelan). Zoom dari ukuran
+      wajah (`FACE_H`, maks `MAX_ZOOM` 1.5), mata di 38% tinggi.
+    - Layout per segmen: `single` (1 orang / kelompok yang muat), `split` atas-bawah (2 orang saling sahut cepat atau
+      pembicara tak jelas), `fit` = area kelompok di tengah + latar blur (3+ orang tak jelas, mis. tertawa bersama) atau
+      seluruh frame (tanpa wajah). Ragu → tampilkan semua orang, JANGAN menebak.
+    - `cut_clip` = satu graf FFmpeg (`reframe.filter_graph`: trim per segmen di grid frame → concat, tidak bergeser dari
+      audio). `assets.reframe` = {segments, stats, src_h, ...}.
+    - Punch-in `enhance._punch_plan`: dulu zoom tiap kalimat ganjil di tengah layar. Kini hanya potongan berenergi suara
+      di atas median, 1 orang di layar, tidak melintasi potong kamera (batas segmen reframe ikut jadi batas potongan),
+      jarak ≥5 dtk, maks 1 per 9 dtk, zoom diarahkan ke wajah (`reframe.face_in`).
+    - Belum: identitas pembicara lintas shot (nama/warna subtitle per pembicara), deteksi tawa.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

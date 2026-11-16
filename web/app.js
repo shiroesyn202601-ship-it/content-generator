@@ -890,7 +890,7 @@ function producePanel(d) {
     h('div', { class: 'muted small' }, 'Tiap klip yang dicentang → video hasil di proyek ini → dipotong & dibingkai → subtitle → render → 3 thumbnail. Hasilnya masuk tab Upload untuk dicek sebelum diunggah; tiap video tetap bisa dibuka & diedit per tahap.'),
     h('div', { class: 'grid' },
       field('Bingkai 9:16', opt, 'crop_mode', { type: 'select', dirty: () => {}, options: [
-        ['face', 'Ikuti wajah (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] }),
+        ['face', 'Ikuti pembicara (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] }),
       field('Template subtitle', opt, 'template', { type: 'select', dirty: () => {}, options: subTemplateOptions() }),
       field('Musik latar (auto-ducking)', opt, 'music', { type: 'checkbox', dirty: () => {}, onchange: () => render() }),
       opt.music ? field('Mood musik', opt, 'mood', { type: 'select', dirty: () => {}, options: S.meta.moods || ['santai'] }) : null),
@@ -917,7 +917,7 @@ function cutPanel(c) {
   return h('div', { class: 'cutpanel' },
     h('div', { class: 'row' },
       h('div', { style: 'min-width:240px' }, field('Bingkai', opt, 'crop_mode', { type: 'select', dirty: () => {}, options: [
-        ['face', 'Ikuti wajah (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] })),
+        ['face', 'Ikuti pembicara (auto-reframe)'], ['blur', 'Latar blur'], ['center', 'Crop tengah'], ['none', 'Letterbox']] })),
       btn(cutOk ? '↻ Potong ulang' : 'Potong klip ini', async () => {
         if (S.dirty) await saveDraft(true);
         runAction('assets.cut_clip', { crop_mode: opt.crop_mode }, true);
@@ -1110,7 +1110,7 @@ function rAssets() {
     box.append(h('div', { class: 'card' }, h('b', {}, clip.title), h('div', { class: 'muted' }, `${fmtT(clip.start)} → ${fmtT(clip.end)}`)));
     box.append(h('div', { class: 'row' },
       h('div', { style: 'min-width:260px' }, field('Mode bingkai', d, 'crop_mode', { type: 'select', options: [
-        ['face', 'Ikuti wajah otomatis (auto-reframe)'], ['blur', 'Latar blur (video utuh di tengah)'], ['center', 'Crop tengah (isi penuh)'], ['none', 'Letterbox hitam']] })),
+        ['face', 'Ikuti yang sedang bicara (auto-reframe, podcast 2+ orang)'], ['blur', 'Latar blur (video utuh di tengah)'], ['center', 'Crop tengah (isi penuh)'], ['none', 'Letterbox hitam']] })),
       btn('Potong klip (FFmpeg)', () => runAction('assets.cut_clip', { crop_mode: d.crop_mode }), 'primary')));
     if (d.clip_path) box.append(h('video', { class: 'preview-v', src: media(d.clip_path), controls: true }));
     return box;
@@ -1798,7 +1798,7 @@ function clipOptionsView(o, rerender, cfg = {}) {
       h('summary', {}, 'Nilai tambah (komentar, konteks, B-roll…)'), enhanceOptsView(o, rerender)),
     h('details', { class: 'ch-more' }, h('summary', {}, 'Opsi lain'),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Bingkai'),
-        seg(o, 'crop_mode', [['face', 'Ikuti wajah'], ['blur', 'Latar blur'], ['center', 'Crop tengah']], upd)),
+        seg(o, 'crop_mode', [['face', 'Ikuti pembicara'], ['blur', 'Latar blur'], ['center', 'Crop tengah']], upd)),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Musik latar'), seg(o, 'music', [[false, 'Tidak'], [true, 'Ya (otomatis pelan saat ada suara)']], upd)),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Format'), seg(o, 'format', [['short', 'Vertikal 9:16'], ['long', 'Lebar 16:9']], upd)),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Arahan AI (opsional)'),

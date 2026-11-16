@@ -543,24 +543,26 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
     mode = params.get("crop_mode") or p["assets"].get("crop_mode") or "center"
     w, h = config.RESOLUTIONS[p["format"]]
     (d / "assets").mkdir(exist_ok=True)
-    fit = ff.fit_filter(w, h, mode if mode != "face" else "blur")
+    graph = f"[0:v]{ff.fit_filter(w, h, mode if mode != 'face' else 'blur')},fps={config.FPS},format=yuv420p[v]"
     reframe_info = None
     if mode == "face":
         from . import reframe
         src = store.source_file(p)
-        progress("Auto-reframe: mendeteksi wajah & potongan scene…")
-        pl, reframe_info = reframe.track(src, clip["start"], clip["end"], w, h, progress)
+        words = [x for s in dedupe_segments((p["script"].get("transcript") or {}).get("segments") or [])
+                 for x in s.get("words") or []]
+        progress("Auto-reframe: mencari wajah & siapa yang sedang bicara…")
+        pl, reframe_info = reframe.track(src, clip["start"], clip["end"], w, h, words, progress)
         if pl:
-            reframe.write_cmds(pl, d / "assets" / "reframe.cmd")
-            fit = reframe.crop_filter(pl, "assets/reframe.cmd", reframe_info["src_h"], w, h)
-            progress(f"Auto-reframe ({reframe_info['engine']}): {reframe_info['shots']} shot, wajah di "
-                     f"{reframe_info['face_ratio'] * 100:.0f}% sampel — kamera mengikuti wajah")
+            graph = reframe.filter_graph(pl, w, h, config.FPS)
+            st = reframe_info["stats"]
+            progress(f"Auto-reframe: {reframe_info['shots']} shot, {st.get('switches', 0)} kali pindah pembicara"
+                     + (f", layar dibagi {st['split']:.0f} dtk" if st.get("split") else "")
+                     + (f", video utuh {st['fit']:.0f} dtk" if st.get("fit") else ""))
         else:
             progress("Auto-reframe: tidak ada wajah terdeteksi — memakai mode latar blur")
     progress(f"Memotong {clip['start']:.1f}s - {clip['end']:.1f}s ({mode})...")
-    vf = f"{fit},fps={config.FPS},format=yuv420p"
     ff.run(["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", str(store.source_file(p)),
-            "-filter_complex", f"[0:v]{vf}[v]", "-map", "[v]", "-map", "0:a?",
+            "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
             "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k",
             "assets/clip.mp4"], cwd=d)
 
