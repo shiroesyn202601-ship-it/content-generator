@@ -161,7 +161,7 @@ def setup(pid: str, params: dict, progress) -> dict:
     story_scenes = {}
     for s in scenes:
         if s["id"] in done:  # prompt & gambar per kalimat yang sudah ada dipertahankan
-            story_scenes[s["id"]] = old["scenes"][s["id"]]
+            story_scenes[s["id"]] = {**old["scenes"][s["id"]], "beats_want": len(beats.split(s["text"])) - 1}
             continue
         bs = beats.split(s["text"]) if per_beat else [{"w": 0, "text": s["text"]}]
         if keep and s["id"] in old["scenes"]:
@@ -169,10 +169,15 @@ def setup(pid: str, params: dict, progress) -> dict:
         else:
             sc = entry(prompts_by_id.get(f"{s['id']}.0") or prompts_by_id.get(s["id"]),
                        s.get("visual_query") or s["text"])
+        # teks scene diedit → potongan yang teksnya tidak berubah tetap memakai prompt & gambar lamanya
+        same = {b.get("text"): b for b in (old.get("scenes", {}).get(s["id"]) or {}).get("beats") or []} if keep else {}
         sc["beats"] = []
         for k, b in enumerate(bs[1:], start=1):
+            o = same.get(b["text"])
             x = prompts_by_id.get(f"{s['id']}.{k}")
-            if x and x.get("image_prompt"):
+            if o and o.get("prompt"):
+                sc["beats"].append({**o, "w": b["w"]})
+            elif x and x.get("image_prompt"):
                 sc["beats"].append({"w": b["w"], "text": b["text"], **entry(x, "")})
         sc["beats_of"] = s["text"]
         sc["beats_want"] = len(bs) - 1  # < len(beats) → UI menawarkan melengkapi
@@ -183,15 +188,27 @@ def setup(pid: str, params: dict, progress) -> dict:
         q["assets"]["visual_mode"] = "ai_story"
         q["assets"]["story"] = {"style": style, "style_notes": notes, "characters": chars,
                                 "scenes": story_scenes, "seed": old.get("seed") or int(time.time()) % 100000}
-        for sid, sl in q["assets"]["scenes"].items():  # gambar potongan lama tidak cocok dengan prompt baru
-            if sid in story_scenes and sid not in done:
-                sl.pop("beats", None)
-                sl.pop("beats_of", None)
+        for sid in story_scenes:  # gambar potongan yang tidak terbawa (prompt baru) tidak dipakai lagi
+            if sid not in done:
+                sync_slot(q, sid)
         store.touch_stage(q, "assets")
         store.log(q, f"Cerita AI: {len(chars)} karakter, {len(story_scenes)} scene + {n_beats} gambar per kalimat"
                   + (f" ({len(done)} scene dipertahankan)" if done else ""))
     store.update(pid, apply)
     return {"characters": len(chars), "scenes": len(story_scenes), "beats": n_beats}
+
+
+def sync_slot(q: dict, sid: str) -> None:
+    """story.scenes[sid].beats yang sudah bergambar → assets.scenes[sid].beats (yang dibaca render & editor).
+    Gambar yang diunggah sendiri (path sama) tetap tercatat sebagai unggahan."""
+    slot = q["assets"]["scenes"].setdefault(sid, {})
+    qsc = ((q["assets"].get("story") or {}).get("scenes") or {}).get(sid) or {}
+    prev = {(b.get("selected") or {}).get("path"): b.get("selected") for b in slot.get("beats") or []}
+    slot["beats"] = [{"w": b["w"], "text": b["text"], "selected": prev.get(b["image"]) or {
+        "provider": "ai_story", "type": "image", "path": b["image"], "synthetic": True, "license": "Gambar buatan AI",
+        "author": "AI (Pollinations)", "tags": (b.get("prompt") or "")[:200]}}
+        for b in qsc.get("beats") or [] if b.get("image")]
+    slot["beats_of"] = qsc.get("beats_of")
 
 
 def add_beats(pid: str, params: dict, progress) -> dict:
@@ -371,7 +388,7 @@ def scenes(pid: str, params: dict, progress) -> dict:
             if missing and img and (d / img).is_file():
                 continue
             jobs.append((s["id"], k))
-    made = 0
+    made, failed = 0, []
     for n, (sid, k) in enumerate(jobs):
         sc = st["scenes"][sid]
         shot = sc if k == 0 else sc["beats"][k - 1]
@@ -383,12 +400,25 @@ def scenes(pid: str, params: dict, progress) -> dict:
         refs = [(d / c["image"]).read_bytes() for c in cs if c.get("image") and (d / c["image"]).is_file()]
         progress(f"Gambar {n + 1}/{len(jobs)} · scene {index[sid] + 1}" + (f" kalimat {k + 1}" if k else "")
                  + (f" (referensi: {', '.join(c['name'] for c in cs)})" if refs else "") + "…")
-        if refs and has_key():
-            img = _edit_with_refs(prompt, refs, W, H, seed, progress)
-            how = "referensi karakter"
-        else:
-            img = _text2img(prompt, W, H, seed, progress)
-            how = "teks" + (" (tanpa key: konsistensi terbatas)" if cs else "")
+        try:
+            img, how = None, ""
+            if refs and has_key():
+                try:
+                    img, how = _edit_with_refs(prompt, refs, W, H, seed, progress), "referensi karakter"
+                except RuntimeError as e:  # saldo/kuota key habis → cadangan teks→gambar (Cloudflare / gratis klasik)
+                    progress(f"Referensi karakter gagal ({str(e)[:90]}) — memakai teks→gambar…")
+            if img is None:
+                img = _text2img(prompt, W, H, seed, progress)
+                how = how or "teks" + (" (tanpa referensi: konsistensi terbatas)" if cs else "")
+        except Exception as e:  # noqa: BLE001 — satu gambar gagal tidak menghentikan gambar lain
+            from ..jobs import JobCancelled
+            if isinstance(e, JobCancelled):
+                raise
+            failed.append(str(e)[:200])
+            msg = f"Gambar scene {index[sid] + 1}" + (f" kalimat {k + 1}" if k else "") + f" gagal: {str(e)[:160]}"
+            progress(msg)
+            store.update(pid, lambda q, msg=msg: store.log(q, msg))
+            continue
         rel = f"assets/{sid}_story_{seed}.jpg" if k == 0 else f"assets/{sid}_b{k}_story_{seed}.jpg"
         (d / rel).write_bytes(img)
         made += 1
@@ -405,11 +435,11 @@ def scenes(pid: str, params: dict, progress) -> dict:
                 qsc["image"] = rel
             elif k <= len(qsc.get("beats") or []):
                 qsc["beats"][k - 1]["image"] = rel
-            # potongan bergambar → slot.beats (dibaca render), urut sesuai naskah
-            slot["beats"] = [{"w": b["w"], "text": b["text"],
-                              "selected": {**sel, "path": b["image"], "tags": b.get("prompt", "")[:200]}}
-                             for b in qsc.get("beats") or [] if b.get("image")]
-            slot["beats_of"] = qsc.get("beats_of")
+            sync_slot(q, sid)
             store.touch_stage(q, "assets")
         store.update(pid, apply)
-    return {"images": made}
+    if failed and not made:
+        raise RuntimeError(f"Semua {len(failed)} gambar gagal dibuat. Terakhir: {failed[-1]}")
+    if failed:
+        progress(f"{made} gambar jadi, {len(failed)} gagal — klik lagi untuk mencoba yang belum ada.")
+    return {"images": made, "failed": len(failed)}

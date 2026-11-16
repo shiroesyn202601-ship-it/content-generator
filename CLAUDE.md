@@ -414,6 +414,23 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       lama masih dibaca render bila scene tanpa beats).
     - Render: `render._beat_marks` → titik potong di kata pertama potongan (−0.08 dtk), juga saat potongan statis; `shot.beat`
       memilih aset, offset video dihitung dari awal potongan. Proyek kucing 284 dtk: 20 → 57 gambar, shot 2,2–6 dtk.
+    - Render tidak bisa disetujui bila `p.render_outdated` (diset `touch_stage` tahap sebelum render, dihapus `render.run`).
+    - `story.scenes`: satu gambar gagal tidak menghentikan yang lain; referensi karakter gagal (saldo Pollinations 402) →
+      teks→gambar. `story.sync_slot` = satu-satunya penyusun `slot.beats` dari `story.scenes[sid].beats`.
+
+26. **16 Nov 2026 — Dari Nol ala CapCut script-to-video** (permintaan user: tampilan mirip CapCut, halaman awal + editor).
+    - Halaman awal `scratchHome` = satu form: Dari topik / Naskah sendiri, rasio (9:16 / 16:9), durasi, gaya naskah, gaya visual
+      (stok atau gaya Cerita AI), suara (+ "Dengar" via `/api/tts/preview`), subtitle, musik → aksi `research.quick_video`
+      (`quick.py`: ide tunggal → naskah (narrate / longform / naskah sendiri → split) → `shorts.run_pipeline`). Opsi di
+      localStorage `quickOpts`. Shorts massal lama = `scratchChoices`.
+    - Editor `renderEditor` (`isEditor(p)`: Dari Nol, bukan wadah batch, punya scene / `p.quick`, bukan `S.adv`): pratinjau
+      (video final; sebelum render = gambar + audio VO), timeline potongan, daftar potongan (`edSegments`: potongan 0 + beats,
+      waktu dari `audio.words` bila jumlah kata cocok). Per potongan: edit teks (`edSaveText` → simpan + setujui script),
+      Gambar baru (dialog prompt → `assets.story_scenes` scene_id+beat), Unggah (`/assets/{sid}/upload?beat=k`). "Perbarui
+      video" = `research.autopilot`. Proses latar `trackEd`/`edJob` (S.qjobs, baki), satu proses editor per proyek.
+    - `run_pipeline`: Cerita AI → `story.setup(keep)` bila naskah diubah (potongan yang teksnya sama mempertahankan prompt &
+      gambar) + `story.scenes(missing)`; suara tidak dibuat ulang bila `audio.vo_sig == shorts.vo_signature(p)`; musik
+      dipertahankan bila sudah dipilih. Wizard = "Mode lanjutan" (tombol "← Tampilan editor" untuk kembali).
 
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY

@@ -666,14 +666,24 @@ def fill_beats(pid: str, params: dict, progress) -> dict:
 UPLOAD_EXT = {".mp4", ".mov", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"}
 
 
-def save_upload(pid: str, sid: str, filename: str, fileobj) -> dict:
+def save_upload(pid: str, sid: str, filename: str, fileobj, beat: int = 0) -> dict:
+    """Unggah visual sendiri. beat=0 → visual utama scene; beat=k → potongan kalimat ke-k (slot.beats[k-1])."""
     # Keamanan: sid & ekstensi masuk ke path file → wajib divalidasi (cegah path traversal).
-    if sid not in {s["id"] for s in store.load(pid)["script"]["scenes"]}:
+    p0 = store.load(pid)
+    if sid not in {s["id"] for s in p0["script"]["scenes"]}:
         raise ValueError(f"Scene tidak dikenal: {sid}")
+    beat = int(beat or 0)
+    ai = p0["assets"].get("visual_mode") == "ai_story"
+    # Cerita AI: nomor potongan = story.scenes[sid].beats (termasuk yang belum bergambar); stok: slot.beats
+    pool = (((p0["assets"].get("story") or {}).get("scenes") or {}).get(sid) or {}).get("beats") if ai \
+        else (p0["assets"]["scenes"].get(sid) or {}).get("beats")
+    if beat and not 0 < beat <= len(pool or []):
+        raise ValueError("Potongan kalimat tidak dikenal (susun ulang gambar per kalimat dulu).")
     ext = Path(filename.replace("\\", "/").rsplit("/", 1)[-1]).suffix.lower() or ".mp4"
     if ext not in UPLOAD_EXT:
         raise ValueError(f"Format file tidak didukung: {ext} (pakai {', '.join(sorted(UPLOAD_EXT))})")
-    rel = f"assets/{sid}_manual{ext}"
+    # nama unik per unggahan → browser tidak menampilkan gambar lama dari cache
+    rel = f"assets/{sid}{f'_b{beat}' if beat else ''}_manual_{int(time.time())}{ext}"
     dest = store.project_dir(pid) / rel
     dest.parent.mkdir(exist_ok=True)
     with open(dest, "wb") as f:
@@ -681,7 +691,22 @@ def save_upload(pid: str, sid: str, filename: str, fileobj) -> dict:
     typ = "image" if ext in (".jpg", ".jpeg", ".png", ".webp") else "video"
 
     def apply(p):
-        p["assets"]["scenes"].setdefault(sid, {})["selected"] = {
-            "provider": "manual", "type": typ, "path": rel, "license": "milik sendiri"}
+        slot = p["assets"]["scenes"].setdefault(sid, {})
+        sel = {"provider": "manual", "type": typ, "path": rel, "license": "milik sendiri"}
+        st = ((p["assets"].get("story") or {}).get("scenes") or {}).get(sid)
+        if beat and ai:
+            from . import story
+            st["beats"][beat - 1]["image"] = rel  # Cerita AI menyusun slot.beats dari sini
+            story.sync_slot(p, sid)
+            for b in slot["beats"]:
+                if (b.get("selected") or {}).get("path") == rel:
+                    b["selected"] = sel
+        elif beat:
+            slot["beats"][beat - 1].update({"selected": sel, "pick": {"fit": "cocok", "reason": "Diunggah sendiri"}})
+        else:
+            slot["selected"] = sel
+            slot.pop("pick", None)
+            if st and ai:
+                st["image"] = rel
         store.touch_stage(p, "assets")
     return store.update(pid, apply)

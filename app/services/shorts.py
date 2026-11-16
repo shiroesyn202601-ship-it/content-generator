@@ -178,6 +178,15 @@ def _approve(pid: str, stage: str) -> None:
     store.update(pid, lambda q: store.approve(q, stage))
 
 
+def vo_signature(p: dict) -> str:
+    """Sidik isi voice over: teks + emosi tiap scene + pengaturan suara + kamus pengucapan proyek."""
+    import hashlib
+    import json
+    data = [[s["id"], s["text"], s.get("emotion")] for s in p["script"].get("scenes") or []]
+    data += [p.get("voice") or {}, p["audio"].get("pronunciation") or {}]
+    return hashlib.sha1(json.dumps(data, sort_keys=True).encode()).hexdigest()[:16]
+
+
 def run_pipeline(cid: str, o: dict, sub, stop_after_script: bool = False) -> str:
     """Jalankan semua tahap yang belum disetujui untuk satu video. Return 'review' | 'done'."""
     from . import assets, audio_lib, render, story, subtitles, thumbs, tts, youtube
@@ -199,12 +208,17 @@ def run_pipeline(cid: str, o: dict, sub, stop_after_script: bool = False) -> str
     if st("assets") != "approved":
         q = store.load(cid)
         if o["visual"] == "ai":
-            if not (q["assets"].get("story") or {}).get("scenes"):
+            sts = (q["assets"].get("story") or {}).get("scenes") or {}
+            if not sts:
                 _retry_429(lambda: story.setup(cid, {"style": o["style"]}, sub), sub)
+            elif any(s["id"] not in sts or sts[s["id"]].get("beats_of", s["text"]) != s["text"]
+                     for s in q["script"]["scenes"]):
+                # naskah diedit sesudah gambar dibuat → prompt scene/kalimat yang berubah saja yang ditulis ulang
+                _retry_429(lambda: story.setup(cid, {"keep": True}, sub), sub)
             q = store.load(cid)
             if any(not c.get("image") for c in (q["assets"].get("story") or {}).get("characters") or []):
                 story.characters(cid, {}, sub)
-            story.scenes(cid, {}, sub)
+            story.scenes(cid, {"missing": True}, sub)  # gambar yang sudah ada (atau diunggah sendiri) dipertahankan
         else:
             store.update(cid, lambda x: x["assets"].update({"visual_mode": "stock"}))
             _retry_429(lambda: assets.auto_all(cid, {"vision": False}, sub), sub)
@@ -220,9 +234,12 @@ def run_pipeline(cid: str, o: dict, sub, stop_after_script: bool = False) -> str
         _approve(cid, "assets")
 
     if st("audio") != "approved":
-        tts.render_vo(cid, {}, sub)
+        q = store.load(cid)
+        if not (q["audio"].get("vo_path") and q["audio"].get("vo_sig") == vo_signature(q)):
+            tts.render_vo(cid, {}, sub)  # hanya gambar yang berubah → suara lama masih cocok, tidak dibuat ulang
+            store.update(cid, lambda x: x["audio"].update({"vo_sig": vo_signature(x)}))
         store.update(cid, lambda x: x["audio"]["music"].update({"enabled": bool(o["music"])}))
-        if o["music"]:
+        if o["music"] and not store.load(cid)["audio"]["music"].get("file"):
             audio_lib.auto_plan(cid, {}, sub)
         _approve(cid, "audio")
 

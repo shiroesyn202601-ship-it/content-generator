@@ -7,7 +7,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from fastapi.staticfiles import StaticFiles
 
 from . import config, jobs, store
-from .services import (assets, audio_lib, batch, brand, longform, shorts, enhance, usage, clipper, fonts, prompts, proofread, render, research, scriptgen, story,
+from .services import (assets, audio_lib, batch, brand, longform, shorts, enhance, usage, clipper, fonts, prompts, proofread, quick, render, research, scriptgen, story,
                        subtitles, sync, thumbs, tts, youtube)
 
 app = FastAPI(title="Shiroe Syn Content Studio")
@@ -98,6 +98,7 @@ ACTIONS = {
     "assets.story_chars":  (story.characters, "assets", True),
     "assets.story_scenes": (story.scenes, "assets", True),
     "assets.story_beats":  (story.add_beats, "assets", True),   # video panjang: gambar per potongan kalimat
+    "research.quick_video": (quick.run, "research", True),      # Dari Nol: topik/naskah → video jadi (ala CapCut)
     "audio.render_vo":     (tts.render_vo, "audio", True),
     "audio.auto_plan":     (audio_lib.auto_plan, "audio", True),
     "subtitles.build":     (subtitles.build, "subtitles", True),
@@ -402,10 +403,10 @@ def upload_source(pid: str, file: UploadFile = File(...)):
 
 
 @app.post("/api/projects/{pid}/assets/{sid}/upload")
-def upload_asset(pid: str, sid: str, file: UploadFile = File(...)):
+def upload_asset(pid: str, sid: str, file: UploadFile = File(...), beat: int = 0):
     _load(pid)
     try:
-        return assets.save_upload(pid, sid, file.filename or "asset.mp4", file.file)
+        return assets.save_upload(pid, sid, file.filename or "asset.mp4", file.file, beat)
     except ValueError as e:
         raise HTTPException(400, str(e))
 
