@@ -344,6 +344,25 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       jarak ≥5 dtk, maks 1 per 9 dtk, zoom diarahkan ke wajah (`reframe.face_in`).
     - Belum: identitas pembicara lintas shot (nama/warna subtitle per pembicara), deteksi tawa.
 
+22. **16 Nov 2026 — subtitle podcast bahasa Jawa bolong + B-roll tidak nyambung.**
+    - Diukur: Whisper Groq atas 30 menit sekaligus hanya ±80-100 kata/mnt (obrolan nyata 150-200); bagian bermusik diganti
+      lirik/dilewati, bahasa Jawa ngawur. Whisper potongan pendek sedikit lebih baik; `jv` = kode Jawa di Groq (bukan `jw`),
+      large-v3 malah lebih buruk dari turbo. **Gemini (audio langsung) ±130 kata/mnt**, Jawa tetap Jawa, lirik diabaikan,
+      ada label pembicara, tapi waktu per baris saja & ±30 dtk per menit audio.
+    - `clipstt.py` (`refine`): per video hasil, audio rentang klip → Gemini (teks + baris berwaktu + pembicara, konteks/glosarium/
+      kamus kreator) + Whisper potongan pendek (waktu per kata) → `align` (difflib; sela diisi per panjang huruf, dibatasi
+      perkiraan baris Gemini) → segmen transkrip di rentang klip DIGANTI (`script.transcript_hq` simpan yang lama). Gemini gagal
+      → Whisper potongan pendek. Dipanggil otomatis di `produce_clips` (opsi `hq_subs`, default nyala; UI "Subtitle: Presisi").
+      Pencarian momen tetap Whisper video penuh (Gemini terlalu lambat untuk 1 jam).
+    - Aksi `research.resubtitle` (`clipper.resubtitle`, tombol "Perbaiki subtitle" di galeri): transkrip presisi → nilai tambah
+      dengan rencana BARU (nomor kalimat lama tidak berlaku) → subtitle (gaya dipertahankan) → render; status tahap dipulihkan,
+      video yang sudah terunggah dilewati. ±3 mnt per klip.
+    - B-roll (`enhance`): dulu kata umum/salah dengar ("anggaran"→uang, "Jiwita singer") + foto Pixabay pertama langsung dipakai.
+      Kini prompt ketat (maks 2, hanya hal spesifik & dikenali yang dibahas, bukan kata umum/nama aneh/pengalaman pribadi,
+      query dengan konteks lokasi, `confidence` ≥ `BROLL_CONF` 0.7), kata harus ada di kalimat (`_has_word`), kandidat Commons +
+      Pixabay (tag harus nyambung) dinilai `vision.pick` dengan kalimat yang diucapkan — hanya "cocok" yang dipakai, kalau tidak
+      tanpa B-roll.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

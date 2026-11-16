@@ -624,7 +624,8 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
     crop = params.get("crop_mode") or src["assets"].get("crop_mode") or "face"
     style = params.get("sub_style") or src["subtitles"].get("style")
     music = bool(params.get("music"))
-    from . import enhance
+    hq = params.get("hq_subs", True) is not False
+    from . import clipstt, enhance
     eopts = enhance.options(params.get("enhance")) if params.get("enhance") is not False else None
 
     def save_src(q):
@@ -653,6 +654,16 @@ def produce_clips(pid: str, params: dict, progress) -> dict:
             progress(f"{tag}: {msg}")
         try:
             store.update(qid, lambda q: store.approve(q, "script"))
+            if hq:
+                step = "transkrip presisi"
+                try:
+                    with usage.step("Transkrip presisi (subtitle)", qid):
+                        clipstt.refine(qid, {}, sub)
+                except Exception as e:  # noqa: BLE001 — gagal: tetap pakai transkrip Whisper video penuh
+                    from .. import jobs
+                    if isinstance(e, jobs.JobCancelled):
+                        raise
+                    sub(f"Transkrip presisi dilewati: {str(e)[:120]}")
             step = "potong"
             with usage.step("Potong & auto-reframe", qid):
                 cut_clip(qid, {"crop_mode": crop}, sub)
@@ -742,6 +753,50 @@ def rebrand(pid: str, params: dict, progress) -> dict:
     return {"done": done, "failed": failed, "skipped_uploaded": len(kids) - len(todo)}
 
 
+def resubtitle(pid: str, params: dict, progress) -> dict:
+    """Perbaiki subtitle video hasil yang sudah jadi: transkrip presisi per klip (Gemini + Whisper, lihat clipstt)
+    → nilai tambah dirakit ulang (rencana lama dipakai, tanpa AI) → subtitle → render ulang. Dipanggil pada proyek
+    sumber (semua video hasil yang belum diunggah) atau pada satu video hasil. Gaya subtitle, thumbnail & jadwal
+    tidak berubah; video yang sudah terunggah ke YouTube dilewati."""
+    from . import clipstt, enhance, render, subtitles
+    me = store.load(pid)
+    if me.get("parent"):
+        todo = [{"id": pid}]
+        skipped = 0
+    else:
+        kids = [q for q in store.list_projects() if q.get("parent") == pid and q.get("output")]
+        todo = [q for q in kids if not (q.get("publish") or {}).get("video_id")]
+        skipped = len(kids) - len(todo)
+    if not todo:
+        raise RuntimeError("Belum ada video hasil yang bisa diperbaiki.")
+    done, failed = [], []
+    for n, q in enumerate(todo, 1):
+        tag = f"Video {n}/{len(todo)}"
+
+        def sub(m, tag=tag):
+            progress(f"{tag}: {m}")
+        before = store.load(q["id"])
+        keep = {"stage_status": dict(before["stage_status"]), "current_stage": before["current_stage"]}
+        style = dict(before["subtitles"].get("style") or {})
+        try:
+            res = clipstt.refine(q["id"], {}, sub)
+            if (before.get("enhance") or {}).get("path"):
+                # transkrip berubah → nomor kalimat rencana lama tidak berlaku; rencana (B-roll dll.) dibuat ulang
+                enhance.run(q["id"], {"opts": before["enhance"].get("opts"), "seed": q["id"], "reuse_plan": False}, sub)
+            store.update(q["id"], lambda p, st=style: p["subtitles"].update({"style": st}))
+            subtitles.build(q["id"], {}, sub)
+            render.run(q["id"], {"drive_background": True}, sub)
+            store.update(q["id"], lambda p: (p.update(keep), store.log(p, "Subtitle diperbaiki (transkrip presisi)")))
+            done.append({"id": q["id"], "words": res["words"], "engine": res["engine"]})
+        except Exception as e:  # noqa: BLE001
+            from .. import jobs
+            if isinstance(e, jobs.JobCancelled):
+                raise
+            failed.append({"id": q["id"], "error": str(e)[:200]})
+            store.update(q["id"], lambda p, e=e: store.log(p, f"Perbaiki subtitle gagal: {e}"))
+    return {"done": done, "failed": failed, "skipped_uploaded": skipped}
+
+
 # ---------------- satu tombol ala 2short.ai ----------------
 
 DURATIONS = {"auto": None, "pendek": (15, 30), "sedang": (30, 60), "panjang": (60, 90)}
@@ -818,7 +873,8 @@ def auto_clip(pid: str, params: dict, progress) -> dict:
         res = produce_clips(pid, {"indexes": sorted(idx), "crop_mode": opts.get("crop_mode") or "face",
                                   "sub_style": style, "music": bool(opts.get("music")),
                                   "mood": opts.get("mood") or "santai",
-                                  "enhance": opts.get("enhance", {})}, step(4, "Membuat klip"))
+                                  "enhance": opts.get("enhance", {}),
+                                  "hq_subs": opts.get("hq_subs", True)}, step(4, "Membuat klip"))
     except Exception as e:
         store.update(pid, lambda q: q.setdefault("autoclip", {}).update({"status": "error", "error": str(e)[:300]}))
         raise

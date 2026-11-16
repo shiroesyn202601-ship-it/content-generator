@@ -80,7 +80,7 @@ const ACTION_LABEL = {
   'publish.thumbnail': 'Memasang thumbnail', 'thumbnail.frames': 'Mengambil kandidat frame',
   'thumbnail.render': 'Menyimpan thumbnail', 'thumbnail.auto': 'Membuat 3 thumbnail otomatis',
   'thumbnail.remove': '✕ Menghapus thumbnail', 'script.produce_clips': 'Produksi banyak video',
-  'research.auto_clip': 'Membuat klip',
+  'research.auto_clip': 'Membuat klip', 'research.resubtitle': 'Memperbaiki subtitle', 'research.rebrand': 'Render ulang klip',
   'research.shorts_batch': 'Shorts massal', 'research.autopilot': 'Lanjutkan otomatis', 'script.longform': 'Menulis naskah per bab',
   'assets.story_setup': 'Menyusun karakter & prompt', 'assets.story_chars': 'Membuat gambar karakter',
   'assets.story_scenes': 'Membuat gambar scene', 'script.transcribe': 'Transkrip & sunting',
@@ -1759,7 +1759,7 @@ const CLIP_PHASES = ['Mengunduh video', 'Transkrip & sunting', 'Mencari momen vi
 const clipOpts = () => {
   let o = {};
   try { o = JSON.parse(lsGet('clipOpts') || '{}'); } catch (_) {}
-  return { duration: 'auto', count: 0, template: 'pop', crop_mode: 'face', music: false, format: 'short', direction: '', ...o };
+  return { duration: 'auto', count: 0, template: 'pop', crop_mode: 'face', music: false, format: 'short', direction: '', hq_subs: true, ...o };
 };
 const saveClipOpts = (o) => lsSet('clipOpts', JSON.stringify(o));
 
@@ -1799,6 +1799,7 @@ function clipOptionsView(o, rerender, cfg = {}) {
     h('details', { class: 'ch-more' }, h('summary', {}, 'Opsi lain'),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Bingkai'),
         seg(o, 'crop_mode', [['face', 'Ikuti pembicara'], ['blur', 'Latar blur'], ['center', 'Crop tengah']], upd)),
+      h('div', { class: 'ch-opt' }, h('b', {}, 'Subtitle'), seg(o, 'hq_subs', [[true, 'Presisi (Gemini — bahasa Jawa/daerah, obrolan ramai)'], [false, 'Cepat (Whisper saja)']], upd)),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Musik latar'), seg(o, 'music', [[false, 'Tidak'], [true, 'Ya (otomatis pelan saat ada suara)']], upd)),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Format'), seg(o, 'format', [['short', 'Vertikal 9:16'], ['long', 'Lebar 16:9']], upd)),
       h('div', { class: 'ch-opt' }, h('b', {}, 'Arahan AI (opsional)'),
@@ -2171,9 +2172,26 @@ async function startAutoClip(extra = {}) {
   S.clipRun = S.p.id;
   render();
   const r = await runAction('research.auto_clip', { ...extra, duration: o.duration, count: o.count, template: o.template,
-    crop_mode: o.crop_mode, music: o.music, direction: o.direction, enhance: { ...ENH_DEF, ...(o.enhance || {}) } });
+    crop_mode: o.crop_mode, music: o.music, direction: o.direction, hq_subs: o.hq_subs !== false, enhance: { ...ENH_DEF, ...(o.enhance || {}) } });
   S.clipRun = null;
   if (r) toast(`${r.created.length} klip jadi${r.failed.length ? ` (${r.failed.length} gagal)` : ''}`);
+  await refreshList(); render();
+}
+
+/* Subtitle bolong / salah (mis. podcast bahasa Jawa): tiap klip ditranskrip ulang khusus rentangnya
+   (Gemini menulis teks, Whisper memberi waktu per kata) lalu nilai tambah, subtitle & video dirender ulang. */
+async function resubtitleAll(p, kids) {
+  const todo = kids.filter((c) => !(c.publish && c.publish.video_id));
+  if (!todo.length) return toast('Semua klip sudah terunggah ke YouTube — tidak ada yang bisa diperbaiki.', true);
+  const ok = await askDialog(`Perbaiki subtitle ${todo.length} klip?`, h('div', {},
+    h('p', {}, 'Tiap klip didengarkan ulang oleh Gemini (lebih paham bahasa Jawa, logat, dan obrolan campur) supaya ucapan yang dulu terlewat ikut tertulis. Waktu per kata diambil dari Whisper.'),
+    h('p', { class: 'muted small' }, `Setelah itu subtitle & video dirender ulang. Gaya subtitle, thumbnail, dan jadwal tidak berubah. Perkiraan ±1–2 menit per klip.${kids.length > todo.length ? ` ${kids.length - todo.length} klip yang sudah terunggah dilewati.` : ''}`)),
+    'Perbaiki subtitle');
+  if (!ok) return;
+  S.clipRun = p.id; render();
+  const r = await runAction('research.resubtitle', {});
+  S.clipRun = null;
+  if (r) toast(`Subtitle ${r.done.length} klip diperbarui${r.failed.length ? ` (${r.failed.length} gagal)` : ''}`);
   await refreshList(); render();
 }
 
@@ -2192,7 +2210,7 @@ function renderClipSource() {
   applyTheme('clipper');
   const src = (p.research || {}).source || {};
   const kids = (S.all || []).filter((c) => c.parent === p.id);
-  const running = S.clipRun === p.id || (p._jobs || []).some((j) => ['research.auto_clip', 'script.produce_clips', 'research.rebrand'].includes(j.kind));
+  const running = S.clipRun === p.id || (p._jobs || []).some((j) => ['research.auto_clip', 'script.produce_clips', 'research.rebrand', 'research.resubtitle'].includes(j.kind));
   main.append(h('div', { class: 'row between' },
     h('div', {}, h('h1', {}, p.title || 'Video baru'),
       h('div', { class: 'muted small' }, [src.channel, src.duration ? fmtT(src.duration) : '', src.url ? h('a', { href: src.url, target: '_blank' }, 'sumber') : null]
@@ -2254,7 +2272,9 @@ function renderClipSource() {
           if (r) toast(`${r.done.length} klip diperbarui ✓${r.failed.length ? ` (${r.failed.length} gagal)` : ''}${r.skipped_uploaded ? ` · ${r.skipped_uploaded} sudah terunggah, dilewati` : ''}`);
           await refreshList(); render();
         }, 'primary'),
-        h('span', { class: 'muted small' }, 'Klip baru otomatis memakai pengaturan ini — tombol ini hanya untuk klip yang sudah jadi.')) })));
+        h('span', { class: 'muted small' }, 'Klip baru otomatis memakai pengaturan ini — tombol ini hanya untuk klip yang sudah jadi.')) }),
+      h('button', { class: 'ghost small', title: 'Transkrip ulang tiap klip dengan Gemini (paham bahasa Jawa/daerah) lalu render ulang',
+        onclick: () => resubtitleAll(p, kids) }, 'Perbaiki subtitle')));
     main.append(h('div', { class: 'clip-grid' }, kids.map((c) => clipCard(c))));
   }
   // --- momen lain yang belum dibuat
@@ -2269,7 +2289,7 @@ function renderClipSource() {
         btn('Buat klip ini', async () => {
           const o = clipOpts(); S.clipRun = p.id; render();
           const tpl = (S.meta.sub_user_templates || {})[o.template] || (S.meta.sub_templates || {})[o.template];
-          await runAction('script.produce_clips', { indexes: [i], crop_mode: o.crop_mode, music: o.music, enhance: { ...ENH_DEF, ...(o.enhance || {}) },
+          await runAction('script.produce_clips', { indexes: [i], crop_mode: o.crop_mode, music: o.music, hq_subs: o.hq_subs !== false, enhance: { ...ENH_DEF, ...(o.enhance || {}) },
             sub_style: tpl ? { ...S.meta.sub_defaults, ...tpl.style, template: o.template } : null });
           S.clipRun = null; await refreshList(); render();
         }, 'small')))));

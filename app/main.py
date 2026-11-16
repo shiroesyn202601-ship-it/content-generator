@@ -93,6 +93,7 @@ ACTIONS = {
     "research.auto_clip":  (clipper.auto_clip, "research", True),
     "assets.enhance":     (enhance.run, "script", True),     # Clipper: komentar, konteks, fakta, B-roll, dll.
     "research.rebrand":    (clipper.rebrand, "research", True),   # Clipper: render ulang semua klip (logo/overlay)
+    "research.resubtitle": (clipper.resubtitle, "research", True),  # Clipper: transkrip presisi + subtitle + render ulang
     "assets.story_setup":  (story.setup, "assets", True),
     "assets.story_chars":  (story.characters, "assets", True),
     "assets.story_scenes": (story.scenes, "assets", True),
