@@ -2203,8 +2203,17 @@ function renderClipSource() {
 
   if (running) {
     const box = h('div', {}, clipProgressView(''));
-    S.onJob = (j) => { box.innerHTML = ''; box.append(clipProgressView(j.progress || ((j.steps || []).slice(-1)[0] || {}).msg)); };
-    main.append(box);
+    const live = liveClipGallery(p);
+    let lastRefresh = Date.now();
+    S.onJob = (j) => {
+      box.innerHTML = ''; box.append(clipProgressView(j.progress || ((j.steps || []).slice(-1)[0] || {}).msg));
+      // Klip yang sudah jadi langsung tampil (tidak menunggu semua selesai): muat ulang daftar tiap ±4 dtk.
+      if (Date.now() - lastRefresh > 4000 && S.p && S.p.id === p.id) {
+        lastRefresh = Date.now();
+        refreshList().then(() => live.update()).catch(() => {});
+      }
+    };
+    main.append(box, live.el);
   } else if (!src.path) {
     const url = h('input', { class: 'ch-url', placeholder: 'Tempel link YouTube…' });
     const next = async (file) => {
@@ -2225,8 +2234,8 @@ function renderClipSource() {
       btn('Atur tampilan & buat klip →', () => { S.clipSetup = { pid: p.id }; clipSetupView(S.clipSetup); }, 'primary')));
   }
 
-  // --- galeri klip jadi
-  if (kids.length) {
+  // --- galeri klip jadi (saat proses berjalan: galeri live di atas)
+  if (kids.length && !running) {
     kids.sort((a, b) => ((b.clip || {}).score || 0) - ((a.clip || {}).score || 0));
     main.append(h('div', { class: 'row between', style: 'margin-top:14px' }, h('h2', {}, `${kids.length} klip jadi`),
       h('span', { class: 'muted small' }, 'Klik video untuk memutar. Skor = potensi viral menurut AI.')));
@@ -2336,6 +2345,42 @@ function sourceReportLine(p) {
   return h('div', { class: 'rp-line' },
     h('span', {}, `Proses terakhir ${fmtDur(rep.total)}${ph ? ` — ${ph}` : ''} · ${n} AI/layanan`),
     h('button', { class: 'ghost small', onclick: () => openReport(`Laporan proses: ${p.title || 'video'}`, rep) }, 'Lihat laporan'));
+}
+
+/* Galeri selama Buat Klip berjalan: klip yang sudah selesai (sampai thumbnail) bisa langsung diputar/diunduh,
+   yang masih dikerjakan tampil sebagai kartu "sedang dibuat". Kartu dipertahankan per id supaya video yang
+   sedang diputar tidak terhenti saat daftar dimuat ulang. */
+function liveClipGallery(p) {
+  const head = h('div', { class: 'row between', style: 'margin-top:14px' });
+  const grid = h('div', { class: 'clip-grid' });
+  const el = h('div', {}, head, grid);
+  const cards = {};  // id → {done, node}
+  const update = () => {
+    const kids = (S.all || []).filter((c) => c.parent === p.id)
+      .sort((a, b) => ((b.clip || {}).score || 0) - ((a.clip || {}).score || 0));
+    const done = kids.filter(readyForUpload);
+    el.style.display = kids.length ? '' : 'none';
+    head.innerHTML = '';
+    head.append(h('h2', {}, `${done.length} klip jadi${kids.length > done.length ? ` · ${kids.length - done.length} sedang dibuat` : ''}`),
+      h('span', { class: 'muted small' }, 'Klip yang sudah jadi bisa langsung diputar & diunduh.'));
+    const seen = new Set();
+    kids.forEach((c) => {
+      seen.add(c.id);
+      const ok = readyForUpload(c);
+      let k = cards[c.id];
+      if (!k || k.done !== ok) {
+        const node = ok ? clipCard(c) : h('div', { class: 'clip-card pending' },
+          h('div', { class: 'cc-media' }, h('div', { class: 'cc-empty' }, h('span', { class: 'spin' }), h('span', { class: 'small' }, 'Sedang dibuat…'))),
+          h('div', { class: 'cc-title', title: c.title }, c.title));
+        if (k) k.node.replaceWith(node);
+        k = cards[c.id] = { done: ok, node };
+      }
+      grid.append(k.node);  // urutkan ulang (append memindahkan node yang sudah ada)
+    });
+    Object.keys(cards).forEach((id) => { if (!seen.has(id)) { cards[id].node.remove(); delete cards[id]; } });
+  };
+  update();
+  return { el, update };
 }
 
 function clipCard(c) {
