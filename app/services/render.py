@@ -316,6 +316,7 @@ def run(pid: str, params: dict, progress) -> dict:
     def apply(p):
         p["render"].update({"output_path": "render/final.mp4", "duration": round(total, 2),
                             "drive_file_id": drive_id})
+        p.pop("render_outdated", None)
         store.touch_stage(p, "render")
         store.log(p, f"Render selesai ({total:.1f}s, encoder {enc})")
     store.update(pid, apply)

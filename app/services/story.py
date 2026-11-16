@@ -108,8 +108,14 @@ def setup(pid: str, params: dict, progress) -> dict:
     keep = bool(params.get("keep")) and old.get("scenes")
     style = params.get("style") or old.get("style") or "3d"
     per_beat = beats.enabled(p)
+
+    def complete(s):  # keep: scene ini sudah punya prompt untuk semua potongannya → tidak perlu AI lagi
+        o = old.get("scenes", {}).get(s["id"]) or {}
+        return o.get("beats_of") == s["text"] and len(o.get("beats") or []) == len(beats.split(s["text"])) - 1
+    done = {s["id"] for s in scenes if keep and (not per_beat or complete(s))}
+    ask = [s for s in scenes if s["id"] not in done]
     chunks, cur, n = [], [], 0
-    for s in scenes:
+    for s in ask:
         k = len(beats.split(s["text"])) if per_beat else 1
         if cur and n + k > SHOTS_PER_CALL:
             chunks.append(cur)
@@ -131,6 +137,21 @@ def setup(pid: str, params: dict, progress) -> dict:
             notes = res.get("style_notes", "")
         prompts_by_id.update({x["id"]: x for x in res.get("scenes", []) if x.get("id")})
     chars = chars or []
+    # AI kadang melewatkan potongan (mis. hanya menjawab id scene "s2" tanpa "s2.1") → tanya ulang scene itu saja.
+    for attempt in range(2):
+        lacking = [s for s in ask if per_beat and any(
+            not (prompts_by_id.get(f"{s['id']}.{k}") or {}).get("image_prompt")
+            for k in range(1, len(beats.split(s["text"]))))]
+        if not lacking:
+            break
+        for part in [lacking[i:i + 6] for i in range(0, len(lacking), 6)]:
+            progress(f"AI melengkapi prompt gambar per kalimat ({len(lacking)} scene belum lengkap)…")
+            try:
+                res = _ask(p, style, part, per_beat, chars)
+            except llm.LLMError as e:
+                store.update(pid, lambda q, e=e: store.log(q, f"Prompt per kalimat gagal: {e}"))
+                continue
+            prompts_by_id.update({x["id"]: x for x in res.get("scenes", []) if x.get("id")})
     ids = {c["id"] for c in chars}
 
     def entry(x: dict | None, fallback: str) -> dict:
@@ -139,6 +160,9 @@ def setup(pid: str, params: dict, progress) -> dict:
 
     story_scenes = {}
     for s in scenes:
+        if s["id"] in done:  # prompt & gambar per kalimat yang sudah ada dipertahankan
+            story_scenes[s["id"]] = old["scenes"][s["id"]]
+            continue
         bs = beats.split(s["text"]) if per_beat else [{"w": 0, "text": s["text"]}]
         if keep and s["id"] in old["scenes"]:
             sc = {k: v for k, v in old["scenes"][s["id"]].items() if k not in ("beats", "beats_of")}
@@ -151,6 +175,7 @@ def setup(pid: str, params: dict, progress) -> dict:
             if x and x.get("image_prompt"):
                 sc["beats"].append({"w": b["w"], "text": b["text"], **entry(x, "")})
         sc["beats_of"] = s["text"]
+        sc["beats_want"] = len(bs) - 1  # < len(beats) → UI menawarkan melengkapi
         story_scenes[s["id"]] = sc
     n_beats = sum(len(v["beats"]) for v in story_scenes.values())
 
@@ -159,11 +184,12 @@ def setup(pid: str, params: dict, progress) -> dict:
         q["assets"]["story"] = {"style": style, "style_notes": notes, "characters": chars,
                                 "scenes": story_scenes, "seed": old.get("seed") or int(time.time()) % 100000}
         for sid, sl in q["assets"]["scenes"].items():  # gambar potongan lama tidak cocok dengan prompt baru
-            if sid in story_scenes:
+            if sid in story_scenes and sid not in done:
                 sl.pop("beats", None)
                 sl.pop("beats_of", None)
         store.touch_stage(q, "assets")
-        store.log(q, f"Cerita AI: {len(chars)} karakter, {len(story_scenes)} scene + {n_beats} gambar per kalimat")
+        store.log(q, f"Cerita AI: {len(chars)} karakter, {len(story_scenes)} scene + {n_beats} gambar per kalimat"
+                  + (f" ({len(done)} scene dipertahankan)" if done else ""))
     store.update(pid, apply)
     return {"characters": len(chars), "scenes": len(story_scenes), "beats": n_beats}
 

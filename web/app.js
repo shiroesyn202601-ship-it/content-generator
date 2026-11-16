@@ -1081,7 +1081,8 @@ function rStory(d) {
   const missing = chars.filter((c) => !c.image).length;
   const scs = S.p.script.scenes.map((s) => [s, (st.scenes || {})[s.id]]).filter(([, sc]) => sc);
   // video panjang: tiap potongan kalimat punya gambar sendiri (beats.py)
-  const noBeats = S.p.format === 'long' ? scs.filter(([s, sc]) => sc.beats_of !== s.text).length : 0;
+  const noBeats = S.p.format === 'long' ? scs.filter(([s, sc]) => sc.beats_of !== s.text
+    || (sc.beats || []).length < (sc.beats_want === undefined ? 1 : sc.beats_want)).length : 0;
   const imgTodo = scs.reduce((n, [, sc]) => n + (sc.image ? 0 : 1) + (sc.beats || []).filter((b) => !b.image).length, 0);
   const imgAll = scs.reduce((n, [, sc]) => n + 1 + (sc.beats || []).length, 0);
   if (noBeats) box.append(hint(`${noBeats} scene masih memakai 1 gambar untuk seluruh teksnya. "Tambah gambar per kalimat" memecah tiap scene per kalimat/frasa dan membuat gambar sendiri untuk tiap potongan (karakter & gambar yang sudah ada tetap dipakai).`, 'warn'));

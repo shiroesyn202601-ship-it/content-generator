@@ -487,6 +487,9 @@ def touch_stage(p: dict, stage: str) -> None:
     for later in STAGES[idx + 1:]:
         if p["stage_status"][later] in ("approved", "draft"):
             p["stage_status"][later] = "stale"
+    # Data sebelum render berubah → video lama tidak lagi mewakili proyek; render.run menghapus tanda ini.
+    if "render" in STAGES[idx + 1:] and (p.get("render") or {}).get("output_path"):
+        p["render_outdated"] = True
     # Mundur ke tahap ini: tahap berikutnya harus disetujui ulang (data tetap ada)
     p["current_stage"] = idx
 
@@ -543,6 +546,8 @@ def _validate(p: dict, stage: str) -> None:
     elif stage == "render":
         if not p["render"].get("output_path"):
             err = "Video belum dirender."
+        elif p.get("render_outdated"):
+            err = "Video ini dibuat sebelum aset/suara/subtitle diubah — klik Render dulu supaya perubahannya masuk."
     elif stage == "thumbnail":
         if not (p.get("thumbnail") or {}).get("thumbs"):
             err = "Buat thumbnail dulu (atau unggah gambar sendiri)."
