@@ -2414,7 +2414,7 @@ function clipCard(c) {
    yang tetap bisa dibuka per tahap. Video panjang tetap satu proyek per video (wizard). */
 const isBatch = (p) => !!p && !!p.batch && !p.parent;
 const BATCH_DEF = { template: 'fakta', duration: 50, visual: 'stock', style: '3d', voice_preset: 'antusias',
-  sub_tpl: 'pop', music: true, transition: '', review: false };
+  sub_tpl: 'pop', music: true, transition: '', review: false, vary: true, take: true, persona: '' };
 S.bopt = {};    // pengaturan Shorts massal per proyek wadah (belum dikirim)
 S.bsel = {};    // ide yang dicentang per proyek wadah
 S.bjobs = {};   // proses Shorts massal yang sedang dipantau di latar
@@ -2689,7 +2689,14 @@ function renderShortsBatch() {
       opt('Subtitle', h('div', { class: 'tpl-row' }, Object.entries(tpls).filter(([k]) => k !== 'klasik').map(([k, t]) =>
         tplCard(k, t, o.sub_tpl === k, () => { o.sub_tpl = k; rerender(); })))),
       opt('Musik latar', seg(o, 'music', [[true, 'Ya (sesuai mood)'], [false, 'Tidak']], rerender)),
-      opt('Transisi', seg(o, 'transition', [['', 'Fade'], ['geser', 'Geser'], ['zoom', 'Zoom'], ['none', 'Tanpa']], rerender)),
+      opt('Transisi', seg(o, 'transition', [['', o.vary ? 'Bervariasi' : 'Fade'], ['geser', 'Geser'], ['zoom', 'Zoom'], ['none', 'Tanpa']], rerender)),
+      opt('Variasi tiap video', seg(o, 'vary', [[true, 'Ya (disarankan)'], [false, 'Seragam']], rerender),
+        o.vary ? 'Jenis pembuka, transisi, warna & animasi subtitle dirotasi per video, dan naskah yang terlalu mirip video lain ditulis ulang. YouTube menilai "minim variasi antar video" per channel sebagai konten tidak autentik.'
+          : 'Semua video memakai pola yang sama — berisiko dinilai produksi massal oleh YouTube.'),
+      opt('Sudut pandang kreator', seg(o, 'take', [[true, 'Sisipkan opini'], [false, 'Tidak']], rerender),
+        o.take ? 'Tiap naskah memuat satu kalimat pendapatmu sebagai narator — nilai tambah yang membedakan dari video cetakan.' : null),
+      o.take ? opt('Ciri channel (opsional)', h('input', { value: o.persona || '', placeholder: 'mis. skeptis, suka membandingkan dengan kehidupan sehari-hari',
+        oninput: (e) => { o.persona = e.target.value; } })) : null,
       opt('Alur', seg(o, 'review', [[false, 'Langsung jadi video'], [true, 'Cek naskah dulu']], rerender),
         o.review ? 'Produksi berhenti setelah naskah. Cek/edit naskah tiap video, lalu klik "Lanjutkan produksi".' : 'Naskah, visual, suara, dan render dikerjakan otomatis; tiap video tetap bisa diedit sesudahnya.'))));
 

@@ -302,7 +302,9 @@ def narrate(pid: str, params: dict, progress) -> dict:
     sources = _sources(p, idea, params, progress) if use_src else []
     progress(f"AI menulis narasi '{prompts.TEMPLATE_LABEL[template]}' untuk '{idea.get('title', '')}'"
              + (f" (berdasarkan {len(sources)} sumber)…" if sources else "…"))
-    res = llm.chat_json(prompts.NARRATION_SYSTEM, prompt + prompts.narration_sources(factsource.as_prompt(sources)),
+    extra = (params.get("extra") or "").strip()  # arahan tambahan (Shorts massal: variasi hook, opini kreator)
+    res = llm.chat_json(prompts.NARRATION_SYSTEM, prompt + (f"\n\nARAHAN TAMBAHAN (wajib):\n{extra}" if extra else "")
+                        + prompts.narration_sources(factsource.as_prompt(sources)),
                         params.get("provider"), temperature=0.7)
     narr = str(res.get("narasi") or res.get("narration") or "").strip()
     if not narr:

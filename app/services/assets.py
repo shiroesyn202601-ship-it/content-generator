@@ -161,6 +161,15 @@ def search_ai(prompt: str, orientation: str, n: int = 2) -> list[dict]:
     w, h = (720, 1280) if orientation == "portrait" else (1280, 720)
     full = f"{prompt}, {AI_STYLE}"
     out = []
+    from . import imagegen
+    if imagegen.available():
+        # Cloudflare FLUX: gambar dibuat saat dipilih (_download mengenali skema "cfimg:"), tanpa watermark.
+        for seed in range(1, n + 1):
+            out.append({"provider": "ai", "type": "image", "id": f"cf{abs(hash(full)) % 10 ** 8}_{seed}", "thumb": "",
+                        "url": f"cfimg:{w}x{h}:{seed}:{quote(full)}", "width": w, "height": h,
+                        "page_url": "https://developers.cloudflare.com/workers-ai/", "author": "AI (Cloudflare FLUX)",
+                        "license": "Gambar buatan AI", "synthetic": True, "tags": f"ai generated, {prompt}".lower()})
+        return out
     for seed in range(1, n + 1):
         url = (f"https://image.pollinations.ai/prompt/{quote(full)}?width={w}&height={h}"
                f"&nologo=true&seed={seed}&model=flux")
@@ -228,6 +237,13 @@ def search_scene(pid: str, params: dict, progress) -> dict:
 
 def _download(url: str, dest: Path) -> None:
     from .factsource import UA  # Wikimedia menolak (403) unduhan tanpa User-Agent deskriptif
+    if url.startswith("cfimg:"):  # gambar AI Cloudflare: dibuat sekarang
+        from urllib.parse import unquote
+        from . import imagegen
+        _, size, seed, prompt = url.split(":", 3)
+        w, h = (int(x) for x in size.split("x"))
+        dest.write_bytes(imagegen.cf_image(unquote(prompt), w, h, int(seed)))
+        return
     headers = UA if "wikimedia.org" in url or "wikipedia.org" in url else None
     with HTTP.stream("GET", url, headers=headers) as r:
         r.raise_for_status()
@@ -257,7 +273,7 @@ def select_candidate(pid: str, params: dict, progress) -> dict:
     if not dest.exists():
         progress("Mengunduh aset…" if cand["provider"] != "ai" else "Membuat gambar AI (±5-10 dtk)…")
         _download(cand["url"], dest)
-        if cand["provider"] == "ai":
+        if cand["provider"] == "ai" and not cand["url"].startswith("cfimg:"):
             _crop_watermark(dest)
 
     def apply(p):
@@ -440,7 +456,7 @@ def auto_all(pid: str, params: dict, progress) -> dict:
                 select_candidate(pid, {"scene_id": s["id"], "index": k, "pick": pk2}, lambda m: None)
                 idx, ok = k, True
                 break
-            except httpx.HTTPError as e:
+            except (httpx.HTTPError, RuntimeError) as e:
                 store.update(pid, lambda p, e=e, s=s: store.log(p, f"Unduh aset {s['id']} gagal: {str(e).splitlines()[0]}"))
                 if attempt < 2 and len(order) > attempt + 1:
                     progress(f"Scene {i + 1}: unduhan gagal — mencoba kandidat lain…")

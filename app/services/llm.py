@@ -20,8 +20,9 @@ from . import keys, usage
 
 TIMEOUT = httpx.Timeout(180.0, connect=15.0)
 PROVIDER_LABEL = {"gemini": "Gemini", "groq": "Groq", "cerebras": "Cerebras", "openrouter": "OpenRouter",
-                  "mistral": "Mistral", "ollama": "Ollama (lokal)"}
-CLOUD = ("groq", "gemini", "cerebras", "openrouter", "mistral")
+                  "mistral": "Mistral", "cloudflare": "Cloudflare", "ollama": "Ollama (lokal)"}
+# Urutan cadangan (Nov 2026): Cerebras kini hanya kredit uji coba $5 & OpenRouter :free 50 request/hari → paling akhir.
+CLOUD = ("groq", "gemini", "cloudflare", "mistral", "openrouter", "cerebras")
 STATUS_REASON = {429: "kuota gratis habis", 500: "error di server", 503: "server sedang sibuk",
                  404: "model sudah tidak tersedia"}
 
@@ -128,7 +129,7 @@ def chat_json(system: str, user: str, provider: str | None = None, temperature: 
         report(f"Jawaban AI ({PROVIDER_LABEL[name]}) diterima, membaca hasilnya…")
         return data
     single = [keys.ENV[p] + "_2" for p in ("groq", "gemini") if len(keys.pool(p)) == 1]
-    unused = [keys.ENV[p] for p in ("cerebras", "openrouter", "mistral") if not keys.pool(p)]
+    unused = [keys.ENV[p] for p in ("cloudflare", "mistral", "openrouter") if not keys.pool(p)]
     hint = ("" if len(order) > 1 or not (single or unused) else
             "\n\nSolusi: tambah API key cadangan di .env — " + " / ".join(single + unused)
             + " (semua gratis). Aplikasi otomatis pindah saat yang lain habis.")
@@ -364,11 +365,23 @@ COMPAT = {
     "cerebras": ("https://api.cerebras.ai/v1/chat/completions", lambda: config.CEREBRAS_MODELS),
     "openrouter": ("https://openrouter.ai/api/v1/chat/completions", lambda: config.OPENROUTER_MODELS),
     "mistral": ("https://api.mistral.ai/v1/chat/completions", lambda: config.MISTRAL_MODELS),
+    # URL & token Cloudflare tergantung akun: key = "<account_id>:<token>"
+    "cloudflare": (lambda acct: f"https://api.cloudflare.com/client/v4/accounts/{acct}/ai/v1/chat/completions",
+                   lambda: config.CLOUDFLARE_MODELS),
 }
 
 
+def _endpoint(service: str, key: str) -> tuple[str, str]:
+    """(url, bearer token) untuk satu key layanan kompatibel OpenAI."""
+    url = COMPAT[service][0]
+    if callable(url):
+        acct, _, tok = key.partition(":")
+        return url(acct), tok
+    return url, key
+
+
 def _compat(service: str, system: str, user: str, temperature: float) -> str:
-    url, models = COMPAT[service]
+    models = COMPAT[service][1]
     if not keys.has(service):
         raise LLMError(f"{service.upper()}_API_KEY belum diisi.")
     messages = [{"role": "system", "content": system}, {"role": "user", "content": user}]
@@ -385,7 +398,8 @@ def _compat(service: str, system: str, user: str, temperature: float) -> str:
             if rf:
                 body["response_format"] = {"type": "json_object"}
             try:
-                r = httpx.post(url, headers={"Authorization": f"Bearer {key}"}, json=body, timeout=TIMEOUT)
+                ep, tok = _endpoint(service, key)
+                r = httpx.post(ep, headers={"Authorization": f"Bearer {tok}"}, json=body, timeout=TIMEOUT)
             except httpx.TimeoutException:
                 errors.append(f"{model} → timeout")
                 break

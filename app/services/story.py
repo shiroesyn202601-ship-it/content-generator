@@ -127,6 +127,12 @@ def _crop_watermark(img: bytes) -> bytes:
 
 
 def _text2img(prompt: str, w: int, h: int, seed: int, progress) -> bytes:
+    from . import imagegen
+    if imagegen.available():  # utama: Cloudflare FLUX (gratis harian); gagal → Pollinations di bawah
+        try:
+            return imagegen.cf_image(prompt, w, h, seed, progress)
+        except RuntimeError as e:
+            progress(f"{str(e)[:120]} — memakai Pollinations…")
     for attempt in range(4):
         pk = _pkey()
         if pk:

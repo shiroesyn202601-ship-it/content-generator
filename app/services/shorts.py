@@ -12,6 +12,9 @@ wizard per tahap untuk diperbaiki lalu dirender ulang (gerbang manusia tetap ada
 Berurutan per video (LLM gratis punya batas token/menit; render berat). Pipeline melewati tahap yang sudah
 disetujui → tombol "Coba lagi" / "Lanjutkan" cukup memanggil ulang. Satu video gagal tidak menghentikan lainnya.
 """
+import difflib
+import random
+import re
 import time
 
 from .. import store
@@ -29,7 +32,24 @@ DEFAULTS = {
     "transition": "",         # "" = fade otomatis
     "review": False,          # True = berhenti setelah naskah (cek dulu), lanjutkan dengan tombol "Lanjutkan"
     "metadata": True,         # judul/deskripsi/tag otomatis
+    "vary": True,             # variasi per video (hook, transisi, gaya subtitle) — kebijakan "inauthentic content"
+    "take": True,             # tiap video memuat 1 kalimat sudut pandang kreator (nilai tambah, bukan cetakan)
+    "persona": "",            # sudut pandang/ciri channel, mis. "skeptis, suka membandingkan dengan kehidupan sehari-hari"
 }
+
+# Jenis pembuka yang dirotasi antar video. YouTube (Jul 2025 / Jul 2026) menilai "minimal variation across videos"
+# & "impression of mass production" per CHANNEL → batch tidak boleh dibuka dengan pola yang sama terus.
+HOOKS = [
+    ("pertanyaan", "Buka dengan SATU pertanyaan tajam yang langsung bikin penasaran (bukan 'pernahkah kamu')."),
+    ("fakta", "Buka langsung dengan fakta/angka paling mengejutkan dari topik, tanpa basa-basi."),
+    ("mitos", "Buka dengan membantah anggapan umum yang salah tentang topik ini."),
+    ("adegan", "Buka dengan adegan singkat seolah penonton ada di tempat/kejadian itu (kalimat pendek, sinematik)."),
+    ("kontras", "Buka dengan perbandingan kontras yang tak terduga (X ternyata lebih ... daripada Y)."),
+    ("rahasia", "Buka dengan janji membuka satu hal yang jarang diketahui, lalu tepati di akhir."),
+]
+TRANSITIONS = ["fade", "geser", "zoom", "hitam", "lingkaran"]
+SIMILAR_OPEN = 0.62   # rasio kemiripan kalimat pembuka (difflib) yang dianggap terlalu mirip
+SIMILAR_BODY = 0.30   # kemiripan isi (Jaccard trigram kata)
 
 
 def options(o: dict | None) -> dict:
@@ -40,6 +60,100 @@ def options(o: dict | None) -> dict:
     if o["voice_preset"] not in store.VOICE_PRESETS:
         o["voice_preset"] = "antusias"
     return o
+
+
+def variant(o: dict, k: int, seed: str) -> dict:
+    """Variasi deterministik untuk video ke-k dalam wadah (bisa diulang: seed + k sama → hasil sama)."""
+    v = dict(o)
+    if not o.get("vary", True):
+        v["hook"] = None
+        return v
+    r = random.Random(f"{seed}:{k}")
+    start = random.Random(seed).randrange(len(HOOKS))
+    v["hook"] = HOOKS[(start + k) % len(HOOKS)][0]
+    if not o.get("transition"):
+        v["transition"] = TRANSITIONS[(start + k) % len(TRANSITIONS)]
+    if o.get("sub_style"):
+        from . import enhance
+        v["sub_style"] = enhance.vary_style(o["sub_style"], r.randrange(10 ** 9))
+    return v
+
+
+def _first_sentence(narr: str) -> str:
+    s = scriptgen.sentences(re.sub(r"^\s*##.*$", "", narr or "", flags=re.M))
+    return (s[0] if s else "").lower()
+
+
+def _trigrams(t: str) -> set:
+    w = re.findall(r"\w+", (t or "").lower())
+    return {" ".join(w[i:i + 3]) for i in range(len(w) - 2)}
+
+
+def similarity(narr: str, others: list[str]) -> dict:
+    """Kemiripan narasi dengan video lain di wadah yang sama: pembuka (difflib) & isi (Jaccard trigram)."""
+    a1, a3 = _first_sentence(narr), _trigrams(narr)
+    best = {"open": 0.0, "body": 0.0}
+    for o in others:
+        best["open"] = max(best["open"], difflib.SequenceMatcher(None, a1, _first_sentence(o)).ratio())
+        b3 = _trigrams(o)
+        if a3 and b3:
+            best["body"] = max(best["body"], len(a3 & b3) / len(a3 | b3))
+    best["too_similar"] = best["open"] >= SIMILAR_OPEN or best["body"] >= SIMILAR_BODY
+    return best
+
+
+def _siblings_narr(cid: str) -> list[str]:
+    q = store.load(cid)
+    out = []
+    for x in store.list_projects():
+        if x.get("parent") == q.get("parent") and x["id"] != cid:
+            try:
+                n = store.load(x["id"])["script"].get("narration")
+            except (FileNotFoundError, ValueError):
+                continue
+            if n:
+                out.append(n)
+    return out
+
+
+def _extra(o: dict, others: list[str]) -> str:
+    """Arahan tambahan untuk prompt narasi: jenis pembuka, larangan meniru pembuka video lain, opini kreator."""
+    lines = []
+    hook = dict(HOOKS).get(o.get("hook"))
+    if hook:
+        lines.append(f"- Pembuka: {hook}")
+    opens = [" ".join(_first_sentence(n).split()[:4]) for n in others]
+    opens = [x for x in dict.fromkeys(opens) if x][-8:]
+    if opens:
+        lines.append("- Video lain di seri ini sudah dibuka dengan: " + "; ".join(f'"{x}…"' for x in opens)
+                     + ". JANGAN memakai kata pembuka atau pola kalimat yang sama.")
+    if o.get("take", True):
+        lines.append("- Sebelum kalimat penutup, sisipkan SATU kalimat sudut pandang pribadi narator (pakai 'aku' / "
+                     "'menurutku'), jujur dan spesifik terhadap isi video ini — bukan kalimat klise.")
+    if (o.get("persona") or "").strip():
+        lines.append(f"- Ciri sudut pandang channel: {o['persona'].strip()[:300]}")
+    return "\n".join(lines)
+
+
+def _write_script(cid: str, o: dict, sub) -> None:
+    """Narasi + cek kemiripan dengan video lain di wadah; terlalu mirip → tulis ulang sekali dengan larangan lebih keras."""
+    others = _siblings_narr(cid)
+    params = {"template": o["template"], "duration": o["duration"], "extra": _extra(o, others)}
+    _retry_429(lambda: scriptgen.narrate(cid, params, sub), sub)
+    sim = similarity(store.load(cid)["script"].get("narration") or "", others)
+    if sim["too_similar"]:
+        sub(f"naskah terlalu mirip video lain (pembuka {sim['open']:.0%}, isi {sim['body']:.0%}) — ditulis ulang…")
+        params["extra"] += ("\n- PENTING: naskah sebelumnya terlalu mirip video lain di seri ini. Pakai sudut cerita, "
+                            "struktur, dan kalimat pembuka yang benar-benar berbeda.")
+        _retry_429(lambda: scriptgen.narrate(cid, params, sub), sub)
+        sim = similarity(store.load(cid)["script"].get("narration") or "", others)
+
+    def save(q):
+        q.setdefault("batch_variant", {}).update({"similar_open": round(sim["open"], 2),
+                                                 "similar_body": round(sim["body"], 2)})
+        store.log(q, f"Kemiripan dengan video lain: pembuka {sim['open']:.0%}, isi {sim['body']:.0%}"
+                     + (" — MASIH MIRIP, mohon cek naskah" if sim["too_similar"] else ""))
+    store.update(cid, save)
 
 
 def _cancelled(e: Exception) -> bool:
@@ -76,8 +190,8 @@ def run_pipeline(cid: str, o: dict, sub, stop_after_script: bool = False) -> str
     if st("script") != "approved":
         q = store.load(cid)
         if not q["script"].get("scenes"):
-            sub("menulis narasi…")
-            _retry_429(lambda: scriptgen.narrate(cid, {"template": o["template"], "duration": o["duration"]}, sub), sub)
+            sub("menulis narasi" + (f" (pembuka: {o['hook']})…" if o.get("hook") else "…"))
+            _write_script(cid, o, sub)
         if stop_after_script:
             return "review"
         _approve(cid, "script")
@@ -209,7 +323,14 @@ def produce(pid: str, params: dict, progress) -> dict:
                 store.update(cid, lambda q: q.update({"voice": dict(store.load(pid)["voice"])})
                              if q["stage_status"]["audio"] != "approved" else None)
             step = "produksi"
-            res = run_pipeline(cid, o, sub, stop_after_script=bool(o["review"]) and not params.get("children"))
+            bv = store.load(cid).get("batch_variant") or {}
+            k = bv.get("k")
+            if k is None:  # urutan video di wadah → menentukan rotasi pembuka/transisi/gaya subtitle
+                k = max(0, sum(1 for x in store.list_projects() if x.get("parent") == pid) - 1)
+            vo = variant(o, k, pid)
+            store.update(cid, lambda q, k=k, vo=vo: q.setdefault("batch_variant", {}).update(
+                {"k": k, "hook": vo.get("hook"), "transition": vo.get("transition")}))
+            res = run_pipeline(cid, vo, sub, stop_after_script=bool(o["review"]) and not params.get("children"))
             (review if res == "review" else created).append({"id": cid, "title": title})
         except Exception as e:  # noqa: BLE001
             if _cancelled(e):

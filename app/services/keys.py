@@ -24,7 +24,8 @@ _dead: dict[tuple[str, str], str] = {}          # (layanan, key) → alasan
 _used: dict[tuple[str, str], float] = {}        # (layanan, key) → terakhir dipakai
 
 ENV = {"gemini": "GEMINI_API_KEY", "groq": "GROQ_API_KEY", "openrouter": "OPENROUTER_API_KEY",
-       "cerebras": "CEREBRAS_API_KEY", "mistral": "MISTRAL_API_KEY", "pollinations": "POLLINATIONS_KEY"}
+       "cerebras": "CEREBRAS_API_KEY", "mistral": "MISTRAL_API_KEY", "pollinations": "POLLINATIONS_KEY",
+       "cloudflare": "CLOUDFLARE_API_KEY"}
 
 
 def pool(service: str) -> list[str]:
@@ -37,6 +38,13 @@ def pool(service: str) -> list[str]:
             k = k.strip().strip('"').strip("'")
             if k and k not in out:
                 out.append(k)
+    if service == "cloudflare":
+        # Cloudflare butuh Account ID + API token. Bentuk kolam: CLOUDFLARE_API_KEY=<account_id>:<token>,…
+        # atau pasangan biasa CLOUDFLARE_ACCOUNT_ID + CLOUDFLARE_API_TOKEN (satu akun).
+        acct, tok = os.getenv("CLOUDFLARE_ACCOUNT_ID", "").strip(), os.getenv("CLOUDFLARE_API_TOKEN", "").strip()
+        if acct and tok and f"{acct}:{tok}" not in out:
+            out.append(f"{acct}:{tok}")
+        out = [k for k in out if ":" in k]
     return out
 
 

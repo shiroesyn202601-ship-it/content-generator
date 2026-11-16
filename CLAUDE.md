@@ -289,6 +289,21 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       setujui tahap sisa sampai thumbnail (long tanpa naskah → ditulis per bab dulu).
     - Dialog konfirmasi sendiri `askDialog(title, text, okLabel, danger)` (pengganti `confirm()`).
 
+20. **16 Nov 2026 — riset mendalam Dari Nol + P0** (laporan lokal `reports/Riset optimasi konten dari nol.md`, catatan di
+    `research_notes/` — sengaja TIDAK di-commit, repo publik). P0 yang dikerjakan:
+    - **Variasi per video Shorts massal** (`shorts.variant`, opsi `vary`): jenis pembuka dirotasi (`shorts.HOOKS`),
+      transisi, warna/animasi subtitle (`enhance.vary_style`); indeks video disimpan di `p.batch_variant.k`.
+      **Cek kemiripan** (`shorts.similarity`: pembuka difflib ≥0.62 / isi Jaccard trigram ≥0.30) → tulis ulang sekali.
+      Larangan meniru pembuka video lain + **opini kreator** (`take`, `persona`) lewat `scriptgen.narrate(params.extra)`.
+      Alasan: kebijakan YouTube "inauthentic content" (minim variasi antar video, dinilai per channel).
+    - `prompts.NARRATION_SYSTEM`: narator tidak boleh mengaku ahli kesehatan/hukum/keuangan/politik.
+    - **Cloudflare Workers AI** (`imagegen.py`, key `CLOUDFLARE_ACCOUNT_ID`+`CLOUDFLARE_API_TOKEN` atau
+      `CLOUDFLARE_API_KEY=<acct>:<token>,…`): gambar AI utama FLUX schnell (1024² dipotong ke 9:16/16:9; skema URL
+      `cfimg:` di `assets._download`), dipakai juga oleh `story._text2img`; Pollinations jadi cadangan (kredit gratis
+      per jam berhenti 10 Jul 2026). LLM cadangan `cloudflare` (`COMPAT` dengan URL per akun, `llm._endpoint`).
+      Urutan `llm.CLOUD`: groq → gemini → cloudflare → mistral → openrouter → cerebras (Cerebras kini trial $5).
+      **Belum diuji dengan akun Cloudflare asli.**
+
 20. **15 Nov 2026 — Clipper memahami konteks: sunting transkrip sebelum cari momen** (keluhan user: potongan tidak
     paham konteks). Dulu transkrip Whisper mentah langsung dinilai per bagian, tiap bagian tanpa tahu isi video.
     Alur kini: unduh → Whisper → **`proofread.py`** → cari momen. Dipanggil otomatis di akhir `clipper.transcribe`

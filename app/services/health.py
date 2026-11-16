@@ -80,9 +80,12 @@ def check(ping_llm: bool = False) -> list[dict]:
     from . import llm
     st = kp.status()
     signup = {"groq": "console.groq.com/keys", "gemini": "aistudio.google.com/apikey",
-              "cerebras": "cloud.cerebras.ai", "openrouter": "openrouter.ai/keys", "mistral": "console.mistral.ai"}
+              "cerebras": "cloud.cerebras.ai (kini kredit uji coba $5, bukan gratis berulang)",
+              "openrouter": "openrouter.ai/keys (model :free maks 50 request/hari)", "mistral": "console.mistral.ai",
+              "cloudflare": "dash.cloudflare.com → Workers AI → buat API token (Account ID + token)"}
     model_of = {"gemini": config.GEMINI_MODEL, "groq": config.GROQ_MODEL, "cerebras": ",".join(config.CEREBRAS_MODELS[:1]),
-                "openrouter": ",".join(config.OPENROUTER_MODELS[:1]), "mistral": ",".join(config.MISTRAL_MODELS[:1])}
+                "openrouter": ",".join(config.OPENROUTER_MODELS[:1]), "mistral": ",".join(config.MISTRAL_MODELS[:1]),
+                "cloudflare": ",".join(config.CLOUDFLARE_MODELS[:1])}
     rantai = llm.chain()
     for prov in [*rantai, *[p for p in llm.CLOUD if p not in rantai]]:
         role = "utama" if rantai and prov == rantai[0] else ("cadangan" if prov in rantai else "belum diisi")
@@ -119,6 +122,12 @@ def check(ping_llm: bool = False) -> list[dict]:
     out.append(_item("Aset", "Pixabay", "ok" if config.PIXABAY_API_KEY else "fail",
                      "API key terisi" if config.PIXABAY_API_KEY else "API key kosong",
                      "" if config.PIXABAY_API_KEY else "Daftar gratis di pixabay.com/api/docs → isi PIXABAY_API_KEY"))
+    from . import imagegen
+    out.append(_item("Aset", "Gambar AI (Cloudflare FLUX)", "ok" if imagegen.available() else "warn",
+                     f"siap · model {config.CF_IMAGE_MODEL} · ±200 gambar/hari per akun" if imagegen.available()
+                     else "belum diisi — gambar AI memakai Pollinations (lambat, kredit gratis tidak lagi diisi ulang)",
+                     "" if imagegen.available() else "Gratis: dash.cloudflare.com → catat Account ID → buat API token "
+                     "'Workers AI' → isi CLOUDFLARE_ACCOUNT_ID & CLOUDFLARE_API_TOKEN di .env"))
     out.append(_item("Aset", "Cerita AI (Pollinations)", "ok" if config.POLLINATIONS_KEY else "warn",
                      f"key terisi · model {config.STORY_IMAGE_MODEL}" if config.POLLINATIONS_KEY
                      else "tanpa key: karakter kurang konsisten & ±1 gambar/40 dtk",

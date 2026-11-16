@@ -52,6 +52,9 @@ GROQ_FALLBACK_MODELS = [m.strip() for m in _env("GROQ_FALLBACK_MODELS", "qwen/qw
 CEREBRAS_MODELS = _list("CEREBRAS_MODELS", "gpt-oss-120b,llama-3.3-70b,qwen-3-32b")
 OPENROUTER_MODELS = _list("OPENROUTER_MODELS", "openrouter/free,meta-llama/llama-3.3-70b-instruct:free")
 MISTRAL_MODELS = _list("MISTRAL_MODELS", "mistral-small-latest,open-mistral-nemo")
+# Cloudflare Workers AI (gratis 10rb Neuron/hari, data tidak dipakai melatih model): LLM cadangan + gambar FLUX.
+CLOUDFLARE_MODELS = _list("CLOUDFLARE_MODELS", "@cf/openai/gpt-oss-120b,@cf/meta/llama-3.3-70b-instruct-fp8-fast")
+CF_IMAGE_MODEL = _env("CF_IMAGE_MODEL", "@cf/black-forest-labs/flux-1-schnell")
 OLLAMA_URL = _env("OLLAMA_URL", "http://localhost:11434")
 OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b")
 
