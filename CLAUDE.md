@@ -327,6 +327,47 @@ end-to-end, Whisper Groq, auto-reframe (video sintetis), thumbnail, riset tren, 
 - Jangan menulis email pribadi user di file repo.
 - Kalau error muncul saat uji pertama, cek dulu modul di `app/services/` yang sesuai tahapnya; peta
   spesifikasi → file ada di `docs/ARCHITECTURE.md` §6.
+- **Commit & push langsung** setelah perubahan selesai, tanpa menanyakan konfirmasi (preferensi user).
+  Push memakai SSH (lihat §8); jangan ubah remote kembali ke HTTPS.
+- Bisa ada **beberapa sesi Claude bekerja bersamaan** di repo ini. Sebelum mengedit, cek `git status` &
+  `ListAgents`; jangan menimpa perubahan orang lain, commit hanya hunk milik sendiri.
+- **Server auto-reload**: menyimpan file `.py` / `.env` me-restart server dan menghentikan job yang sedang
+  berjalan (dihentikan rapi + tombol "Jalankan ulang"). Jangan edit `.py` saat user sedang memproses video panjang.
+
+## 8. Menjalankan di komputer lain (catatan 16 Nov 2026)
+Yang ada di GitHub hanya **kode**. Isi kerja user tersimpan lokal dan sengaja TIDAK di-upload (repo publik):
+`.env` (API key), `credentials/` (login Google), `data/` (proyek, video, branding, musik, font, model).
+
+**Cara A — komputer/HP/tablet lain hanya sebagai layar (disarankan bila satu Wi-Fi).** Laptop utama tetap
+mesinnya: di `.env` laptop utama isi `HOST=0.0.0.0` dan `APP_PIN=<pin>`, jalankan `python run.py`, lalu buka
+alamat jaringan yang tercetak di terminal (mis. `http://192.168.x.x:8000`) dari perangkat lain + masukkan PIN.
+Semua proyek & pengaturan sama karena yang bekerja tetap laptop utama.
+
+**Cara B — instal penuh di komputer lain.** Bila diminta menyiapkan proyek ini di komputer baru:
+1. Pasang alat (winget): Python 3.12, `Gyan.FFmpeg`, `DenoLand.Deno` (wajib untuk unduh YouTube), Git.
+2. `git clone https://github.com/shiroesyn202601-ship-it/content-generator.git` →
+   `python -m venv .venv` → `.venv\Scripts\Activate.ps1` → `pip install -r requirements.txt`.
+3. Minta user menyalin dari laptop utama (flashdisk / Drive pribadi — **JANGAN lewat GitHub**):
+   `.env`, folder `credentials\` (token kedaluwarsa → `python run.py --setup-google`), dan opsional dari `data\`:
+   `brand.json` + `brand\` (background/icon/logo), `library\` (musik & SFX), `sub_templates.json`,
+   `projects\<id>\` bila proyek itu mau dilanjutkan (besar: berisi video sumber).
+   Tanpa `.env` aplikasi tetap jalan tapi fitur AI/aset gagal — cek lewat halaman **Cek Kesiapan** (`/api/health`).
+4. `python run.py`, buka `http://127.0.0.1:8000`.
+
+Hal yang perlu disampaikan ke user:
+- Proyek **tidak tersinkron otomatis** antar-komputer; satu proyek sebaiknya dikerjakan di satu komputer.
+  `python run.py --restore <drive_file_id>` hanya memulihkan `project.json` dari backup Drive, tanpa video.
+- **Smart App Control** (Windows 11) bisa memblokir DLL tak bertanda tangan (Git `libcurl`, ctranslate2, dll.).
+  SAC tidak punya whitelist dan **jangan sarankan mematikannya** (tidak bisa dinyalakan lagi).
+  - Push Git: pakai SSH dengan OpenSSH bawaan Windows. Buat key BARU per komputer (jangan salin key):
+    `C:\Windows\System32\OpenSSH\ssh-keygen.exe -t ed25519 -f %USERPROFILE%\.ssh\id_ed25519_github -C shiroe-content-studio`,
+    user menambahkan isi `.pub` di https://github.com/settings/ssh/new, lalu di repo:
+    `git config core.sshCommand "C:/Windows/System32/OpenSSH/ssh.exe -i ~/.ssh/id_ed25519_github -o IdentitiesOnly=yes -o StrictHostKeyChecking=accept-new"`
+    dan `git remote set-url origin git@github.com:shiroesyn202601-ship-it/content-generator.git`.
+    Uji: `ssh -T git@github.com` (sidik jari ED25519 resmi GitHub: `SHA256:+DiY3wvvV6TuJJhbpZisF/zLDA0zPMSvHdkr4UvCOqU`).
+  - Whisper lokal (ctranslate2) diblokir → otomatis memakai Whisper Groq (perlu `GROQ_API_KEY`).
+  - Di Git Bash `curl`/`find` bisa ikut diblokir; pakai PowerShell (`Invoke-WebRequest`, `Get-ChildItem`) atau Python.
+- Memori Claude (`~/.claude/...`) tidak ikut pindah — aturan penting sudah ditulis di file ini.
 
 ## 7. Aturan UX — acuan WAJIB untuk setiap fitur baru (permintaan user, 15 Nov 2026)
 Bagian ini adalah standar pengembangan aplikasi. Fitur/layar baru harus memenuhinya; kode lama yang
