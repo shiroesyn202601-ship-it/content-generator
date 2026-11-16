@@ -198,13 +198,16 @@ Aturan keras:
   (mis. "concert stage spotlight", "Kediri East Java"). visual = deskripsi gambar yang SEHARUSNYA tampil, bahasa
   Inggris 1 kalimat, lengkap dengan suasana sesuai topik video (mis. kata "lampu sorot" di obrolan penyanyi dangdut →
   "bright stage spotlights shining over a dangdut concert stage in Indonesia at night", BUKAN lampu jalan).
-  kind = "commons" untuk tokoh/tempat/merek nyata, "photo" untuk benda. why = alasan gambar ini membantu penonton.
+  kind = "commons" untuk tokoh/tempat/merek nyata, "photo" untuk lainnya. why = alasan gambar ini membantu penonton.
+  style = "sticker" untuk SATU benda fisik (lampu sorot, mikrofon, gitar, uang, pesawat, piala) → tampil sebagai stiker
+  PNG tanpa latar; "photo" untuk tempat, acara, suasana, tokoh → kartu foto kecil. object_en = nama benda bahasa
+  Inggris 1-3 kata untuk stiker (mis. "spotlight", "studio microphone").
   confidence = 0-1 seberapa yakin syarat (1)-(5) terpenuhi.
 - emoji: maks 5, satu emoji yang cocok untuk kata penting (word = kata persis dari kalimat itu).
 Balas HANYA JSON:
 {"intro":"","outro":"","people":[{"name":"","role_guess":""}],"topic":"",
  "claims":[{"sent":0,"claim":"","query":""}],
- "broll":[{"sent":0,"word":"","query_en":"","visual":"","kind":"photo","why":"","confidence":0.0}],
+ "broll":[{"sent":0,"word":"","query_en":"","visual":"","style":"photo","object_en":"","kind":"photo","why":"","confidence":0.0}],
  "emoji":[{"sent":0,"word":"","emoji":""}]}"""
 
 
@@ -269,7 +272,9 @@ def _clean_plan(raw: dict, n_sent: int) -> dict:
                       for x in (raw.get("claims") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("claim"))][:2],
            "broll": [{"sent": int(x["sent"]), "word": s(x.get("word"), 40), "query_en": s(x.get("query_en"), 60),
                       "kind": x.get("kind") if x.get("kind") in ("photo", "commons", "ai") else "photo",
-                      "why": s(x.get("why"), 120), "visual": s(x.get("visual"), 220)}
+                      "why": s(x.get("why"), 120), "visual": s(x.get("visual"), 220),
+                      "style": x.get("style") if x.get("style") in ("sticker", "photo") else "photo",
+                      "object_en": s(x.get("object_en"), 40)}
                      for x in (raw.get("broll") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("query_en"))
                      and _conf(x) >= BROLL_CONF and not _sensitive(f"{x.get('query_en')} {x.get('word')}")][:3],
            "emoji": [{"sent": int(x["sent"]), "word": s(x.get("word"), 40), "emoji": s(x.get("emoji"), 12)}
@@ -360,41 +365,87 @@ Narasumber di video (topik: "{topic}") sedang berkata: "{said}"
 Gambar akan ditampilkan saat kata "{word}". Yang SEHARUSNYA terlihat: {visual}
 1) "seen": sebutkan apa yang BENAR-BENAR terlihat di gambar (maks 20 kata, jujur, jangan menebak dari judul).
 2) "object": true hanya bila benda/tempat yang dimaksud terlihat JELAS sebagai fokus gambar.
-3) "setting": true hanya bila suasana/konteksnya sesuai yang seharusnya (mis. lampu sorot PANGGUNG konser, bukan
-   lampu jalan; teleprompter, bukan stand partitur). Budaya/lokasi asing yang mencolok = false.
+3) "setting": {setting_rule}
 Balas JSON: {{"seen": "...", "object": true, "setting": true}}"""
+SETTING_PHOTO = ("true hanya bila suasana/konteksnya sesuai yang seharusnya (mis. lampu sorot PANGGUNG konser, bukan "
+                 "lampu jalan; teleprompter, bukan stand partitur). Budaya/lokasi asing yang mencolok = false.")
+SETTING_STICKER = ("ini stiker objek tanpa latar (latar abu-abu hanya alas) — true bila jenis objeknya sesuai "
+                   "konteks (mis. lampu sorot panggung, bukan lampu meja).")
 
 
-def _broll_ok(path: Path, item: dict, topic: str, said: str) -> tuple[bool, str]:
-    """AI vision menilai SATU gambar (maks 640 px — lebih detail dari lembar kontak): benda jelas + suasana sesuai."""
+def _broll_ok(path: Path, item: dict, topic: str, said: str, sticker: bool = False) -> tuple[bool, str]:
+    """AI vision menilai SATU gambar (maks 640 px). Stiker PNG ditaruh di atas alas abu-abu dulu."""
     import io
 
     from PIL import Image
-    im = Image.open(path).convert("RGB")
+    im = Image.open(path)
+    if sticker:
+        im = im.convert("RGBA")
+        base = Image.new("RGBA", im.size, (110, 115, 120, 255))
+        base.alpha_composite(im)
+        im = base
+    im = im.convert("RGB")
     im.thumbnail((640, 640))
     buf = io.BytesIO()
     im.save(buf, "JPEG", quality=85)
     res = llm.vision_json(BROLL_CHECK.format(topic=topic[:120], said=said[:300], word=item["word"],
-                                             visual=item.get("visual") or item["query_en"]), buf.getvalue())
+                                             visual=item.get("visual") or item["query_en"],
+                                             setting_rule=SETTING_STICKER if sticker else SETTING_PHOTO), buf.getvalue())
     return bool(res.get("object")) and bool(res.get("setting")), str(res.get("seen") or "")[:120]
 
 
-def _broll_asset(item: dict, d: Path, k: int, fmt: str, topic: str = "", said: str = "", progress=lambda m: None) -> dict | None:
-    """Kandidat stok (Commons + Pixabay dengan tag yang nyambung) diperiksa SATU PER SATU oleh AI vision: harus jelas
-    memperlihatkan bendanya DAN suasananya sesuai (lampu sorot panggung, bukan lampu jalan). Tidak ada yang lolos →
-    gambar AI dibuat persis dari deskripsi visual (lalu diperiksa juga). Masih gagal / vision tak tersedia → tanpa
-    B-roll. Lebih baik tanpa B-roll daripada B-roll yang membingungkan."""
+def _sticker_asset(item: dict, d: Path, k: int, topic: str, said: str, progress) -> dict | None:
+    """Stiker PNG: Fluent Emoji 3D yang namanya cocok → kalau tidak ada/ditolak, gambar AI objek + potong latar."""
+    from . import assets, stickers
+    obj = item.get("object_en") or item["query_en"]
+    dest, tmp = d / "assets" / f"broll_{k}.png", d / "assets" / f"broll_{k}_try.png"
+    for c in stickers.fluent_match(obj, 2):
+        progress(f"B-roll '{item['word']}': memeriksa stiker 3D {c['title']}…")
+        try:
+            assets._download(c["url"], tmp)
+            ok, seen = _broll_ok(tmp, item, topic, said, sticker=True)
+        except Exception:  # noqa: BLE001
+            tmp.unlink(missing_ok=True)
+            continue
+        if ok:
+            tmp.replace(dest)
+            stickers.outline(dest)
+            return dict(c, check=seen)
+        progress(f"B-roll '{item['word']}': stiker ditolak — terlihat {seen}")
+    progress(f"B-roll '{item['word']}': membuat stiker AI '{obj}'…")
+    c = stickers.ai_sticker(item.get("visual") or obj, tmp, seed=k + 7, progress=progress)
+    if c:
+        try:
+            ok, seen = _broll_ok(tmp, item, topic, said, sticker=True)
+        except Exception:  # noqa: BLE001
+            ok, seen = False, ""
+        if ok:
+            tmp.replace(dest)
+            stickers.outline(dest)
+            return dict(c, check=seen)
+        progress(f"B-roll '{item['word']}': stiker AI ditolak — terlihat {seen}")
+    tmp.unlink(missing_ok=True)
+    return None
+
+
+def _photo_asset(item: dict, d: Path, k: int, fmt: str, topic: str, said: str, progress) -> dict | None:
+    """Kartu foto: Openverse (CC, Flickr/Wikimedia) + Unsplash (bila ada key) + Commons + Pixabay, maks 4 diperiksa,
+    lalu gambar AI dari deskripsi visual sebagai pilihan terakhir."""
     from PIL import Image
 
     from . import assets
-    orient = "vertical" if fmt == "short" else "horizontal"
+    orient = "horizontal"  # kartu tampil di zona atas yang lebar → foto mendatar tampil paling besar
     q = item["query_en"]
     visual = item.get("visual") or q
     keys = set(re.findall(r"[a-z]{3,}", q.lower())) - {"the", "and", "with", "indonesia", "indonesian", "photo", "java", "east"}
-    stock = []
+    stock: list[dict] = []
+    for fn in (lambda: assets.search_openverse(q, 3), lambda: assets.search_unsplash(q, 3, orient),
+               lambda: assets.search_commons(q, 2) if item["kind"] == "commons" else []):
+        try:
+            stock += fn()
+        except Exception:  # noqa: BLE001 — satu sumber gagal, sumber lain jalan
+            pass
     try:
-        if item["kind"] == "commons":
-            stock += assets.search_commons(q, 3)
         if config.PIXABAY_API_KEY:
             data = assets._cached_get("https://pixabay.com/api/", {
                 "key": config.PIXABAY_API_KEY, "q": q[:100], "image_type": "photo",
@@ -405,12 +456,19 @@ def _broll_asset(item: dict, d: Path, k: int, fmt: str, topic: str = "", said: s
                     stock.append({"provider": "pixabay", "url": hit["largeImageURL"], "page_url": hit.get("pageURL"),
                                   "author": hit.get("user"), "license": "Pixabay Content License",
                                   "title": hit.get("tags") or q})
+                    if sum(c["provider"] == "pixabay" for c in stock) >= 2:
+                        break
     except Exception:  # noqa: BLE001
         pass
-    ai = [dict(c, title=visual) for c in assets.search_ai(visual, "portrait" if fmt == "short" else "landscape", 1)]
+    # selang-seling sumber supaya 4 pemeriksaan tidak habis di satu situs
+    order, seen_prov = [], {}
+    for c in stock:
+        seen_prov[c["provider"]] = seen_prov.get(c["provider"], 0) + 1
+        order.append((seen_prov[c["provider"]], c))
+    stock = [c for _, c in sorted(order, key=lambda x: x[0])][:4]
+    ai = [dict(c, title=visual) for c in assets.search_ai(visual, "landscape", 1)]
     dest, tmp = d / "assets" / f"broll_{k}.jpg", d / "assets" / f"broll_{k}_try.jpg"
-    pick = None
-    for c in stock[:3] + ai:
+    for c in stock + ai:
         is_ai = c["provider"] == "ai"
         progress(f"B-roll '{item['word']}': {'membuat gambar AI dari deskripsi' if is_ai else 'memeriksa foto ' + c['provider']}…")
         try:
@@ -427,18 +485,35 @@ def _broll_asset(item: dict, d: Path, k: int, fmt: str, topic: str = "", said: s
             return None
         if ok:
             tmp.replace(dest)
-            pick = dict(c, check=seen)
-            break
+            if c["provider"] == "unsplash":
+                assets.unsplash_track(c)
+            return dict(c, check=seen)
         progress(f"B-roll '{item['word']}': ditolak — terlihat {seen}")
     tmp.unlink(missing_ok=True)
+    return None
+
+
+def _broll_asset(item: dict, d: Path, k: int, fmt: str, topic: str = "", said: str = "", progress=lambda m: None) -> dict | None:
+    """B-roll yang tidak menutupi pembicara: STIKER PNG untuk benda tunggal (lampu sorot, mikrofon, gitar…) atau KARTU
+    FOTO untuk tempat/acara/tokoh. Tiap kandidat diperiksa AI vision (benda jelas + suasana sesuai); tidak ada yang
+    lolos / vision tak tersedia → tanpa B-roll (lebih baik daripada B-roll yang membingungkan)."""
+    style = item.get("style") if item.get("style") in ("sticker", "photo") else "photo"
+    pick = _sticker_asset(item, d, k, topic, said, progress) if style == "sticker" else None
+    if pick is None and style == "sticker":
+        progress(f"B-roll '{item['word']}': stiker tidak ada yang cocok — mencoba kartu foto…")
+    if pick is None:
+        pick = _photo_asset(item, d, k, fmt, topic, said, progress)
+        style = "photo"
     if pick is None:
         progress(f"B-roll '{item['word']}' dilewati — tidak ada gambar yang benar-benar cocok")
         return None
-    usage.ai("Gambar", {"commons": "Wikimedia Commons", "pixabay": "Pixabay", "ai": "Gambar AI"}.get(
-        pick.get("provider"), pick.get("provider") or "?"), q, None, "B-roll")
-    return {"file": f"assets/broll_{k}.jpg", "provider": pick.get("provider"), "page_url": pick.get("page_url"),
-            "author": pick.get("author"), "license": pick.get("license"), "title": pick.get("title"),
-            "requires_attribution": pick.get("requires_attribution", False), "check": pick["check"]}
+    usage.ai("Gambar", {"commons": "Wikimedia Commons", "pixabay": "Pixabay", "openverse": "Openverse (CC)",
+                        "unsplash": "Unsplash", "fluent": "Fluent Emoji 3D", "ai": "Gambar AI"}.get(
+        pick.get("provider"), pick.get("provider") or "?"), item["query_en"], None, "B-roll")
+    return {"file": f"assets/broll_{k}.{'png' if style == 'sticker' else 'jpg'}", "style": style,
+            "provider": pick.get("provider"), "page_url": pick.get("page_url"), "author": pick.get("author"),
+            "license": pick.get("license"), "title": pick.get("title"),
+            "requires_attribution": pick.get("requires_attribution", False), "check": pick.get("check", "")}
 
 
 def _emoji_png(e: str) -> Path | None:
@@ -770,14 +845,30 @@ def run(pid: str, params: dict, progress) -> dict:
         n_in += 1
     g.append("".join(seq) + f"concat=n={len(seq)}:v=1:a=1[cv][ca]")
     cur = "[cv]"
+    # Zona B-roll = bagian ATAS layar (3-25% tinggi): di bingkai satu orang itu ruang di atas kepala (mata di 38%),
+    # di shot lebar/blur itu area latar blur — wajah & subtitle tidak tertutup.
+    top, zone_h = int(H * 0.035), int(H * 0.22)
     for k, b in enumerate(broll):
         dur = b["end"] - b["start"]
         inputs += ["-loop", "1", "-framerate", str(config.FPS), "-t", f"{dur:.3f}", "-i", b["file"]]
-        g.append(f"[{n_in}:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
-                 f"zoompan=z='1+0.06*on/{int(dur * config.FPS)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={config.FPS},"
-                 f"format=rgba,fade=t=in:st=0:d=0.15:alpha=1,fade=t=out:st={dur - 0.15:.3f}:d=0.15:alpha=1,"
-                 f"setpts=PTS-STARTPTS+{b['start']:.3f}/TB[bi{k}]")
-        g.append(f"{cur}[bi{k}]overlay=0:0:eof_action=pass[bo{k}]")
+        fade = (f"fade=t=in:st=0:d=0.15:alpha=1,fade=t=out:st={dur - 0.18:.3f}:d=0.18:alpha=1,"
+                f"setpts=PTS-STARTPTS+{b['start']:.3f}/TB")
+        rise = f"max(0,1-(t-{b['start']:.3f})/0.22)"  # muncul sambil naik sedikit (0.22 dtk)
+        if b.get("style") == "sticker":   # stiker PNG transparan
+            g.append(f"[{n_in}:v]scale=w={int(W * 0.62)}:h={zone_h}:force_original_aspect_ratio=decrease,"
+                     f"format=rgba,{fade}[bi{k}]")
+        elif b.get("style") == "photo":   # kartu foto: bingkai putih, sedikit miring
+            g.append(f"[{n_in}:v]scale=w={int(W * 0.82)}:h={zone_h - 24}:force_original_aspect_ratio=decrease,"
+                     f"pad=iw+16:ih+16:8:8:color=white,format=rgba,rotate=-0.035:c=none:ow=rotw(-0.035):oh=roth(-0.035),"
+                     f"{fade}[bi{k}]")
+        else:  # B-roll lama (layar penuh)
+            g.append(f"[{n_in}:v]scale={W}:{H}:force_original_aspect_ratio=increase,crop={W}:{H},"
+                     f"zoompan=z='1+0.06*on/{int(dur * config.FPS)}':x='iw/2-(iw/zoom/2)':y='ih/2-(ih/zoom/2)':d=1:s={W}x{H}:fps={config.FPS},"
+                     f"format=rgba,{fade}[bi{k}]")
+            g.append(f"{cur}[bi{k}]overlay=0:0:eof_action=pass[bo{k}]")
+            cur, n_in = f"[bo{k}]", n_in + 1
+            continue
+        g.append(f"{cur}[bi{k}]overlay=x=(main_w-overlay_w)/2:y='{top}+({zone_h}-overlay_h)/2-50*{rise}':eof_action=pass[bo{k}]")
         cur, n_in = f"[bo{k}]", n_in + 1
     for k, e in enumerate(emojis):
         dur = e["end"] - e["start"]

@@ -150,6 +150,59 @@ def search_commons(query: str, n: int = 6) -> list[dict]:
     return out
 
 
+def search_openverse(query: str, n: int = 4) -> list[dict]:
+    """Openverse (WordPress/Creative Commons): ±800 juta foto CC dari Flickr, Wikimedia, dll. Tanpa key. Hanya lisensi
+    yang boleh dipakai komersial & diubah (CC0/PDM/BY/BY-SA); atribusi disimpan untuk deskripsi YouTube."""
+    from .factsource import UA
+    data = _cached_get("https://api.openverse.org/v1/images/", {
+        "q": query[:200], "license_type": "commercial,modification", "page_size": n * 3, "mature": "false"},
+        client=httpx.Client(timeout=30, headers=UA, follow_redirects=True))
+    out = []
+    for x in data.get("results") or []:
+        if (x.get("width") or 0) < 640 or not x.get("url"):
+            continue
+        lic = (x.get("license") or "").lower()
+        out.append({"provider": "openverse", "type": "image", "id": x.get("id"), "url": x["url"],
+                    "thumb": x.get("thumbnail") or x["url"], "page_url": x.get("foreign_landing_url") or x.get("url"),
+                    "author": (x.get("creator") or "")[:80],
+                    "license": f"{'CC ' if lic not in ('pdm', 'cc0') else ''}{lic.upper()} {x.get('license_version') or ''}".strip(),
+                    "requires_attribution": lic not in ("pdm", "cc0"), "title": (x.get("title") or query)[:100],
+                    "source": x.get("source")})
+        if len(out) >= n:
+            break
+    return out
+
+
+def search_unsplash(query: str, n: int = 4, orientation: str = "vertical") -> list[dict]:
+    """Unsplash (foto berkualitas tinggi, gratis): butuh UNSPLASH_ACCESS_KEY. Aturan API: kredit fotografer + Unsplash,
+    dan panggil download_location saat foto benar-benar dipakai (unsplash_track)."""
+    if not config.UNSPLASH_ACCESS_KEY:
+        return []
+    data = _cached_get("https://api.unsplash.com/search/photos", {
+        "query": query[:100], "per_page": n, "content_filter": "high",
+        "orientation": {"vertical": "portrait", "horizontal": "landscape"}.get(orientation, "portrait"),
+        "client_id": config.UNSPLASH_ACCESS_KEY}, key_param="client_id")
+    out = []
+    for x in data.get("results") or []:
+        u = x.get("user") or {}
+        out.append({"provider": "unsplash", "type": "image", "id": x.get("id"), "url": (x.get("urls") or {}).get("regular"),
+                    "thumb": (x.get("urls") or {}).get("small"),
+                    "page_url": ((x.get("links") or {}).get("html") or "") + "?utm_source=shiroe_content_studio&utm_medium=referral",
+                    "author": u.get("name") or "", "license": "Unsplash License", "requires_attribution": True,
+                    "title": (x.get("alt_description") or x.get("description") or query)[:100],
+                    "download_location": (x.get("links") or {}).get("download_location")})
+    return [c for c in out if c["url"]]
+
+
+def unsplash_track(c: dict) -> None:
+    """Wajib menurut panduan API Unsplash: beri tahu bahwa foto ini dipakai."""
+    if c.get("download_location") and config.UNSPLASH_ACCESS_KEY:
+        try:
+            HTTP.get(c["download_location"], params={"client_id": config.UNSPLASH_ACCESS_KEY}, timeout=15)
+        except Exception:  # noqa: BLE001
+            pass
+
+
 AI_STYLE = ("photorealistic, cinematic lighting, highly detailed, historically and culturally accurate, "
             "no text, no watermark, no logo")
 
@@ -244,7 +297,9 @@ def _download(url: str, dest: Path) -> None:
         w, h = (int(x) for x in size.split("x"))
         dest.write_bytes(imagegen.cf_image(unquote(prompt), w, h, int(seed)))
         return
-    headers = UA if "wikimedia.org" in url or "wikipedia.org" in url else None
+    # Wikimedia menolak tanpa User-Agent deskriptif; Flickr (sumber utama Openverse) menolak UA bawaan httpx (502)
+    headers = UA if any(h in url for h in ("wikimedia.org", "wikipedia.org", "staticflickr.com", "flickr.com",
+                                           "openverse.org")) else None
     with HTTP.stream("GET", url, headers=headers) as r:
         r.raise_for_status()
         with open(dest, "wb") as f:

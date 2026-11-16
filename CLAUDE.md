@@ -365,6 +365,22 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       teleprompter) → kini tiap kandidat (maks 3 stok + 1 gambar AI dari `visual`) dinilai SENDIRI 640 px oleh
       `_broll_ok` (sebut dulu yang terlihat, lalu object & setting harus true). Tidak lolos / vision tak tersedia → tanpa B-roll.
 
+23. **16 Nov 2026 — B-roll tanpa menutupi pembicara: stiker PNG & kartu foto, sumber selain Pixabay.**
+    Riset sumber gratis (Nov 2026): Pexels menutup key baru; Unsplash gratis 50 req/jam (key, wajib kredit + panggil
+    `download_location`); **Openverse** tanpa key (±200/hari anonim), foto CC Flickr/Wikimedia — untuk topik lokal jauh lebih
+    relevan (mis. "dangdut concert stage" → foto panggung dangdut asli); Flickr menolak UA bawaan httpx (502) → `_download`
+    memakai UA aplikasi. `assets.search_openverse` (hanya lisensi komersial+modifikasi, atribusi ke deskripsi),
+    `assets.search_unsplash` + `unsplash_track` (opsional `UNSPLASH_ACCESS_KEY`, baris di Cek Kesiapan).
+    - Rencana B-roll punya `style`: `sticker` (1 benda fisik) / `photo` (tempat/acara/tokoh) + `object_en`.
+    - `stickers.py`: Microsoft **Fluent Emoji 3D** (MIT, ±1285 PNG transparan; daftar dari GitHub tree API di-cache 30 hari
+      `data/cache/fluent3d.json`, file via jsDelivr — API listing jsDelivr menolak repo >50 MB) dicocokkan nama; tidak ada →
+      gambar AI "isolated on pure white background" (`story._text2img`, Pollinations ber-key) → `cutout_white` (flood fill
+      latar terang dari tepi + grabCut, tanpa rembg/onnx) → `outline` (tepi putih + bayangan). Stiker gagal → kartu foto.
+    - Kartu foto: Openverse → Unsplash → Commons → Pixabay (bergantian, maks 4 dicek) → gambar AI; orientasi mendatar.
+    - Semua dicek `_broll_ok` (vision 640 px; stiker di atas alas abu-abu). Render: zona ATAS layar 3-25% tinggi
+      (di atas kepala bingkai 1 orang / area blur shot lebar), muncul sambil naik; kartu = bingkai putih miring sedikit.
+      B-roll lama tanpa `style` dari rencana tersimpan → kartu foto.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

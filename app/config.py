@@ -60,6 +60,8 @@ OLLAMA_MODEL = _env("OLLAMA_MODEL", "qwen2.5:7b")
 
 PEXELS_API_KEY = _env("PEXELS_API_KEY")
 PIXABAY_API_KEY = _env("PIXABAY_API_KEY")
+# Unsplash (opsional, gratis 50 permintaan/jam): unsplash.com/developers → New Application → Access Key
+UNSPLASH_ACCESS_KEY = _env("UNSPLASH_ACCESS_KEY")
 # Produksi massal Clipper: berapa klip dikerjakan bersamaan (CPU/GPU + menunggu AI). 1 = berurutan.
 try:
     CLIP_WORKERS = max(1, min(6, int(_env("CLIP_WORKERS", "3") or 3)))

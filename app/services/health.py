@@ -134,6 +134,10 @@ def check(ping_llm: bool = False) -> list[dict]:
                      "" if config.POLLINATIONS_KEY else "Daftar gratis di enter.pollinations.ai → isi POLLINATIONS_KEY di .env"))
     out.append(_item("Aset", "Pexels","ok" if config.PEXELS_API_KEY else "warn",
                      "API key terisi" if config.PEXELS_API_KEY else "kosong (opsional; key baru sedang ditutup Pexels)"))
+    out.append(_item("Aset", "Unsplash (B-roll)", "ok" if config.UNSPLASH_ACCESS_KEY else "warn",
+                     "Access Key terisi" if config.UNSPLASH_ACCESS_KEY else "kosong (opsional) — B-roll memakai Openverse, Commons, Pixabay",
+                     "" if config.UNSPLASH_ACCESS_KEY else "Gratis: unsplash.com/developers → New Application → salin Access Key "
+                     "→ isi UNSPLASH_ACCESS_KEY di .env"))
     missing = [n.title() for n in fonts.CATALOG if not fonts.available(n)]
     out.append(_item("Aset", "Font subtitle", "ok" if not missing else "warn",
                      "semua font preset tersedia" if not missing else f"belum diunduh: {', '.join(missing)}",
