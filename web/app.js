@@ -86,6 +86,7 @@ const ACTION_LABEL = {
   'assets.story_scenes': 'Membuat gambar scene', 'script.transcribe': 'Transkrip & sunting',
   'script.find_clips': 'Mencari momen viral', 'script.proofread': 'Menyunting transkrip', 'assets.search': 'Mencari stock footage',
   'assets.select': 'Memasang aset', 'assets.auto_all': 'Mengisi aset semua scene',
+  'assets.story_beats': 'Membuat gambar per kalimat',
   'assets.cut_clip': 'Memotong klip', 'audio.render_vo': 'Membuat voice over',
   'audio.auto_plan': 'Memilih musik & SFX', 'subtitles.build': 'Membuat subtitle',
   'subtitles.apply': 'Menyimpan subtitle', 'subtitles.regroup': '↻ Mengelompokkan subtitle',
@@ -1078,12 +1079,23 @@ function rStory(d) {
   });
   box.append(cg);
   const missing = chars.filter((c) => !c.image).length;
+  const scs = S.p.script.scenes.map((s) => [s, (st.scenes || {})[s.id]]).filter(([, sc]) => sc);
+  // video panjang: tiap potongan kalimat punya gambar sendiri (beats.py)
+  const noBeats = S.p.format === 'long' ? scs.filter(([s, sc]) => sc.beats_of !== s.text).length : 0;
+  const imgTodo = scs.reduce((n, [, sc]) => n + (sc.image ? 0 : 1) + (sc.beats || []).filter((b) => !b.image).length, 0);
+  const imgAll = scs.reduce((n, [, sc]) => n + 1 + (sc.beats || []).length, 0);
+  if (noBeats) box.append(hint(`${noBeats} scene masih memakai 1 gambar untuk seluruh teksnya. "Tambah gambar per kalimat" memecah tiap scene per kalimat/frasa dan membuat gambar sendiri untuk tiap potongan (karakter & gambar yang sudah ada tetap dipakai).`, 'warn'));
   box.append(h('div', { class: 'row' },
     chars.length ? btn(`2. Buat gambar ${missing ? `${missing} karakter` : 'semua karakter (ulang)'}`, () => runAction('assets.story_chars', missing ? {} : { bump: Date.now() % 1000 }), missing ? 'primary' : 'ghost') : null,
-    btn('3. Buat gambar semua scene', () => {
+    noBeats ? btn('Tambah gambar per kalimat (AI)', () => runAction('assets.story_beats'), 'primary') : null,
+    imgTodo ? btn(`3. Buat ${imgTodo} gambar yang belum ada`, () => {
       if (missing && !confirm('Masih ada karakter tanpa gambar referensi — scene-nya akan kurang konsisten. Lanjut?')) return;
-      runAction('assets.story_scenes');
-    }, missing ? '' : 'primary'),
+      runAction('assets.story_scenes', { missing: true });
+    }, missing || noBeats ? '' : 'primary') : null,
+    btn(`${imgTodo ? '' : '3. '}Buat ulang semua gambar (${imgAll})`, async () => {
+      if (!await askDialog('Buat ulang semua gambar?', `Semua ${imgAll} gambar scene & kalimat diganti gambar baru (gambar karakter tidak berubah). Untuk satu gambar saja, pakai tombol "Ulang" di gambar itu.`, 'Buat ulang')) return;
+      runAction('assets.story_scenes', { bump: Date.now() % 1000 });
+    }, 'ghost'),
     h('span', { class: 'muted small' }, 'Edit teks lalu "Simpan Edit Manual" sebelum membuat ulang gambar.')));
 
   // --- storyboard per scene
@@ -1096,8 +1108,16 @@ function rStory(d) {
       h('div', { class: 'grow' },
         h('b', {}, `Scene ${i + 1} `), (sc.characters || []).map((cid) => h('span', { class: 'chip' }, charName[cid] || cid)),
         h('div', { class: 'muted small' }, s.text.replace(/\*/g, '')),
+        (sc.beats || []).length ? h('div', { class: 'small muted' }, `Kalimat 1 (gambar ini): ${(sc.beats_of || s.text).replace(/\*/g, '').split(/\s+/).slice(0, sc.beats[0].w).join(' ')}`) : null,
         field('Prompt gambar (Inggris)', sc, 'prompt', { type: 'textarea', rows: 3 }),
-        btn(img ? '↻ Ulang gambar ini' : 'Buat gambar ini', async () => { if (S.dirty) await saveDraft(true); runAction('assets.story_scenes', { scene_id: s.id, bump: Date.now() % 1000 }, true); }, 'small')))));
+        btn(img ? '↻ Ulang gambar ini' : 'Buat gambar ini', async () => { if (S.dirty) await saveDraft(true); runAction('assets.story_scenes', { scene_id: s.id, bump: Date.now() % 1000 }, true); }, 'small'))),
+      sc.beats_of && sc.beats_of !== s.text ? hint('Teks scene sudah diubah — gambar per kalimat di bawah tidak dipakai saat render. Klik "Tambah gambar per kalimat" untuk menyusun ulang.', 'warn') : null,
+      (sc.beats || []).map((b, k) => h('div', { class: 'row', style: 'align-items:flex-start;margin-top:8px;padding-left:12px;border-left:2px solid var(--line)' },
+        b.image ? h('img', { src: media(b.image), style: `width:${S.p.format === 'short' ? 90 : 160}px;border-radius:6px` }) : h('div', { class: 'muted small', style: 'width:90px' }, '(belum ada gambar)'),
+        h('div', { class: 'grow' },
+          h('div', { class: 'small' }, h('b', {}, `Kalimat ${k + 2}: `), b.text.replace(/\*/g, '')),
+          field('', b, 'prompt', { type: 'textarea', rows: 2 }),
+          btn(b.image ? '↻ Ulang' : 'Buat', async () => { if (S.dirty) await saveDraft(true); runAction('assets.story_scenes', { scene_id: s.id, beat: k + 1, bump: Date.now() % 1000 }, true); }, 'small'))))));
   });
   return box;
 }
@@ -1146,7 +1166,10 @@ function rAssets() {
             `${{ cocok: 'Cocok', lumayan: 'Lumayan', lemah: 'Kurang cocok — mohon dicek/ganti' }[slot.pick.fit] || slot.pick.fit}`,
             slot.pick.reason ? ` · ${slot.pick.reason}` : '') : null,
           sel && sel.tags ? h('div', { class: 'small muted' }, `Isi video: ${sel.tags}`) : null,
-          (slot.extras || []).length ? h('div', { class: 'small muted' }, `+${slot.extras.length} footage variasi — dipakai bergantian per potongan supaya scene panjang tidak monoton`) : null,
+          (slot.beats || []).length ? h('div', { class: 'small muted' }, slot.beats_of === s.text
+            ? `+${slot.beats.length} visual per kalimat (di bawah) — tiap potongan teks punya footage sendiri`
+            : 'Teks scene sudah diubah — visual per kalimat tidak dipakai. Klik "Isi otomatis semua scene" untuk menyusun ulang.') : null,
+          !(slot.beats || []).length && (slot.extras || []).length ? h('div', { class: 'small muted' }, `+${slot.extras.length} footage variasi — dipakai bergantian per potongan supaya scene panjang tidak monoton`) : null,
           sel ? h('div', { style: 'max-width:280px' }, field('Bingkai di layar', slot, 'fit', { type: 'select', options: [
             ['auto', 'Otomatis'], ['center', 'Isi penuh (crop tengah)'], ['blur', 'Utuh + latar blur']] })) : null,
           h('div', { class: 'row' },
@@ -1154,6 +1177,16 @@ function rAssets() {
             field('', q, 'provider', { type: 'select', options: [['all', 'Semua'], ['pixabay', 'Pixabay'], ['commons', 'Wikimedia (foto asli/sejarah)'], ['ai', 'Gambar AI (tulis deskripsi Inggris)'], ['pexels', 'Pexels'], ['photos', 'Foto Pexels']], dirty: () => {} }),
             btn('Cari', () => runAction('assets.search', { scene_id: s.id, query: q.query, provider: q.provider }), 'small'),
             btn('Unggah', () => uploadFile(`/api/projects/${S.p.id}/assets/${s.id}/upload`, 'video/*,image/*'), 'small')))),
+      slot.beats_of === s.text ? (slot.beats || []).map((b, k) => {
+        const bs = b.selected || {};
+        return h('div', { class: 'row', style: 'align-items:flex-start;margin-top:6px;padding-left:12px;border-left:2px solid var(--line)' },
+          bs.type === 'image' ? h('img', { src: media(bs.path), style: 'width:120px;border-radius:6px' })
+            : h('video', { src: media(bs.path), muted: true, loop: true, autoplay: true, style: 'width:120px' }),
+          h('div', { class: 'grow small' }, h('b', {}, 'Mulai: '), `"${b.text.replace(/\*/g, '')}"`,
+            h('div', { class: 'muted' }, `${bs.provider || ''}${bs.query ? ` · dicari: "${bs.query}"` : ''}`,
+              b.pick && b.pick.reason ? ` · ${b.pick.reason}` : ''),
+            btn('Jangan pakai (lanjutkan visual sebelumnya)', () => { slot.beats.splice(k, 1); markDirty(); render(); }, 'small ghost')));
+      }) : null,
       (slot.candidates || []).length ? h('div', { class: 'grid', style: 'margin-top:8px' }, slot.candidates.map((c, k) =>
         h('div', { class: 'thumb', title: `${c.tags || '(tanpa tag)'}\n${c.provider} · ${c.author || ''}${c.query ? ` · dicari: "${c.query}"` : ''}`, onclick: () => runAction('assets.select', { scene_id: s.id, index: k }) },
           h('img', { src: c.thumb || '', loading: 'lazy' }),

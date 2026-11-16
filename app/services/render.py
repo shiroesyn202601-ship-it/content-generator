@@ -104,35 +104,68 @@ def _join_with_transitions(d: Path, shots: list[dict], extras: list[int], kind: 
             "-crf", "18", "render/visual.mp4"], cwd=d)
 
 
+def _beat_marks(p: dict, d: Path, scenes: list[dict]) -> dict[int, list[tuple[float, str]]]:
+    """Potongan kalimat bervisual sendiri (beats.py) → {scene_idx: [(detik mulai, path aset)]}. Waktu = kata
+    pertama potongan di VO (audio.words), dimajukan sedikit supaya gambar muncul bersamaan dengan katanya."""
+    from . import beats
+    words: dict[str, list[dict]] = {}
+    for w in p["audio"].get("words") or []:
+        words.setdefault(w.get("scene_id"), []).append(w)
+    out = {}
+    for i, s in enumerate(scenes):
+        slot = p["assets"]["scenes"].get(s["id"]) or {}
+        ws = words.get(s["id"]) or []
+        if not beats.valid(slot, s) or not ws:
+            continue
+        marks = []
+        for b in slot["beats"]:
+            path = (b.get("selected") or {}).get("path")
+            if path and (d / path).is_file() and 0 < int(b.get("w", 0)) < len(ws):
+                marks.append((max(float(ws[int(b["w"])]["start"]) - 0.08, 0.0), path))
+        if marks:
+            out[i] = sorted(marks)
+    return out
+
+
 def _plan_shots(scenes: list[dict], timings: dict, sentences: list[dict], total: float,
-                max_shot: float, dynamic: bool) -> list[dict]:
+                max_shot: float, dynamic: bool, marks: dict | None = None) -> list[dict]:
     """Rencana shot. Statis: 1 shot per scene. Dinamis: potong di awal tiap kalimat VO, lalu shot yang
-    masih > max_shot dibagi rata. Batas frame dibulatkan sekali (kumulatif) → tidak bergeser dari VO."""
+    masih > max_shot dibagi rata. marks = potongan kalimat bervisual sendiri (selalu jadi titik potong, juga
+    saat statis); shot["beat"] = nomor potongan yang aktif (0 = visual utama scene).
+    Batas frame dibulatkan sekali (kumulatif) → tidak bergeser dari VO."""
     fps = config.FPS
+    marks = marks or {}
     starts = [0.0] + [float(timings[s["id"]]["start"]) for s in scenes[1:]] + [total]
-    cuts = []  # (detik, scene_idx)
+    cuts = []  # (detik, scene_idx, beat, mulai beat)
     for i, s in enumerate(scenes):
         a, b = starts[i], starts[i + 1]
-        pts = [a]
+        bm = [(t, k + 1) for k, (t, _) in enumerate(marks.get(i, [])) if a + 0.5 < t < b - 0.5]
+        pts = [a] + [t for t, _ in bm]
         if dynamic:
-            pts += [float(x["start"]) for x in sentences
-                    if x.get("scene_id") == s["id"] and a + 0.8 < float(x["start"]) < b - 0.8]
+            for x in sentences:
+                t = float(x["start"])
+                if x.get("scene_id") == s["id"] and a + 0.8 < t < b - 0.8 and all(abs(t - m) > 0.6 for m, _ in bm):
+                    pts.append(t)
         pts = sorted(set(pts)) + [b]
         for k in range(len(pts) - 1):
             seg_a, seg_b = pts[k], pts[k + 1]
+            beat, b0 = 0, a
+            for t, n in bm:
+                if t <= seg_a + 1e-6:
+                    beat, b0 = n, t
             parts = max(1, int((seg_b - seg_a) / max_shot + 0.999)) if dynamic else 1
             for j in range(parts):
-                cuts.append((seg_a + (seg_b - seg_a) * j / parts, i))
-    bounds = [round(t * fps) for t, _ in cuts] + [round(total * fps)]
+                cuts.append((seg_a + (seg_b - seg_a) * j / parts, i, beat, b0))
+    bounds = [round(c[0] * fps) for c in cuts] + [round(total * fps)]
     bounds[0] = 0
     for k in range(1, len(bounds)):
         bounds[k] = max(bounds[k], bounds[k - 1] + 1)
     shots, prev_scene, k_in_scene = [], None, 0
-    for idx, (t, scene_idx) in enumerate(cuts):
+    for idx, (t, scene_idx, beat, b0) in enumerate(cuts):
         k_in_scene = k_in_scene + 1 if scene_idx == prev_scene else 0
         prev_scene = scene_idx
         shots.append({"scene": scene_idx, "frames": bounds[idx + 1] - bounds[idx], "shot": k_in_scene,
-                      "offset": (bounds[idx] / fps) - starts[scene_idx]})
+                      "beat": beat, "offset": (bounds[idx] / fps) - b0})
     return shots
 
 
@@ -214,8 +247,9 @@ def run(pid: str, params: dict, progress) -> dict:
         # punch-in bergantian → ritme cepat yang menahan penonton; "statis" = 1 shot per scene.
         # Video panjang juga dinamis (maks 6 dtk per shot): satu footage 20-30 dtk tanpa potongan = penonton pergi.
         cut = p["render"].get("cut_style") or "dinamis"
+        marks = _beat_marks(p, d, scenes)
         shots = _plan_shots(scenes, timings, p["audio"].get("sentences") or [], total,
-                            4.0 if p["format"] == "short" else 6.0, cut == "dinamis")
+                            4.0 if p["format"] == "short" else 6.0, cut == "dinamis", marks)
         # Transisi antar-scene (ala CapCut). Shot terakhir sebelum pergantian scene dirender lebih panjang
         # sebanyak durasi transisi, lalu xfade tumpang-tindih → total durasi tetap = durasi VO.
         trans = p["render"].get("transition") or ("fade" if cut == "dinamis" else "none")
@@ -227,10 +261,13 @@ def run(pid: str, params: dict, progress) -> dict:
             slot = p["assets"]["scenes"].get(s["id"]) or {}
             sel = slot.get("selected") or {}
             asset = sel.get("path") if sel.get("path") and (d / sel["path"]).is_file() else None
-            # Footage variasi (video panjang): shot di dalam scene bergantian memakai beberapa aset yang relevan.
-            pool = [asset] + [x["path"] for x in slot.get("extras") or [] if x.get("path") and (d / x["path"]).is_file()]
-            if asset and len(pool) > 1:
-                asset = pool[sh["shot"] % len(pool)]
+            if sh["beat"]:  # potongan kalimat yang punya visual sendiri
+                asset = marks[sh["scene"]][sh["beat"] - 1][1]
+            elif sh["scene"] not in marks:
+                # Proyek lama: footage variasi (slot.extras) dipakai bergantian per shot.
+                pool = [asset] + [x["path"] for x in slot.get("extras") or [] if x.get("path") and (d / x["path"]).is_file()]
+                if asset and len(pool) > 1:
+                    asset = pool[sh["shot"] % len(pool)]
             out = f"render/seg_{j:03d}.mp4"
             progress(f"Shot {j + 1}/{len(shots)} · scene {sh['scene'] + 1} ({sh['frames'] / config.FPS:.1f}s)"
                      + ("" if asset else " — tanpa visual, memakai latar polos"))

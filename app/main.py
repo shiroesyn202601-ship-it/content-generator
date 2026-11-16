@@ -97,6 +97,7 @@ ACTIONS = {
     "assets.story_setup":  (story.setup, "assets", True),
     "assets.story_chars":  (story.characters, "assets", True),
     "assets.story_scenes": (story.scenes, "assets", True),
+    "assets.story_beats":  (story.add_beats, "assets", True),   # video panjang: gambar per potongan kalimat
     "audio.render_vo":     (tts.render_vo, "audio", True),
     "audio.auto_plan":     (audio_lib.auto_plan, "audio", True),
     "subtitles.build":     (subtitles.build, "subtitles", True),

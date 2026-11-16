@@ -9,7 +9,7 @@ from pathlib import Path
 import httpx
 
 from .. import config, store
-from . import llm, prompts, vision
+from . import beats, llm, prompts, vision
 
 HTTP = httpx.Client(timeout=httpx.Timeout(60.0, connect=15.0), follow_redirects=True)
 
@@ -237,7 +237,8 @@ def credits(p: dict) -> str:
     """Blok 'Kredit visual' untuk deskripsi YouTube (wajib bagi CC BY / CC BY-SA)."""
     lines = []
     for slot in (p.get("assets", {}).get("scenes") or {}).values():
-        for sel in [slot.get("selected") or {}, *(slot.get("extras") or [])]:
+        for sel in [slot.get("selected") or {}, *(slot.get("extras") or []),
+                    *[b.get("selected") or {} for b in slot.get("beats") or []]]:
             if not sel.get("requires_attribution"):
                 continue
             line = f"• \"{sel.get('title') or 'Gambar'}\" oleh {sel.get('author') or 'tidak diketahui'}, {sel.get('license')}"
@@ -376,6 +377,8 @@ def auto_all(pid: str, params: dict, progress) -> dict:
     scenes = [s for s in p["script"]["scenes"]
               if redo or not (p["assets"]["scenes"].get(s["id"]) or {}).get("selected")]
     if not scenes:
+        if beats.enabled(p) and params.get("beats", True):  # proyek lama: tinggal tambahkan visual per kalimat
+            return {"filled": 0, **fill_beats(pid, {}, progress)}
         progress("Semua scene sudah punya visual.")
         return {"filled": 0}
     topic = p["script"].get("title") or p["title"]
@@ -488,6 +491,8 @@ def auto_all(pid: str, params: dict, progress) -> dict:
             slot["query"] = ", ".join(used_q[s["id"]])
             slot["candidates"] = found
             slot.pop("extras", None)  # variasi lama milik pilihan lama
+            slot.pop("beats", None)
+            slot.pop("beats_of", None)
         store.update(pid, save)
         if not found:
             store.update(pid, lambda p, s=s: store.log(p, f"Aset {s['id']}: tidak ada footage ditemukan"))
@@ -518,35 +523,144 @@ def auto_all(pid: str, params: dict, progress) -> dict:
         if not ok:
             continue
         done += 1
-        if p["format"] == "long" and params.get("extras", True):
-            add_extras(pid, s, found, idx, words, progress)
+    if beats.enabled(p) and params.get("beats", True):
+        fill_beats(pid, {"redo": redo}, progress)
     return {"filled": done, "weak": weak}
 
 
-def add_extras(pid: str, scene: dict, found: list[dict], idx: int, words: set[str], progress) -> int:
-    """Video panjang: scene 10+ detik diberi 1-2 footage variasi (kandidat relevan berikutnya) supaya potongan
-    dinamis tidak memutar klip yang sama terus. Gambar AI dilewati (lambat & kurang akurat)."""
-    n_words = len(scene["text"].replace("*", "").split())
-    want = 0 if n_words < 22 else 1 if n_words < 45 else 2
-    if not want:
-        return 0
-    pool = [c for k, c in enumerate(found) if k != idx and c.get("provider") != "ai" and c.get("url")]
-    pool.sort(key=lambda c: (c.get("type") != "video", -_tag_score(c, words)))
-    d = store.project_dir(pid)
-    extras = []
-    for c in pool[:want]:
-        ext = ".mp4" if c["type"] == "video" else ".jpg"
-        rel = f"assets/{scene['id']}_x_{c['provider']}_{c['id']}{ext}"
-        try:
-            if not (d / rel).exists():
-                _download(c["url"], d / rel)
-            extras.append({**c, "path": rel})
-        except httpx.HTTPError:
+def _search_wait(p: dict, q: str, progress) -> list[dict]:
+    """search() + tunggu sekali bila batas Pixabay per menit tercapai (video panjang = ratusan pencarian)."""
+    prov = "pixabay" if not config.PEXELS_API_KEY else "all"
+    try:
+        return search(p, q, provider=prov, n=6)
+    except RuntimeError as e:
+        if "Batas Pixabay" not in str(e):
+            raise
+        progress("Batas Pixabay per menit tercapai — menunggu 60 dtk…")
+        time.sleep(61)
+        return search(p, q, provider=prov, n=6)
+
+
+def fill_beats(pid: str, params: dict, progress) -> dict:
+    """Video panjang: tiap potongan kalimat (beats.split) setelah potongan pertama diberi footage SENDIRI yang
+    cocok dengan kata-katanya — bukan footage scene yang sama diputar terus. Footage yang sudah dipakai di
+    bagian lain video tidak dipakai lagi. Gagal mencari/mengunduh → potongan itu melanjutkan visual sebelumnya."""
+    p = store.load(pid)
+    redo = bool(params.get("redo"))
+    topic = p["script"].get("title") or p["title"]
+    todo = []  # (scene, slot, [beat k>=1])
+    for s in p["script"]["scenes"]:
+        slot = p["assets"]["scenes"].get(s["id"]) or {}
+        if not slot.get("selected") or (not redo and slot.get("beats_of") == s["text"]):
             continue
-    if extras:
-        progress(f"Scene {scene['id']}: +{len(extras)} footage variasi")
-        store.update(pid, lambda p: p["assets"]["scenes"].setdefault(scene["id"], {}).__setitem__("extras", extras))
-    return len(extras)
+        todo.append((s, slot, beats.split(s["text"])[1:]))
+    items = [{"id": f"{s['id']}.{k + 1}", "text": b["text"].replace("*", ""), "visual_query": slot.get("query", ""),
+              "sid": s["id"], "beat": b} for s, slot, bs in todo for k, b in enumerate(bs)]
+    if not items:
+        for s, _, _ in todo:
+            store.update(pid, lambda q, s=s: q["assets"]["scenes"][s["id"]].update({"beats": [], "beats_of": s["text"]}))
+        return {"beats": 0}
+    redo_ids = {s["id"] for s, _, _ in todo}  # beat lama scene ini akan diganti → footage-nya boleh dipakai lagi
+    used = {(c.get("provider"), c.get("id")) for sid, sl in p["assets"]["scenes"].items()
+            for c in [sl.get("selected") or {}, *([] if sid in redo_ids else
+                                                  [b.get("selected") or {} for b in sl.get("beats") or []])]
+            if c.get("id") is not None}
+
+    # 1) kata kunci per potongan
+    queries, avoid = {}, set()
+    for batch in _chunks(items, 10):
+        progress(f"AI menyusun kata kunci visual per kalimat ({len(queries) + len(batch)}/{len(items)})…")
+        try:
+            res = llm.chat_json(*prompts.footage_queries(topic, batch), temperature=0.4)
+            avoid |= {a.strip().lower() for a in res.get("avoid", []) if isinstance(a, str) and a.strip()}
+            for r in res.get("scenes", []):
+                qs = [q.strip() for q in r.get("queries", []) if isinstance(q, str) and q.strip()]
+                if qs:
+                    queries[r.get("id")] = qs[:2]
+        except llm.LLMError as e:
+            store.update(pid, lambda q, e=e: store.log(q, f"Kata kunci visual per kalimat gagal: {e}"))
+
+    # 2) cari kandidat (tanpa footage yang sudah dipakai di bagian lain video)
+    cands = {}
+    for i, it in enumerate(items):
+        qs = queries.get(it["id"]) or []
+        if not qs:
+            continue
+        progress(f"Mencari visual kalimat {i + 1}/{len(items)}: {' · '.join(qs)}")
+        seen, found = set(used), []
+        for q in qs:
+            try:
+                res = _search_wait(p, q, progress)
+            except (httpx.HTTPError, RuntimeError) as e:
+                store.update(pid, lambda x, e=e, q=q: store.log(x, f"Cari '{q}' gagal: {e}"))
+                continue
+            for c in res:
+                key = (c["provider"], c["id"])
+                if key not in seen:
+                    seen.add(key)
+                    found.append({**c, "query": q})
+        bad = {w for w in avoid if w not in it["text"].lower()}
+        clean = [c for c in found if not (_tag_words(c) & bad)]
+        cands[it["id"]] = (clean or found)[:8]
+
+    # 3) AI memilih dari tag
+    picks = {}
+    ready = [it for it in items if cands.get(it["id"])]
+    for batch in _chunks(ready, 6):
+        progress(f"AI memilih visual per kalimat ({len(picks) + len(batch)}/{len(ready)})…")
+        payload = [{"id": it["id"], "text": it["text"],
+                    "candidates": [{"i": k, "tags": ", ".join((c.get("tags") or "").split(", ")[:12]),
+                                    "orientation": _orientation(c), "duration": c.get("duration")}
+                                   for k, c in enumerate(cands[it["id"]])]} for it in batch]
+        try:
+            res = llm.chat_json(*prompts.pick_footage(topic, payload), temperature=0.2)
+            for r in res.get("picks", []):
+                picks[r.get("id")] = r
+        except llm.LLMError as e:
+            store.update(pid, lambda q, e=e: store.log(q, f"Pemilihan visual per kalimat gagal: {e}"))
+
+    # 4) unduh & simpan per scene
+    d = store.project_dir(pid)
+    total = 0
+    for s, slot, bs in todo:
+        out = []
+        for k, b in enumerate(bs):
+            iid = f"{s['id']}.{k + 1}"
+            found = cands.get(iid) or []
+            if not found:
+                continue
+            pk = picks.get(iid) or {}
+            idx = pk.get("index") if isinstance(pk.get("index"), int) and 0 <= pk["index"] < len(found) else None
+            words = {w.lower() for q in queries.get(iid, []) for w in q.split()}
+            order = ([idx] if idx is not None else []) + sorted(
+                (j for j in range(len(found)) if j != idx), key=lambda j: -_tag_score(found[j], words))
+            for j in order[:3]:
+                c = found[j]
+                if (c["provider"], c["id"]) in used:
+                    continue
+                ext = ".mp4" if c["type"] == "video" else ".jpg"
+                rel = f"assets/{s['id']}_b{k + 1}_{c['provider']}_{c['id']}{ext}"
+                try:
+                    if not (d / rel).exists():
+                        _download(c["url"], d / rel)
+                except (httpx.HTTPError, RuntimeError):
+                    continue
+                used.add((c["provider"], c["id"]))
+                fit = pk.get("fit") if j == idx else "lemah"
+                out.append({"w": b["w"], "text": b["text"], "selected": {**c, "path": rel},
+                            "pick": {"fit": fit or "lumayan", "reason": (pk.get("reason") or "") if j == idx
+                                     else "Dipilih dari kecocokan tag — mohon dicek."}})
+                break
+        total += len(out)
+        progress(f"Scene {s['id']}: {len(out) + 1} visual untuk {len(bs) + 1} potongan kalimat")
+
+        def save(q, s=s, out=out):
+            sl = q["assets"]["scenes"].setdefault(s["id"], {})
+            sl["beats"], sl["beats_of"] = out, s["text"]
+            sl.pop("extras", None)
+            store.touch_stage(q, "assets")
+        store.update(pid, save)
+    return {"beats": total}
 
 
 UPLOAD_EXT = {".mp4", ".mov", ".mkv", ".webm", ".jpg", ".jpeg", ".png", ".webp"}

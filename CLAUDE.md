@@ -399,6 +399,22 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       → penalti; `_tidy_end` menyambung 1-2 kalimat bila akhir menggantung. Paralel umum: `_fan_out` (pengganti `_score_windows`).
       `clip.reason` = inti + alasan babak final; klip juga punya `point`, `type`, `penalty`, `flags`. ±60 dtk/video 1 jam.
 
+25. **16 Nov 2026 — Dari Nol video panjang: visual per kalimat** (keluhan user: video 5 mnt cuma 20 gambar, kata tengah/akhir
+    kalimat masih memakai gambar yang sama). `beats.py`: scene dipecah per kalimat, kalimat > 16 kata dipecah lagi di koma /
+    kata sambung (`CONJ`), tidak berakhir di kata pengikat (`BIND`: "yang", "di", "setinggi"…), target `BEAT_WORDS` 11 kata,
+    potongan < 5 kata digabung. `w` = indeks token (`tts.tokenize` atas `tts.split_sentences`) → cocok dengan `audio.words`.
+    Data: `assets.scenes[sid].beats = [{w, text, selected, pick}]` (potongan ke-1 dst.; potongan 0 = `selected`) + `beats_of`
+    (teks scene saat dibuat; teks berubah → basi, render mengabaikan). Hanya `format == long` (`beats.enabled`).
+    - Cerita AI: `story.setup` menulis prompt per potongan (id `s4.0`, `s4.1`…, maks 24 per panggilan; panggilan berikut diberi
+      karakter yang sudah ada) → `story.scenes[sid].beats`; `story.scenes` param `missing` (hanya yang belum ada), `scene_id`
+      (gambar utama saja), `scene_id`+`beat`. Aksi `assets.story_beats` (`story.add_beats`) = proyek lama: karakter & gambar lama
+      dipertahankan, hanya gambar per kalimat yang dibuat.
+    - Stok: `assets.fill_beats` (dipanggil di akhir `auto_all`; juga saat semua scene sudah punya visual): kata kunci & pilihan AI
+      per potongan, footage yang sudah dipakai di bagian lain video tidak dipakai lagi. Menggantikan `add_extras` (slot.extras
+      lama masih dibaca render bila scene tanpa beats).
+    - Render: `render._beat_marks` → titik potong di kata pertama potongan (−0.08 dtk), juga saat potongan statis; `shot.beat`
+      memilih aset, offset video dihitung dari awal potongan. Proyek kucing 284 dtk: 20 → 57 gambar, shot 2,2–6 dtk.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).
