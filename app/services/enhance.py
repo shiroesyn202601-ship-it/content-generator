@@ -598,12 +598,12 @@ def _still(clip: Path, t: float, out: Path, W: int, H: int, dur: float, wav: Pat
     """Segmen intro/outro: frame klip di-blur + gelap, durasi = suara komentar."""
     png = out.with_suffix(".png")
     ff.run(["-ss", f"{max(0.0, t):.3f}", "-i", str(clip), "-frames:v", "1", str(png)], cwd=cwd)
-    ff.run(["-loop", "1", "-framerate", str(config.FPS), "-t", f"{dur:.3f}", "-i", str(png), "-i", str(wav),
-            "-filter_complex",
-            f"[0:v]scale={W}:{H},boxblur=22:2,eq=brightness=-0.13:saturation=0.8,format=yuv420p,setsar=1[v];"
-            f"[1:a]adelay=150|150,apad,atrim=0:{dur:.3f},aformat=sample_rates=48000:channel_layouts=stereo[a]",
-            "-map", "[v]", "-map", "[a]", "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast", "-crf", "18",
-            "-c:a", "aac", "-b:a", "192k", str(out)], cwd=cwd)
+    ff.run_encode(["-loop", "1", "-framerate", str(config.FPS), "-t", f"{dur:.3f}", "-i", str(png), "-i", str(wav),
+                   "-filter_complex",
+                   f"[0:v]scale={W}:{H},boxblur=22:2,eq=brightness=-0.13:saturation=0.8,format=yuv420p,setsar=1[v];"
+                   f"[1:a]adelay=150|150,apad,atrim=0:{dur:.3f},aformat=sample_rates=48000:channel_layouts=stereo[a]",
+                   "-map", "[v]", "-map", "[a]", "-t", f"{dur:.3f}"],
+                  ["-c:a", "aac", "-b:a", "192k", str(out)], cwd=cwd, intermediate=True)
     png.unlink(missing_ok=True)
 
 
@@ -810,13 +810,13 @@ def run(pid: str, params: dict, progress) -> dict:
 
     # --- 5) rakit video
     progress("Merakit video nilai tambah…")
-    inputs = ["-i", clip_rel]
-    n_in = 1
-    has_a = ff.has_audio(clip)
-    g = [f"[0:v]split={len(timeline)}" + "".join(f"[vs{k}]" for k in range(len(timeline)))]
-    if has_a:
-        g.append(f"[0:a]asplit={len(timeline)}" + "".join(f"[as{k}]" for k in range(len(timeline))))
-    seq = []
+    # Satu input per potongan, di-seek ke awal potongannya. Dulu satu input di-split ke semua potongan lalu di-trim:
+    # concat membaca intro dulu → seluruh frame klip MENUMPUK di memori (klip 40 dtk/13 potongan: ±190 dtk).
+    inputs, has_a = [], ff.has_audio(clip)
+    for a, b, _, _ in timeline:
+        inputs += ["-ss", f"{a:.3f}", "-t", f"{b - a + 0.1:.3f}", "-i", clip_rel]
+    n_in = len(timeline)
+    g, seq = [], []
     if intro_dur:
         inputs += ["-i", str((tmp / "intro.mp4").relative_to(d)).replace("\\", "/")]
         g.append(f"[{n_in}:v]fps={config.FPS},format=yuv420p,setsar=1[iv];"
@@ -829,10 +829,10 @@ def run(pid: str, params: dict, progress) -> dict:
             z, fx, fy = pz
             zw, zh = round(W * z / 2) * 2, round(H * z / 2) * 2
             vz = f",scale={zw}:{zh},crop={W}:{H}:{int(fx * (zw - W))}:{int(fy * (zh - H))}"
-        g.append(f"[vs{k}]trim=start={a:.3f}:end={b:.3f},setpts=PTS-STARTPTS{vz},fps={config.FPS},format=yuv420p,setsar=1[v{k}]")
+        g.append(f"[{k}:v]trim=end={b - a:.3f},setpts=PTS-STARTPTS{vz},fps={config.FPS},format=yuv420p,setsar=1[v{k}]")
         if has_a:
             fo = max(0.0, b - a - 0.012)
-            g.append(f"[as{k}]atrim=start={a:.3f}:end={b:.3f},asetpts=PTS-STARTPTS,"
+            g.append(f"[{k}:a]atrim=end={b - a:.3f},asetpts=PTS-STARTPTS,"
                      f"aformat=sample_rates=48000:channel_layouts=stereo,afade=t=in:d=0.012,afade=t=out:st={fo:.3f}:d=0.012[a{k}]")
         else:
             g.append(f"anullsrc=r=48000:cl=stereo,atrim=0:{b - a:.3f}[a{k}]")
@@ -893,7 +893,7 @@ def run(pid: str, params: dict, progress) -> dict:
     out_rel = "assets/clip_enh.mp4"
     ff.run_encode([*inputs, "-filter_complex", ";".join(g), "-map", cur, "-map", acur],
                   ["-c:a", "aac", "-b:a", "192k", "-ar", "48000", "-t", f"{total:.3f}", "-movflags", "+faststart", out_rel],
-                  cwd=d)
+                  cwd=d, intermediate=True)
 
     enh = {"opts": opts, "plan": plan, "path": out_rel, "src_mtime": clip.stat().st_mtime,
            "clip_range": p["assets"].get("clip_range"), "duration": round(total, 2),

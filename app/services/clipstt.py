@@ -72,14 +72,19 @@ def _gemini_lines(audio: Path, p: dict, progress) -> tuple[list[dict], str]:
     body = {"contents": [{"parts": [{"inline_data": {"mime_type": "audio/mp3",
                                                      "data": base64.b64encode(audio.read_bytes()).decode()}},
                                     {"text": PROMPT.format(context=_context(p))}]}],
-            "generationConfig": {"temperature": 0, "responseMimeType": "application/json"}}
+            # temperature bawaan (1.0): Gemini 3 bisa berputar-putar (looping) sampai batas token bila < 1.0;
+            # batas token keluaran mencegah satu klip memakan menit-an bila tetap terjadi
+            "generationConfig": {"responseMimeType": "application/json", "maxOutputTokens": 8192}}
     err = None
-    for model in dict.fromkeys([config.GEMINI_MODEL] + list(config.GEMINI_FALLBACK_MODELS)):
+    # Flash-Lite dulu (detik), BUKAN Flash: Flash gratis sering mengantre 2-7 menit per klip. Gagal → Whisper saja.
+    # Jawaban Flash-Lite kadang rusak (JSON ganda / kosong) secara acak → satu percobaan ulang (±4 dtk) per model.
+    for model in [m for m in dict.fromkeys(config.CLIP_STT_MODELS or [config.GEMINI_MODEL]) for _ in range(2)]:
         try:
             progress(f"Gemini mendengarkan klip untuk subtitle ({model})…")
-            r = llm.gemini_post(model, body, "transkrip klip", timeout=240)
+            r = llm.gemini_post(model, body, "transkrip klip", timeout=75)
             txt = "".join(x.get("text", "") for x in r["candidates"][0]["content"]["parts"])
-            raw = json.loads(txt[txt.find("{"):txt.rfind("}") + 1])
+            # objek JSON PERTAMA saja: Flash-Lite kadang menambah objek kedua sesudahnya ("Extra data")
+            raw, _ = json.JSONDecoder().raw_decode(txt[txt.find("{"):])
             lines = []
             for ln in raw.get("lines") or []:
                 a, b, text = _sec(ln.get("start")), _sec(ln.get("end")), str(ln.get("text") or "").strip()

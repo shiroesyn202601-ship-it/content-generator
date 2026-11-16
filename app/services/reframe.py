@@ -26,6 +26,7 @@ from .. import config
 YUNET_URL = ("https://github.com/opencv/opencv_zoo/raw/main/models/face_detection_yunet/"
              "face_detection_yunet_2023mar.onnx")
 DETECT_FPS = 15.0       # deteksi wajah + gerak bibir per detik
+ANALYZE_W = 960         # lebar frame analisis (wajah kecil di shot lebar 3 orang tetap ±40 px)
 CUT_MIN = 18.0          # selisih HSV minimum untuk dianggap potongan scene
 CUT_RATIO = 3.0         # ... dan harus ≥ 3x rata-rata selisih frame-frame sebelumnya
 MIN_SHOT = 0.5          # detik; potongan lebih rapat dari ini diabaikan (kilat/flash)
@@ -152,12 +153,14 @@ def _audio_env(src: Path, start: float, dur: float, rate: float):
 
 
 def _frames(src: Path, start: float, dur: float, w: int, h: int, fps: int):
-    """Frame BGR berurutan lewat pipa FFmpeg (±3x lebih cepat dari OpenCV untuk 1080p60)."""
+    """Frame BGR berukuran w×h berurutan lewat pipa FFmpeg. Pengecilan dilakukan FFmpeg (multi-thread) — dulu frame
+    1080p penuh dialirkan (±6 MB/frame, ±14 GB untuk klip 80 dtk) padahal deteksi hanya memakai 640 px."""
     import subprocess
 
     import numpy as np
     proc = subprocess.Popen([config.FFMPEG, "-v", "error", "-ss", f"{start:.3f}", "-t", f"{dur:.3f}", "-i", str(src),
-                             "-an", "-vf", f"fps={fps}", "-f", "rawvideo", "-pix_fmt", "bgr24", "-"],
+                             "-an", "-vf", f"fps={fps},scale={w}:{h}:flags=area", "-f", "rawvideo",
+                             "-pix_fmt", "bgr24", "-"],
                             stdout=subprocess.PIPE, stderr=subprocess.DEVNULL, bufsize=w * h * 3)
     size = w * h * 3
     try:
@@ -196,13 +199,17 @@ def analyze(src: Path, start: float, end: float, progress=lambda m: None) -> dic
     every = max(1, int(round(fps / DETECT_FPS)))
     rate = fps / every
     det = _Faces()
-    scale = 640 / src_w if src_w > 640 else 1.0
+    # frame dianalisis di ANALYZE_W; deteksi wajah di 640 px; koordinat disimpan dalam piksel sumber
+    aw = min(src_w, ANALYZE_W) // 2 * 2
+    ah = max(2, int(round(src_h * aw / src_w / 2)) * 2)
+    k_src = aw / src_w                      # frame analisis → sumber: bagi dengan k_src
+    scale = 640 / aw if aw > 640 else 1.0   # frame analisis → frame deteksi
     prev_hsv, recent, cuts = None, [], []
     tracks, live = [], []
     total = int(dur * fps)
-    for i, frame in enumerate(_frames(src, start, dur, src_w, src_h, fps)):
+    for i, frame in enumerate(_frames(src, start, dur, aw, ah, fps)):
         t = i / fps
-        tiny = cv2.resize(frame, (160, max(1, int(160 * src_h / src_w))), interpolation=cv2.INTER_AREA)
+        tiny = cv2.resize(frame, (160, max(1, int(160 * ah / aw))), interpolation=cv2.INTER_AREA)
         hsv = cv2.cvtColor(tiny, cv2.COLOR_BGR2HSV).astype(np.int16)
         if prev_hsv is not None:
             val = float(np.abs(hsv - prev_hsv).mean(axis=(0, 1)).mean())
@@ -215,15 +222,15 @@ def analyze(src: Path, start: float, end: float, progress=lambda m: None) -> dic
         prev_hsv = hsv
         if i % every:
             continue
-        small = cv2.resize(frame, (int(src_w * scale), int(src_h * scale))) if scale != 1.0 else frame
+        small = cv2.resize(frame, (int(aw * scale), int(ah * scale)), interpolation=cv2.INTER_AREA)             if scale != 1.0 else frame
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-        faces = []
+        faces = []  # koordinat frame analisis (patch bibir diambil dari frame ini)
         for x, y, w, h, sc, lm in det.full(small):
             if sc >= 0.6:
                 faces.append((x / scale, y / scale, w / scale, h / scale, sc, [v / scale for v in lm] if lm else None))
         used = set()
         for f in sorted(faces, key=lambda f: -f[2]):
-            cx, cy, w = f[0] + f[2] / 2, f[1] + f[3] / 2, f[2]
+            cx, cy, w = (f[0] + f[2] / 2) / k_src, (f[1] + f[3] / 2) / k_src, f[2] / k_src
             best, bd = None, None
             for tr in live:
                 if id(tr) in used or t - tr["last"][0] > 0.6:
@@ -244,7 +251,7 @@ def analyze(src: Path, start: float, end: float, progress=lambda m: None) -> dic
             used.add(id(best))
             best["last"] = (t, cx, cy, w)
             best["mp"], best["ep"] = mouth, eyes
-            best["samples"].append((round(t, 3), round(cx, 1), round(cy, 1), round(w, 1), round(f[3], 1), m))
+            best["samples"].append((round(t, 3), round(cx, 1), round(cy, 1), round(w, 1), round(f[3] / k_src, 1), m))
         if (i // every) % 45 == 0:
             progress(f"Auto-reframe: mencari siapa yang bicara {min(100, i / max(1, total) * 100):.0f}%…")
     for tr in tracks:
@@ -519,16 +526,28 @@ def _split_rects(mains: list[dict], src_w, src_h, W, H) -> list:
 
 # ---------------------------------------------------------------- FFmpeg
 
+def segment_inputs(pl: dict, src: Path, start: float, fps: int) -> list[str]:
+    """Argumen input FFmpeg: satu input per segmen, masing-masing di-seek ke awal segmennya (input ke-k = segmen k).
+    Dulu satu input di-split ke semua segmen lalu di-trim: tiap frame disalin n kali dan frame shot berikutnya
+    MENUMPUK di memori sampai concat sampai ke gilirannya (klip 60 dtk / 14 shot: ±200 dtk & memori besar)."""
+    out = []
+    for s in pl["segments"]:
+        f0 = int(round(s["t0"] * fps))
+        out += ["-ss", f"{start + f0 / fps:.4f}", "-t", f"{s['t1'] - s['t0'] + 2 / fps:.4f}", "-i", str(src)]
+    return out
+
+
 def filter_graph(pl: dict, W: int, H: int, fps: int) -> str:
-    """Graf filter [0:v] → [v]: tiap segmen di-trim (grid frame), dibingkai sesuai layout, lalu disambung."""
+    """Graf filter [k:v] (input per segmen, lihat segment_inputs) → [v]: tiap segmen dipangkas ke jumlah frame
+    persisnya (grid frame), dibingkai sesuai layout, lalu disambung."""
     from . import ffmpeg_utils as ff
     segs = pl["segments"]
     n = len(segs)
-    g = [f"[0:v]fps={fps},split={n}" + "".join(f"[s{k}]" for k in range(n))]
+    g = []
     hh = H // 2 // 2 * 2
     for k, s in enumerate(segs):
         f0, f1 = int(round(s["t0"] * fps)), int(round(s["t1"] * fps))
-        head = f"[s{k}]trim=start_frame={f0}:end_frame={f1},setpts=PTS-STARTPTS"
+        head = f"[{k}:v]fps={fps},trim=end_frame={f1 - f0},setpts=PTS-STARTPTS"
         if s["layout"] == "single":
             x, y, w, h = s["rects"][0]
             g.append(f"{head},crop={w}:{h}:{x}:{y},scale={W}:{H},setsar=1[v{k}]")

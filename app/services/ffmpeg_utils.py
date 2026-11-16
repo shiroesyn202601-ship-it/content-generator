@@ -86,36 +86,39 @@ def video_encoder() -> str:
     return _encoder
 
 
-def video_codec_args(enc: str | None = None) -> list[str]:
+def video_codec_args(enc: str | None = None, intermediate: bool = False) -> list[str]:
     """Pengaturan encode final sesuai rekomendasi upload YouTube: H.264 High, GOP = setengah frame rate,
-    2 B-frame, 4:2:0, frame rate konstan."""
+    2 B-frame, 4:2:0, frame rate konstan. intermediate=True: file antara (potongan klip, klip bernilai tambah)
+    yang masih akan di-encode ulang → kualitas sedikit lebih tinggi & libx264 memakai preset cepat."""
     enc = enc or video_encoder()
     gop = ["-g", str(config.FPS // 2), "-bf", "2", "-r", str(config.FPS)]
+    q = 3 if intermediate else 0
     if enc == "h264_nvenc":
-        return ["-c:v", enc, "-preset", "p5", "-rc", "vbr", "-cq", "21", "-b:v", "0", "-profile:v", "high",
+        return ["-c:v", enc, "-preset", "p5", "-rc", "vbr", "-cq", str(21 - q), "-b:v", "0", "-profile:v", "high",
                 "-pix_fmt", "yuv420p", *gop]
     if enc == "h264_qsv":
-        return ["-c:v", enc, "-global_quality", "21", "-preset", "medium", "-profile:v", "high",
+        return ["-c:v", enc, "-global_quality", str(21 - q), "-preset", "medium", "-profile:v", "high",
                 "-pix_fmt", "nv12", *gop]
     if enc == "h264_amf":
-        return ["-c:v", enc, "-quality", "quality", "-rc", "cqp", "-qp_i", "20", "-qp_p", "22",
+        return ["-c:v", enc, "-quality", "quality", "-rc", "cqp", "-qp_i", str(20 - q), "-qp_p", str(22 - q),
                 "-profile:v", "high", "-pix_fmt", "yuv420p", *gop]
-    return ["-c:v", "libx264", "-preset", "medium", "-crf", "20", "-profile:v", "high", "-pix_fmt", "yuv420p", *gop]
+    return ["-c:v", "libx264", "-preset", "veryfast" if intermediate else "medium", "-crf", str(20 - q),
+            "-profile:v", "high", "-pix_fmt", "yuv420p", *gop]
 
 
-def run_encode(pre: list, post: list, cwd: Path | None = None) -> str:
-    """Jalankan encode final dengan encoder terbaik; bila encoder hardware gagal, ulangi dengan libx264.
+def run_encode(pre: list, post: list, cwd: Path | None = None, intermediate: bool = False) -> str:
+    """Jalankan encode dengan encoder terbaik (GPU bila ada); bila encoder hardware gagal, ulangi dengan libx264.
     pre = argumen input+filter, post = argumen audio+output. Mengembalikan nama encoder yang dipakai."""
     global _encoder
     enc = video_encoder()
     try:
-        run([*pre, *video_codec_args(enc), *post], cwd=cwd)
+        run([*pre, *video_codec_args(enc, intermediate), *post], cwd=cwd)
         return enc
     except FFmpegError:  # (JobCancelled bukan FFmpegError → pembatalan tidak memicu ulang dengan libx264)
         if enc == "libx264":
             raise
         _encoder = "libx264"  # jangan coba hardware lagi di sesi ini
-        run([*pre, *video_codec_args("libx264"), *post], cwd=cwd)
+        run([*pre, *video_codec_args("libx264", intermediate), *post], cwd=cwd)
         return "libx264"
 
 

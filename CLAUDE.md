@@ -381,6 +381,24 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       (di atas kepala bingkai 1 orang / area blur shot lebar), muncul sambil naik; kartu = bingkai putih miring sedikit.
       B-roll lama tanpa `style` dari rencana tersimpan → kartu foto.
 
+24. **16 Nov 2026 — Clipper: momen berbobot & produksi ±2x lebih cepat** (keluhan user: lama, klip tanpa poin menarik).
+    - Diukur di proyek nyata: cari momen hanya ±1 mnt; yang lama produksi per klip — transkrip presisi Gemini 140-450 dtk
+      (Gemini **Flash** tier gratis mengantre: "sebutkan 3 buah" pun timeout 60 dtk; Flash-Lite 3 dtk), graf FFmpeg
+      `split=n`+`trim`+`concat` (reframe & enhance) yang menumpuk frame mentah di memori (±200 dtk), dekode reframe 1080p penuh.
+    - `clipstt`: model `config.CLIP_STT_MODELS` (default `gemini-flash-lite-latest`, ±4-10 dtk/klip), temperature bawaan
+      (Gemini 3 < 1.0 bisa looping), `maxOutputTokens`, ambil objek JSON pertama (`raw_decode`), 1 percobaan ulang.
+    - `reframe`: pipa FFmpeg sudah diperkecil ke `ANALYZE_W` 960 px (44,6 → 11,6 dtk untuk 30 dtk klip, rencana kamera setara);
+      `segment_inputs` = satu input ber-seek per segmen (graf `[k:v]`), audio = input terakhir. `enhance` rakit: sama, per potongan.
+      Encode antara (`cut_clip`, intro/outro, `clip_enh`) lewat `ff.run_encode(intermediate=True)` → GPU (QSV), kualitas +3.
+      Hasil uji 3 klip podcast 1 jam: 454 dtk → 208 dtk; frame & durasi identik dengan cara lama.
+    - Pemilih momen (`find_clips`) 3 tahap: (1) `prompts.clip_peaks` — AI menandai KALIMAT PUNCAK (jenis `PEAK_TYPES`, `point`
+      spesifik, `strength`), daftar `NOT_PEAK` (basa-basi, promo, menyebut tanpa cerita…), cache `clip_cache`; puncak < `PEAK_GAP`
+      25 dtk digabung, maks want×2+2; (2) `prompts.clip_build` per puncak (±75/60 dtk konteks, effort medium) → awal (setup) &
+      akhir (payoff+reaksi) atau `ok:false`, cache `build_cache`; (3) `rerank_clips` dengan teks klip utuh + patokan skor.
+      Gerbang kode `_quality`: transkrip berulang, < 70 kata/mnt, akhir menggantung (`DANGLING`) / pertanyaan, promo (`PROMO`)
+      → penalti; `_tidy_end` menyambung 1-2 kalimat bila akhir menggantung. Paralel umum: `_fan_out` (pengganti `_score_windows`).
+      `clip.reason` = inti + alasan babak final; klip juga punya `point`, `type`, `penalty`, `flags`. ±60 dtk/video 1 jam.
+
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY
   untuk menguji jalur referensi karakter (jalur tanpa key sudah diuji).

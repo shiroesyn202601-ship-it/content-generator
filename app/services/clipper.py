@@ -292,39 +292,110 @@ def _mark_signals(p: dict, units: list[dict], progress) -> list[dict]:
 
 def _rerank(clips: list[dict], units: list[dict], title: str, lang: str, direction: str, heat: list[dict],
             progress, context: dict | None = None) -> list[dict]:
-    """Babak final: satu model membandingkan semua kandidat berdampingan (skor antar-bagian jadi setara).
-    Skor akhir = 60% rerank + 40% skor bagian (+ bonus maks 10 dari heatmap YouTube). Gagal → urutan lama."""
-    if len(clips) < 3:
-        return clips
-    progress(f"Babak final: AI membandingkan {len(clips)} kandidat berdampingan…")
-    sys_, usr = prompts.rerank_clips(clips, units, title, lang, direction, context)
-    try:
-        rk = llm.chat_json(sys_, usr, temperature=0.2).get("ranking") or []
-    except llm.LLMError as e:
-        progress(f"Babak final dilewati ({str(e)[:80]}) — memakai skor per bagian")
-        rk = []
-    got = {int(_num(r.get("n"), -1)): r for r in rk if isinstance(r, dict)}
-    for i, c in enumerate(clips):
-        r = got.get(i)
-        if r is not None:
-            c["window_score"] = c["score"]
-            c["score"] = int(round(0.6 * max(0, min(100, _num(r.get("score")))) + 0.4 * c["score"]))
-            if r.get("why"):
-                c["reason"] = str(r["why"])[:200]
+    """Babak final: satu model membandingkan semua kandidat berdampingan dengan teks klip UTUH.
+    Skor akhir = 60% rerank + 40% skor penyusunan − penalti kualitas (+ bonus maks 10 dari heatmap YouTube)."""
+    if len(clips) >= 3:
+        progress(f"Babak final: AI membandingkan {len(clips)} kandidat berdampingan…")
+        sys_, usr = prompts.rerank_clips(clips, units, title, lang, direction, context)
+        try:
+            rk = llm.chat_json(sys_, usr, temperature=0.2, effort="medium").get("ranking") or []
+        except llm.LLMError as e:
+            progress(f"Babak final dilewati ({str(e)[:80]}) — memakai skor penyusunan")
+            rk = []
+        got = {int(_num(r.get("n"), -1)): r for r in rk if isinstance(r, dict)}
+        for i, c in enumerate(clips):
+            r = got.get(i)
+            if r is not None:
+                c["window_score"] = c["score"]
+                c["score"] = int(round(0.6 * max(0, min(100, _num(r.get("score")))) + 0.4 * c["score"]))
+                if r.get("why"):
+                    c["why"] = str(r["why"])[:200]
+    for c in clips:
+        c["score"] = max(0, c["score"] - c.get("penalty", 0))
         if heat:
             c["heat"] = round(_heat_at(heat, c["start"], c["end"]), 2)
             c["score"] = min(100, c["score"] + int(round(10 * c["heat"])))
     return sorted(clips, key=lambda c: -c["score"])
 
 
-def _schema() -> dict:
-    sub = llm.strict({k: llm.INT for k in WEIGHTS})
-    clip = llm.strict({"start_unit": llm.INT, "end_unit": llm.INT, "title": llm.STR, "hook": llm.STR,
-                       "reason": llm.STR, "scores": sub, "keywords": llm.arr(llm.STR)})
-    return llm.strict({"clips": llm.arr(clip)})
+# ---------------- gerbang kualitas (kode, tanpa AI) ----------------
+
+# Kata terakhir yang menandakan kalimat/cerita belum selesai
+DANGLING = re.compile(r"\b(tapi|terus|trus|dan|kalo|kalau|yang|karena|soalnya|jadi|cuman|cuma|atau|sama|nah|kayak|"
+                      r"misalnya|abis itu|habis itu|but|and|so|because|or)\W*$", re.I)
+
+
+# Promo/sponsor/ajakan & pembuka-penutup acara: bukan momen, walau AI kadang menganggapnya "jelas & spesifik"
+PROMO = re.compile(r"\b(hashtag|subscribe|follow|giveaway|kode promo|link di bio|disponsori|sponsor(ed)?|juara 1|"
+                   r"tag at|klik link|like dan share|nyalakan lonceng|season \d|episode (kali )?ini)\b", re.I)
+
+
+def _tokens(text: str) -> list[str]:
+    return [t for t in (_norm(x) for x in text.split()) if t]
+
+
+def _quality(units: list[dict], a: int, b: int) -> tuple[int, list[str]]:
+    """Penalti (0..100) + catatan untuk klip units[a..b]: transkrip berulang/halusinasi, bicara jarang
+    (musik/hening), akhir menggantung."""
+    toks = [t for u in units[a:b + 1] for t in _tokens(u["text"])]
+    dur = max(1.0, units[b]["end"] - units[a]["start"])
+    pen, notes = 0, []
+    if toks:
+        uniq = len(set(toks)) / len(toks)
+        run = best = 1
+        for x, y in zip(toks, toks[1:]):
+            run = run + 1 if x == y else 1
+            best = max(best, run)
+        if uniq < 0.38 or best >= 4:
+            pen += 25
+            notes.append("transkrip berulang")
+    wpm = len(toks) / dur * 60
+    if wpm < 70:
+        pen += 30 if wpm < 45 else 12
+        notes.append("sedikit ucapan")
+    last = units[b]["text"].strip()
+    if DANGLING.search(last) or last.endswith((",", "-")):
+        pen += 12
+        notes.append("akhir menggantung")
+    elif last.endswith("?"):
+        pen += 10
+        notes.append("berakhir di pertanyaan")
+    promo = sum(1 for u in units[a:b + 1] if PROMO.search(u["text"]))
+    if promo >= 2:
+        pen += 35
+        notes.append("promo/ajakan")
+    return pen, notes
+
+
+def _tidy_end(units: list[dict], a: int, b: int, hi: float) -> int:
+    """Akhir klip menggantung ("…tapi", "…terus") atau pertanyaan yang belum dijawab → sambung 1-2 kalimat
+    bila masih muat durasi."""
+    for _ in range(2):
+        last = units[b]["text"].strip()
+        if not (DANGLING.search(last) or last.endswith("?")) or b + 1 >= len(units):
+            break
+        if units[b + 1]["end"] - units[a]["start"] > hi:
+            break
+        b += 1
+    return b
+
+
+# ---------------- tahap 1: pindai puncak · tahap 2: susun klip di sekitar puncak ----------------
+
+PEAK_GAP = 25.0     # dua puncak berjarak < ini (dtk) = momen yang sama → ambil yang terkuat
+BUILD_BEFORE, BUILD_AFTER = 75.0, 60.0  # konteks transkrip yang dilihat penyusun klip di sekitar puncak
 
 
 def find_clips(pid: str, params: dict, progress) -> dict:
+    """Cari momen terbaik. Dulu satu prompt besar per ±15 menit transkrip meminta AI langsung memilih rentang klip
+    + menilai sendiri → hasilnya cenderung "topik" (daftar tempat makan, obrolan pembuka) dengan skor seragam 70-85,
+    dan akhir klip menggantung. Kini 3 tahap:
+      1. Pindai puncak (paralel per bagian): AI hanya menandai KALIMAT PUNCAK (punchline, fakta/angka mengejutkan,
+         opini tajam, pengakuan, klimaks cerita, jawaban/tips) + inti momennya dalam satu kalimat.
+      2. Susun klip (paralel per puncak): AI melihat ±75 dtk sebelum & 60 dtk sesudah puncak, memilih awal (setup yang
+         dibutuhkan penonton) & akhir (tepat setelah payoff + reaksinya), atau menolak bila tanpa inti yang jelas.
+      3. Babak final: semua klip dibandingkan berdampingan dengan teks utuh. Kode menambah penalti untuk transkrip
+         berulang, bicara jarang, dan akhir menggantung."""
     p = store.load(pid)
     segs = p["script"]["transcript"]["segments"]
     if not segs:
@@ -338,42 +409,102 @@ def find_clips(pid: str, params: dict, progress) -> dict:
     heat = _mark_signals(p, units, progress)
     dur = units[-1]["end"] - units[0]["start"]
     want = max(3, min(10, int(dur // 90) + 2))  # jumlah klip wajar sesuai panjang video
-    # Ukuran jendela menyesuaikan: sebisa mungkin 1 jendela per model Groq → semua dinilai bersamaan tanpa antre,
-    # dan instruksi prompt tidak diulang berkali-kali (hemat kuota token/menit).
+    ctx = p["script"].get("context") or {}
+    direction = params.get("direction") if params.get("direction") is not None else p["script"].get("direction") or ""
+    provider = params.get("provider")
     lanes = len(_lanes()) if keys.has("groq") else 1
     total = sum(len(u["text"]) + 20 for u in units)
     wins = _windows(units, int(min(WINDOW_MAX, max(WINDOW_CHARS, total * 1.15 / lanes))))
-    per_win = max(3, min(6, -(-want * 2 // len(wins))))
-    direction = params.get("direction") if params.get("direction") is not None else p["script"].get("direction") or ""
-    raw, failed = _score_windows(pid, p, units, wins, title, per_win, direction, params.get("provider"), progress,
-                                 (lo, hi))
+    per_win = max(4, min(10, -(-want * 3 // len(wins))))
+
+    def ask(sys_, usr, model, prov, effort, temperature):
+        """model = jalur Groq; prov = layanan cadangan (Groq dilewati)."""
+        return llm.chat_json(sys_, usr, prov, temperature=temperature, groq_model=model, effort=effort,
+                             fallback=False if (model or prov) else True, only_model=bool(model),
+                             max_wait=3 if model and lanes > 1 else None, skip=("groq",) if prov else ())
+
+    # ---- tahap 1: puncak
+    def peak_job(ws, we):
+        def run(model, prov):
+            sys_, usr = prompts.clip_peaks(units[ws:we], p["language"], title, offset=ws, count=per_win,
+                                           direction=direction, context=ctx)
+            got = ask(sys_, usr, model, prov, "low", 0.3)
+            return [x for x in got.get("peaks") or [] if isinstance(x, dict)]
+        txt = "|".join(u["text"] + u.get("sig", "") for u in units[ws:we])
+        key = hashlib.sha1(f"peak2|{per_win}|{direction}|{bool(ctx.get('summary'))}|{txt}".encode()).hexdigest()[:16]
+        return key, run
+
+    raw, failed = _fan_out(pid, "clip_cache", [peak_job(ws, we) for ws, we in wins], provider, progress,
+                           "Tahap 1/3 · memindai momen puncak")
     if failed and not raw:
         raise RuntimeError(f"Semua {len(wins)} bagian gagal dinilai AI — kuota gratis sedang habis. "
                            f"Tunggu 1-2 menit lalu klik lagi (bagian yang sudah berhasil tidak diulang).\n\n{failed[0]}")
+    peaks = []
+    for x in raw:
+        n = int(_num(x.get("n"), -1))
+        if 0 <= n < len(units):
+            st = max(1.0, min(10.0, _num(x.get("strength"), 5)))
+            if "🔥" in units[n].get("sig", "") or "🔊" in units[n].get("sig", ""):
+                st += 0.5
+            peaks.append({"n": n, "strength": st, "type": str(x.get("type") or "")[:20],
+                          "point": str(x.get("point") or "")[:200]})
+    peaks.sort(key=lambda x: -x["strength"])
+    chosen = []
+    for pk in peaks:  # puncak yang berdekatan = satu momen
+        if all(abs(units[pk["n"]]["start"] - units[o["n"]]["start"]) >= PEAK_GAP for o in chosen):
+            chosen.append(pk)
+    chosen = chosen[:want * 2 + 2]
+    if not chosen:
+        raise RuntimeError("AI tidak menemukan momen puncak di video ini. Coba beri Arahan AI (mis. topik yang dicari).")
 
-    progress("Merapikan kandidat klip (batas kalimat, durasi & tumpang-tindih)…")
-    cands = []
-    for c in raw:
-        a = int(max(0, min(_num(c.get("start_unit", c.get("start_seg"))), len(units) - 1)))
-        b = int(max(a, min(_num(c.get("end_unit", c.get("end_seg")), a), len(units) - 1)))
+    # ---- tahap 2: susun klip di sekitar tiap puncak
+    def build_job(pk):
+        t = units[pk["n"]]["start"]
+        a = next((i for i, u in enumerate(units) if u["end"] >= t - BUILD_BEFORE), 0)
+        b = max(i for i, u in enumerate(units) if u["start"] <= t + BUILD_AFTER)
+
+        def run(model, prov):
+            sys_, usr = prompts.clip_build(units[a:b + 1], a, pk, p["language"], title, (lo, hi), direction, ctx)
+            got = ask(sys_, usr, model, prov, "medium", 0.2)
+            return [{**got, "peak": pk["n"], "peak_type": pk["type"], "peak_point": pk["point"]}] \
+                if isinstance(got, dict) else []
+        txt = "|".join(u["text"] for u in units[a:b + 1])
+        return hashlib.sha1(f"build2|{pk['n']}|{lo}|{hi}|{direction}|{txt}".encode()).hexdigest()[:16], run
+
+    built, failed2 = _fan_out(pid, "build_cache", [build_job(pk) for pk in chosen], provider, progress,
+                              f"Tahap 2/3 · menyusun {len(chosen)} momen jadi klip")
+    progress("Merapikan kandidat klip (batas kalimat, durasi, kualitas transkrip)…")
+    cands, rejected = [], 0
+    for c in built:
+        if c.get("ok") is False:
+            rejected += 1
+            continue
+        pk = int(c["peak"])
+        a = int(max(0, min(_num(c.get("start_unit"), pk), pk)))
+        b = int(max(pk, min(_num(c.get("end_unit"), pk), len(units) - 1)))
         a, b = _fit_range(units, a, b, lo, hi)
+        b = _tidy_end(units, a, b, hi)
         st, en = _pad(words, units[a]["start"], units[b]["end"])
         if not (lo * 0.75 <= en - st <= hi + 1):
-            continue  # tetap terlalu pendek/panjang (mis. sisa video tidak cukup)
+            continue
         sc = c.get("scores") if isinstance(c.get("scores"), dict) else {}
-        subs = {k: int(max(0, min(100, _num(sc.get(k), _num(c.get("score")) * 10)))) for k in WEIGHTS}
-        total = int(round(sum(subs[k] * w for k, w in WEIGHTS.items())))
-        cands.append({"start": st, "end": en, "title": str(c.get("title") or ""),
-                      "hook": str(c.get("hook") or ""), "reason": str(c.get("reason") or ""),
-                      "score": total, "scores": subs,
+        subs = {k: int(max(0, min(100, _num(sc.get(k), 50)))) for k in WEIGHTS}
+        pen, notes = _quality(units, a, b)
+        point = str(c.get("point") or c.get("peak_point") or "")
+        cands.append({"start": st, "end": en, "title": str(c.get("title") or "")[:80],
+                      "hook": str(c.get("hook") or ""), "point": point, "type": c.get("peak_type") or "",
+                      "score": int(round(sum(subs[k] * w for k, w in WEIGHTS.items()))),
+                      "scores": subs, "penalty": pen, "flags": notes,
                       "keywords": [str(x) for x in c.get("keywords") or [] if x]})
-    cands.sort(key=lambda c: -c["score"])
+    cands.sort(key=lambda c: -(c["score"] - c["penalty"]))
     clips = []
     for c in cands:  # klip yang tumpang-tindih ≥25% dengan klip berskor lebih tinggi dibuang
         if all(_overlap(c, o) < 0.25 for o in clips):
             clips.append(c)
-    clips = _rerank(clips[:max(want + 4, 12)], units, title, p["language"], direction, heat, progress,
-                    p["script"].get("context"))
+    progress(f"Tahap 3/3 · membandingkan {min(len(clips), max(want + 4, 12))} klip terbaik…")
+    clips = _rerank(clips[:max(want + 4, 12)], units, title, p["language"], direction, heat, progress, ctx)
+    for c in clips:  # alasan yang tampil di UI: inti momen + penilaian babak final
+        c["reason"] = " — ".join(x for x in (c.get("point"), c.get("why")) if x)[:300]
     # ID stabil (dari rentang waktu), supaya "Cari Momen" ulang tidak menukar klip yang sudah jadi video
     # Klip lama dengan rentang (hampir) sama memakai ID lamanya → video hasil yang sudah ada tetap tertaut.
     old = p["script"].get("clips") or []
@@ -383,11 +514,11 @@ def find_clips(pid: str, params: dict, progress) -> dict:
         return same["id"] if same else "c" + hashlib.sha1(f"{c['start']:.1f}-{c['end']:.1f}".encode()).hexdigest()[:8]
     clips = [{**c, "id": cid(c)} for c in clips[:want]]
     if not clips:
-        raise RuntimeError(f"AI tidak menemukan klip berdurasi {lo}-{hi} dtk. Coba lagi, atau pilih manual.")
-
-    note = (f"{len(failed)} dari {len(wins)} bagian video belum dinilai (kuota AI gratis habis). "
-            "Klik \"Cari Momen Viral\" lagi 1-2 menit kemudian untuk melengkapi — bagian yang sudah dinilai tidak diulang."
-            if failed else "")
+        raise RuntimeError(f"AI tidak menemukan klip berdurasi {lo}-{hi} dtk yang punya inti jelas "
+                           f"({rejected} momen ditolak). Coba durasi lain atau beri Arahan AI.")
+    fails = len(failed) + len(failed2)
+    note = (f"{fails} bagian/momen belum dinilai (kuota AI gratis habis). Klik \"Cari Momen Viral\" lagi 1-2 menit "
+            "kemudian untuk melengkapi — yang sudah dinilai tidak diulang." if fails else "")
 
     def apply(p):
         p["script"]["clips"] = clips
@@ -396,144 +527,123 @@ def find_clips(pid: str, params: dict, progress) -> dict:
         if params.get("direction") is not None:
             p["script"]["direction"] = params["direction"]
         store.touch_stage(p, "script")
-        store.log(p, f"AI: {len(clips)} kandidat klip dari {len(units)} kalimat"
-                     + (f" ({len(failed)}/{len(wins)} bagian gagal)" if failed else ""))
+        store.log(p, f"AI: {len(chosen)} momen puncak → {len(clips)} klip ({rejected} ditolak) dari {len(units)} kalimat"
+                     + (f", {fails} gagal" if fails else ""))
     store.update(pid, apply)
-    return {"count": len(clips), "failed_parts": len(failed), "parts": len(wins)}
+    return {"count": len(clips), "peaks": len(chosen), "rejected": rejected, "failed_parts": fails,
+            "parts": len(wins)}
 
 
 def _lanes() -> list[str]:
-    """Jalur paralel penilai momen: tiap model Groq × jumlah key (tiap akun = kuota token/menit sendiri),
+    """Jalur paralel AI: tiap model Groq × jumlah key (tiap akun = kuota token/menit sendiri),
     maks 9 jalur supaya tidak membanjiri server."""
     n = max(1, len(keys.pool("groq")))
     return [m for _ in range(n) for m in llm.groq_models()][:9]
 
 
-def _score_windows(pid, p, units, wins, title, per_win, direction, provider, progress, limits=None):
-    """Nilai tiap jendela transkrip. Jendela dibagi bergiliran ke model-model Groq dan dikerjakan PARALEL
-    (tiap model punya kuota token/menit sendiri, ±8rb di tier gratis). Hasil tiap jendela disimpan di
-    script.clip_cache → bila sebagian gagal, klik ulang hanya mengerjakan jendela yang belum.
-    Mengembalikan (kandidat mentah, [pesan error])."""
-    import hashlib
+def _fan_out(pid: str, cache_name: str, tasks: list[tuple], provider, progress, label: str):
+    """Kerjakan banyak permintaan AI kecil PARALEL di jalur-jalur Groq (tiap model × key punya kuota token/menit
+    sendiri). tasks = [(cache_key, run(model, provider) -> list)]. Hasil per tugas disimpan di
+    p.script[cache_name] → bila sebagian gagal (kuota), klik ulang hanya mengerjakan yang belum.
+    Jalur yang kena batas mengembalikan tugasnya ke antrean (diambil jalur lain) lalu istirahat sampai pulih.
+    Tugas yang gagal di semua jalur Groq dicoba sekali lewat layanan lain (Gemini, Cerebras, …).
+    Mengembalikan (gabungan hasil, [pesan error])."""
+    import queue
     from concurrent.futures import ThreadPoolExecutor
 
     from .. import jobs
 
-    def key(ws, we):
-        txt = "|".join(u["text"] + u.get("sig", "") for u in units[ws:we])
-        return hashlib.sha1(f"{p['format']}|{per_win}|{direction}|{limits}|{bool(ctx.get('summary'))}|{txt}"
-                            .encode()).hexdigest()[:16]
+    cache = dict(store.load(pid)["script"].get(cache_name) or {})
+    out = [x for k, _ in tasks for x in cache.get(k, [])]
+    todo = [(i, k, fn) for i, (k, fn) in enumerate(tasks) if k not in cache]
+    keep = {k for k, _ in tasks}
 
-    ctx = p["script"].get("context") or {}
-    cache = dict(p["script"].get("clip_cache") or {})
-    todo = [(k, ws, we) for k, (ws, we) in enumerate(wins) if key(ws, we) not in cache]
-    raw = [c for ws, we in wins for c in cache.get(key(ws, we), [])]
-    if not todo:
-        return raw, []
-    use_groq = (provider or config.LLM_PROVIDER).lower() == "groq" or (
-        not provider and "groq" in llm.chain() and keys.has("groq"))
-    models = _lanes() if use_groq and keys.has("groq") else [None]
-    # Antrean bersama: model yang bebas langsung mengambil bagian berikutnya; model yang kena batas
-    # token/menit mengembalikan bagiannya ke antrean (diambil model lain) lalu istirahat sampai pulih.
-    import queue
-    import threading
-    q: "queue.Queue" = queue.Queue()
-    for t in todo:
-        q.put(t)
-    pending = [len(todo)]
-    done, errors, lock = [len(wins) - len(todo)], [], threading.Lock()
-    tries: dict[int, int] = {}
-    parent_progress, parent_jid = getattr(jobs._local, "progress", None), getattr(jobs._local, "jid", None)
-    progress(f"AI menilai {len(todo)} bagian video" + (f" paralel di {len(models)} model Groq…" if len(models) > 1 else "…"))
+    def save(k, got):
+        cache[k] = got
+        store.update(pid, lambda pp: pp["script"].setdefault(cache_name, {}).__setitem__(k, got))
 
-    def lane(model):
-        jobs._local.progress, jobs._local.jid = parent_progress, parent_jid  # bar status & tombol Batalkan
-        while True:
-            with lock:
-                if pending[0] <= 0:
-                    return
-            try:
-                k, ws, we = q.get(timeout=1)
-            except queue.Empty:
-                continue  # bagian sedang dikerjakan model lain (bisa dikembalikan bila kena batas)
-            sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
-                                            count=per_win, direction=direction, limits=limits, context=ctx)
-            try:
-                # tanpa schema strict: jawaban panjang gpt-oss sering gagal validasi & membakar kuota token
-                got = llm.chat_json(sys_, usr, "groq" if model else provider, temperature=0.4,
-                                    groq_model=model, effort="low", fallback=model is None, only_model=bool(model),
-                                    max_wait=3 if model and len(models) > 1 else None).get("clips", [])
-            except llm.RateLimited as e:
+    errors: list[str] = []
+    if todo:
+        use_groq = (provider or config.LLM_PROVIDER).lower() == "groq" or (
+            not provider and "groq" in llm.chain() and keys.has("groq"))
+        models = _lanes() if use_groq and keys.has("groq") else [None]
+        q: "queue.Queue" = queue.Queue()
+        for t in todo:
+            q.put(t)
+        pending, done, lock = [len(todo)], [len(tasks) - len(todo)], threading.Lock()
+        tries: dict[int, int] = {}
+        parent_progress, parent_jid = getattr(jobs._local, "progress", None), getattr(jobs._local, "jid", None)
+
+        def lane(model):
+            jobs._local.progress, jobs._local.jid = parent_progress, parent_jid  # bar status & tombol Batalkan
+            while True:
                 with lock:
-                    tries[k] = tries.get(k, 0) + 1
-                    give_up = tries[k] > 2 * len(models)
-                    if give_up:  # kuota harian habis / semua jalur terus penuh → serahkan ke layanan lain
-                        errors.append(f"Bagian {k + 1}: kuota Groq habis")
-                        pending[0] -= 1
-                if give_up:
-                    continue
-                q.put((k, ws, we))  # oper ke model lain
-                progress(f"AI menilai momen viral: {done[0]}/{len(wins)} bagian selesai — kuota gratis per menit "
-                         f"{e.model.split('/')[-1]} habis, sisa bagian dilanjutkan ±{e.wait:.0f} dtk lagi…")
-                for _ in range(int(e.wait) + 1):  # istirahat sampai kuota model ini pulih
-                    time.sleep(1)
-                    with lock:
-                        if pending[0] <= 0:
-                            return
-                continue
-            except Exception as e:  # noqa: BLE001 — satu bagian gagal tidak menggagalkan semua
-                if isinstance(e, jobs.JobCancelled):
-                    with lock:
-                        pending[0] = 0
-                    raise
-                with lock:
-                    errors.append(f"Bagian {k + 1}: {str(e)[:300]}")
-                    pending[0] -= 1
-                continue
-            got = [c for c in got if isinstance(c, dict)]
-            with lock:
-                raw.extend(got)
-                cache[key(ws, we)] = got
-                done[0] += 1
-                pending[0] -= 1
-                n = done[0]
-
-            def save(pp, kk=key(ws, we), g=got):
-                pp["script"].setdefault("clip_cache", {})[kk] = g
-            store.update(pid, save)
-            progress(f"AI menilai momen viral: {n}/{len(wins)} bagian selesai…")
-
-    with ThreadPoolExecutor(max_workers=len(models)) as ex:
-        futs = [ex.submit(lane, m) for m in models]
-        for f in futs:
-            f.result()
-    # Bagian yang gagal di semua model/key Groq → nilai ulang lewat layanan lain (Gemini, Cerebras, …)
-    # supaya Clipper tidak bergantung pada satu AI.
-    if errors and models != [None]:
-        others = [x for x in llm.chain() if x != "groq"]
-        retry = [(k, ws, we) for k, ws, we in todo if key(ws, we) not in cache]
-        if others and retry:
-            progress(f"{len(retry)} bagian gagal di Groq → dinilai ulang dengan {llm.PROVIDER_LABEL[others[0]]}…")
-            errors.clear()
-            for k, ws, we in retry:
-                sys_, usr = prompts.viral_clips(units[ws:we], p["format"], p["language"], title, offset=ws,
-                                                count=per_win, direction=direction, limits=limits, context=ctx)
+                    if pending[0] <= 0:
+                        return
                 try:
-                    got = [c for c in llm.chat_json(sys_, usr, others[0], temperature=0.4, skip=("groq",))
-                           .get("clips", []) if isinstance(c, dict)]
-                except llm.LLMError as e:
-                    errors.append(f"Bagian {k + 1}: {str(e)[:300]}")
+                    i, k, fn = q.get(timeout=1)
+                except queue.Empty:
+                    continue  # tugas sedang dikerjakan jalur lain (bisa dikembalikan bila kena batas)
+                try:
+                    got = fn(model, None if model else provider)
+                except llm.RateLimited as e:
+                    with lock:
+                        tries[i] = tries.get(i, 0) + 1
+                        give_up = tries[i] > 2 * len(models)
+                        if give_up:  # kuota harian habis / semua jalur terus penuh → serahkan ke layanan lain
+                            errors.append(f"{label} #{i + 1}: kuota Groq habis")
+                            pending[0] -= 1
+                    if give_up:
+                        continue
+                    q.put((i, k, fn))  # oper ke jalur lain
+                    progress(f"{label}: {done[0]}/{len(tasks)} selesai — kuota per menit "
+                             f"{e.model.split('/')[-1]} habis, dilanjutkan ±{e.wait:.0f} dtk lagi…")
+                    for _ in range(int(e.wait) + 1):  # istirahat sampai kuota model ini pulih
+                        time.sleep(1)
+                        with lock:
+                            if pending[0] <= 0:
+                                return
                     continue
-                raw.extend(got)
-                cache[key(ws, we)] = got
-                store.update(pid, lambda pp, kk=key(ws, we), g=got: pp["script"].setdefault("clip_cache", {}).__setitem__(kk, g))
-    # buang cache jendela yang sudah tidak dipakai (transkrip / arahan berubah)
-    keep = {key(ws, we) for ws, we in wins}
+                except Exception as e:  # noqa: BLE001 — satu tugas gagal tidak menggagalkan semua
+                    if isinstance(e, jobs.JobCancelled):
+                        with lock:
+                            pending[0] = 0
+                        raise
+                    with lock:
+                        errors.append(f"{label} #{i + 1}: {str(e)[:300]}")
+                        pending[0] -= 1
+                    continue
+                with lock:
+                    out.extend(got)
+                    done[0] += 1
+                    pending[0] -= 1
+                    n = done[0]
+                save(k, got)
+                progress(f"{label}: {n}/{len(tasks)} selesai…")
 
-    def prune(pp):
-        pp["script"]["clip_cache"] = {k: v for k, v in (pp["script"].get("clip_cache") or {}).items() if k in keep}
-    store.update(pid, prune)
-    return raw, errors
+        progress(f"{label}: {len(todo)} permintaan AI"
+                 + (f" paralel di {len(models)} jalur Groq…" if len(models) > 1 else "…"))
+        with ThreadPoolExecutor(max_workers=len(models)) as ex:
+            for f in [ex.submit(lane, m) for m in models]:
+                f.result()
+        # gagal di semua jalur Groq → coba lewat layanan lain supaya Clipper tidak bergantung pada satu AI
+        others = [x for x in llm.chain() if x != "groq"]
+        retry = [(i, k, fn) for i, k, fn in todo if k not in cache]
+        if errors and models != [None] and others and retry:
+            progress(f"{len(retry)} permintaan gagal di Groq → dicoba dengan {llm.PROVIDER_LABEL[others[0]]}…")
+            errors.clear()
+            for i, k, fn in retry:
+                try:
+                    got = fn(None, others[0])
+                except llm.LLMError as e:
+                    errors.append(f"{label} #{i + 1}: {str(e)[:300]}")
+                    continue
+                out.extend(got)
+                save(k, got)
+    # buang cache yang sudah tidak dipakai (transkrip / arahan berubah)
+    store.update(pid, lambda pp: pp["script"].__setitem__(
+        cache_name, {k: v for k, v in (pp["script"].get(cache_name) or {}).items() if k in keep}))
+    return out, errors
 
 
 def cut_clip(pid: str, params: dict, progress) -> dict:
@@ -544,16 +654,21 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
     w, h = config.RESOLUTIONS[p["format"]]
     (d / "assets").mkdir(exist_ok=True)
     graph = f"[0:v]{ff.fit_filter(w, h, mode if mode != 'face' else 'blur')},fps={config.FPS},format=yuv420p[v]"
+    src = store.source_file(p)
+    vin = ["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", str(src)]
+    amap = "0:a?"
     reframe_info = None
     if mode == "face":
         from . import reframe
-        src = store.source_file(p)
         words = [x for s in dedupe_segments((p["script"].get("transcript") or {}).get("segments") or [])
                  for x in s.get("words") or []]
         progress("Auto-reframe: mencari wajah & siapa yang sedang bicara…")
         pl, reframe_info = reframe.track(src, clip["start"], clip["end"], w, h, words, progress)
         if pl:
             graph = reframe.filter_graph(pl, w, h, config.FPS)
+            seg_in = reframe.segment_inputs(pl, src, clip["start"], config.FPS)
+            amap = f"{len(pl['segments'])}:a?"  # audio dari input terakhir (rentang klip utuh)
+            vin = seg_in + vin
             st = reframe_info["stats"]
             progress(f"Auto-reframe: {reframe_info['shots']} shot, {st.get('switches', 0)} kali pindah pembicara"
                      + (f", layar dibagi {st['split']:.0f} dtk" if st.get("split") else "")
@@ -561,10 +676,9 @@ def cut_clip(pid: str, params: dict, progress) -> dict:
         else:
             progress("Auto-reframe: tidak ada wajah terdeteksi — memakai mode latar blur")
     progress(f"Memotong {clip['start']:.1f}s - {clip['end']:.1f}s ({mode})...")
-    ff.run(["-ss", f"{clip['start']:.3f}", "-to", f"{clip['end']:.3f}", "-i", str(store.source_file(p)),
-            "-filter_complex", graph, "-map", "[v]", "-map", "0:a?",
-            "-c:v", "libx264", "-preset", "veryfast", "-crf", "20", "-c:a", "aac", "-b:a", "192k",
-            "assets/clip.mp4"], cwd=d)
+    # file antara → encoder GPU bila ada (dulu libx264 di CPU, berebut CPU dengan klip lain yang berjalan bersamaan)
+    ff.run_encode([*vin, "-filter_complex", graph, "-map", "[v]", "-map", amap],
+                  ["-c:a", "aac", "-b:a", "192k", "-shortest", "assets/clip.mp4"], cwd=d, intermediate=True)
 
     def apply(p):
         p["assets"]["clip_path"] = "assets/clip.mp4"
@@ -590,7 +704,7 @@ def fork_clip(src_pid: str, idx: int) -> dict:
     p["research"] = src["research"]
     p["script"] = {k: v for k, v in src["script"].items() if k not in ("transcript_raw", "proof_cache", "transcript_fixes",
                                                                   "transcript_rejected")}
-    p["script"].update({"selected_clip": idx, "clip_cache": {}})
+    p["script"].update({"selected_clip": idx, "clip_cache": {}, "build_cache": {}})
     tr = src["script"].get("transcript") or {}
     if tr.get("segments"):  # transkrip penuh video 1 jam ±1 MB → anak cukup ±90 dtk di sekitar klipnya
         lo_t, hi_t = clip["start"] - 90, clip["end"] + 90

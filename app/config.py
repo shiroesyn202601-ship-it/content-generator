@@ -44,6 +44,9 @@ GEMINI_MODEL = _env("GEMINI_MODEL", "gemini-3.8-flash")
 # Dicoba berurutan bila model utama sibuk (503/429) atau sudah dipensiunkan (404).
 GEMINI_FALLBACK_MODELS = [m.strip() for m in _env("GEMINI_FALLBACK_MODELS", "gemini-3.7-flash,gemini-flash-latest")
                           .split(",") if m.strip()]
+# Transkrip presisi per klip (Clipper). Diukur 16 Nov 2026 (klip 45 dtk): Flash-Lite ±4 dtk, sedangkan Flash gratis
+# 140-450 dtk / timeout (antrean tier gratis). Flash-Lite menulis ±90% kata Flash — tetap jauh di atas Whisper.
+CLIP_STT_MODELS = [m.strip() for m in _env("CLIP_STT_MODELS", "gemini-flash-lite-latest").split(",") if m.strip()]
 GROQ_API_KEY = _first_key("GROQ_API_KEY")
 GROQ_MODEL = _env("GROQ_MODEL", "openai/gpt-oss-120b")
 GROQ_FALLBACK_MODELS = [m.strip() for m in _env("GROQ_FALLBACK_MODELS", "qwen/qwen3.8-27b,openai/gpt-oss-20b")

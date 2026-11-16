@@ -451,69 +451,123 @@ def video_context(ctx: dict | None, t0: float | None = None, t1: float | None = 
     return "\n".join(out) + "\n"
 
 
-def viral_clips(units: list[dict], fmt: str, lang: str, title: str, offset: int = 0, count: int = 5,
-                direction: str = "", limits: tuple | None = None, context: dict | None = None) -> tuple[str, str]:
-    """Rubrik penilaian klip (diadaptasi dari Anil-matcha & openshorts). Satuan = kalimat bernomor,
-    jadi AI memilih nomor kalimat, bukan menebak detik."""
-    lo, hi = limits or ((20, 59) if fmt == "short" else (90, 600))
-    # ringkas (hemat token): nomor + menit:detik mulai; durasi klip dihitung ulang oleh kode
+PEAK_TYPES = {
+    "lucu": "punchline / lelucon / momen konyol yang bikin ketawa",
+    "kejutan": "fakta, angka, atau pengakuan yang mengejutkan",
+    "opini": "opini tajam, kontroversial, atau berani",
+    "cerita": "klimaks / akhir cerita (anekdot dengan kejadian nyata)",
+    "pengakuan": "momen personal / emosional / rahasia / kegagalan",
+    "tips": "tips, cara, atau pelajaran praktis yang bisa langsung dipakai",
+    "debat": "beda pendapat / adu argumen / sindiran",
+    "jawaban": "jawaban yang memuaskan atas pertanyaan menarik",
+}
+
+NOT_PEAK = """BUKAN puncak (jangan dipilih): salam & perkenalan, basa-basi setuju ("iya bener", "wah mantap"), sponsor/promo,
+urusan teknis acara, MENYEBUT tempat/produk/nama tanpa cerita atau alasan yang menarik, daftar rekomendasi tanpa
+cerita, reaksi mencicipi/melihat tanpa isi ("enak banget", "wah"), kalimat yang hanya bisa dipahami dengan
+menonton bagian lain, dan transkrip yang kacau/berulang (salah dengar)."""
+
+
+def clip_peaks(units: list[dict], lang: str, title: str, offset: int = 0, count: int = 6, direction: str = "",
+               context: dict | None = None) -> tuple[str, str]:
+    """Tahap 1 Clipper: tandai KALIMAT PUNCAK (bukan rentang klip). Rentang disusun di tahap 2 (clip_build)."""
     lines = "\n".join(f"[{i + offset}] {int(s['start'] // 60)}:{int(s['start'] % 60):02d} {s['text']}{s.get('sig', '')}"
                       for i, s in enumerate(units))
     sig = [x for x in ("🔥", "🔊") if any(x in (u.get("sig") or "") for u in units)]
-    tanda = ("\nTANDA dari data nyata (bukan tebakan): "
+    tanda = ("\nTANDA dari data nyata: "
              + ("🔥 = bagian yang paling sering DIPUTAR ULANG penonton YouTube; " if "🔥" in sig else "")
-             + ("🔊 = suara tiba-tiba keras/heboh (tawa, teriak, debat); " if "🔊" in sig else "")
-             + "utamakan momen di sekitar tanda ini bila isinya memang kuat.\n") if sig else ""
-    system = ("Kamu editor klip viral profesional untuk YouTube Shorts/TikTok. Kamu jujur menilai: "
-              "kebanyakan bagian video BIASA saja, hanya sedikit yang benar-benar layak diklip.")
-    arah = f"\nARAHAN KREATOR (utamakan ini): {direction.strip()}\n" if direction.strip() else ""
-    ctx = video_context(context, units[0]["start"], units[-1]["end"]) if units else ""
+             + ("🔊 = suara tiba-tiba keras (tawa, teriak, debat); " if "🔊" in sig else "")
+             + "pertimbangkan, tapi tetap nilai ISINYA.\n") if sig else ""
+    arah = f"\nARAHAN KREATOR (utamakan): {direction.strip()}\n" if direction.strip() else ""
+    jenis = "\n".join(f"- {k}: {v}" for k, v in PEAK_TYPES.items())
+    system = ("Kamu editor klip senior untuk YouTube Shorts/TikTok. Tugasmu menemukan momen yang membuat orang "
+              "berhenti scroll lalu membagikannya. Kamu sangat selektif: kebanyakan obrolan itu biasa saja. "
+              f"Tulis teks jawaban dalam {LANG_NAME.get(lang, lang)}.")
     user = f"""Video sumber: "{title}".
-{ctx}
-Transkrip (sudah dikoreksi) per KALIMAT bernomor ([nomor] menit:detik mulai):
+{video_context(context, units[0]['start'], units[-1]['end']) if units else ''}
+Transkrip per KALIMAT bernomor ([nomor] menit:detik):
 {lines}
 {arah}{tanda}
-Pilih sampai {count} momen terbaik. Setiap klip:
-- mulai di kalimat "start_unit" dan berakhir di kalimat "end_unit" (nomor di kurung siku), durasi {lo}-{hi} detik (hitung dari waktu mulai kalimat);
-- kalimat PERTAMA harus bisa dipahami tanpa konteks sebelumnya (jangan mulai dengan "jadi", "nah itu", "makanya",
-  "dia" yang merujuk hal sebelumnya) dan langsung memancing rasa penasaran;
-- kalimat TERAKHIR terasa tuntas (punchline, kesimpulan, jawaban) — jangan berhenti di tengah cerita;
-- klip harus masuk akal bagi penonton yang TIDAK menonton video aslinya. Pahami siapa bicara & apa yang sedang
-  dibahas: bila momen kuat merujuk hal sebelumnya ("itu", "dia", "tadi"), mulai lebih awal agar rujukannya ikut,
-  atau lewati momen itu. Pertanyaan + jawabannya harus ada dalam satu klip.
+Tandai sampai {count} KALIMAT PUNCAK — kalimat di mana sesuatu yang bernilai benar-benar terjadi. Jenis puncak:
+{jenis}
 
-Nilai tiap klip 0-100 (jujur; 80+ hanya untuk yang benar-benar kuat):
-- "hook": seberapa kuat 3 detik pertama menahan penonton (pertanyaan, klaim mengejutkan, konflik, emosi);
-- "alur": cerita utuh — ada awal, puncak, dan akhir yang tuntas;
-- "nilai": puncak emosi, opini tajam, pengungkapan, humor, kalimat yang layak dikutip, atau tips praktis;
-- "bagikan": seberapa besar orang ingin mengomentari / membagikan / relevan dengan tren.
-"title": judul klip menarik (maks 60 karakter). "hook": teks pendek di layar untuk 2 detik pertama (maks 8 kata).
-"reason": 1 kalimat kenapa klip ini kuat. "keywords": 2-5 kata yang diucapkan di klip untuk ditekankan di subtitle.
-Bahasa judul/hook/alasan: {LANG_NAME.get(lang, lang)}.
-Balas JSON: {{"clips": [{{"start_unit": 0, "end_unit": 5, "title": "...", "hook": "...", "reason": "...",
-  "scores": {{"hook": 70, "alur": 60, "nilai": 65, "bagikan": 55}}, "keywords": ["..."]}}]}}"""
+{NOT_PEAK}
+
+Untuk tiap puncak:
+- "n": nomor kalimat puncaknya (payoff-nya, bukan awal obrolan);
+- "type": salah satu jenis di atas;
+- "point": INTI momen dalam satu kalimat spesifik — apa yang penonton dapat/rasakan (contoh baik: "Tanwa mengaku
+  pernah habis 20 mie instan sekali duduk dan tetap memaksakan diri karena kamera menyala"; contoh buruk:
+  "membahas makanan");
+- "strength": 1-10, jujur. 8+ hanya bila orang asing pun akan menonton sampai habis dan mengirimkannya ke teman.
+  Bila inti tidak bisa ditulis spesifik, jangan dipilih.
+Lebih baik sedikit tapi kuat daripada banyak tapi biasa. Bahasa "point": {LANG_NAME.get(lang, lang)}.
+Balas JSON: {{"peaks": [{{"n": 0, "type": "lucu", "point": "...", "strength": 7}}]}}"""
+    return system, user
+
+
+def clip_build(units: list[dict], offset: int, peak: dict, lang: str, title: str, limits: tuple,
+               direction: str = "", context: dict | None = None) -> tuple[str, str]:
+    """Tahap 2 Clipper: dari satu kalimat puncak + transkrip di sekitarnya, tentukan awal & akhir klip yang utuh."""
+    lo, hi = limits
+    n = peak["n"]
+    lines = "\n".join(f"{'>>' if i + offset == n else '  '}[{i + offset}] "
+                      f"{int(s['start'] // 60)}:{int(s['start'] % 60):02d} {s['text']}" for i, s in enumerate(units))
+    arah = f"\nARAHAN KREATOR: {direction.strip()}" if direction.strip() else ""
+    system = ("Kamu editor klip senior untuk YouTube Shorts/TikTok. Kamu memotong momen dari podcast/obrolan panjang "
+              "menjadi klip yang berdiri sendiri: penonton baru langsung paham, tertarik di detik pertama, dan merasa "
+              f"mendapat sesuatu di akhir. Tulis teks jawaban dalam {LANG_NAME.get(lang, lang)}.")
+    user = f"""Video sumber: "{title}".
+{video_context(context, units[0]['start'], units[-1]['end']) if units else ''}
+Kandidat puncak: kalimat [{n}] (ditandai >>), jenis "{peak.get('type', '')}", inti menurut pemindai: {peak.get('point', '')}
+
+Transkrip di sekitarnya ([nomor] menit:detik):
+{lines}
+{arah}
+Tugas: susun SATU klip berdurasi {lo}-{hi} detik yang memuat kalimat [{n}].
+1. Nilai dulu dengan jujur: apakah momen ini punya inti yang jelas & menarik bagi orang yang TIDAK menonton video
+   aslinya? Balas "ok": false (alasan di "reject") bila: obrolan biasa, menyebut tanpa cerita, transkrip kacau,
+   butuh konteks yang tidak bisa ikut, ATAU isinya promo/sponsor/kontes/ajakan follow-subscribe, pembukaan atau
+   penutupan acara — itu bukan momen, sejelas apa pun.
+2. "start_unit": kalimat pertama = pembuka yang langsung menarik DAN memberi setup yang dibutuhkan (pertanyaan,
+   premis, awal cerita). Jangan mulai dari basa-basi sebelumnya; jangan mulai dengan kata sambung / rujukan
+   ("jadi", "nah itu", "dia", "tadi") yang membuat penonton bingung.
+3. "end_unit": berakhir TEPAT setelah payoff + reaksinya (tawa, jawaban, kesimpulan). Jangan berhenti di tengah
+   kalimat/cerita atau pada pertanyaan yang belum dijawab; jangan lanjut ke topik baru.
+4. Nilai 0-100 (jujur, 80+ hanya yang benar-benar kuat): "hook" (3 detik pertama), "alur" (utuh & tuntas),
+   "nilai" (emosi/humor/insight/tips), "bagikan" (dorongan komentar/bagikan).
+"title": judul klip memancing rasa ingin tahu tanpa bohong (maks 60 karakter). "hook": teks layar 2 detik pertama
+(maks 8 kata). "point": inti klip dalam 1 kalimat spesifik. "keywords": 2-5 kata yang DIUCAPKAN di klip untuk
+ditekankan di subtitle. Bahasa: {LANG_NAME.get(lang, lang)}.
+Balas JSON: {{"ok": true, "reject": "", "start_unit": {n}, "end_unit": {n}, "title": "...", "hook": "...",
+  "point": "...", "scores": {{"hook": 70, "alur": 70, "nilai": 70, "bagikan": 60}}, "keywords": ["..."]}}"""
     return system, user
 
 
 def rerank_clips(cands: list[dict], units: list[dict], title: str, lang: str, direction: str = "",
                  context: dict | None = None) -> tuple[str, str]:
-    """Babak final: SEMUA kandidat dibandingkan berdampingan oleh satu model → skor setara antar-bagian video
-    (tiap bagian tadinya dinilai model berbeda, jadi skor mentahnya tidak bisa dibandingkan langsung)."""
+    """Babak final: SEMUA kandidat dibandingkan berdampingan oleh satu model dengan teks UTUH tiap klip
+    (skor penyusunan antar-model tidak bisa dibandingkan langsung)."""
     def txt(c):
         body = " ".join(u["text"] for u in units if u["start"] >= c["start"] - 0.5 and u["end"] <= c["end"] + 0.5)
-        return body if len(body) <= 700 else body[:450] + " … " + body[-220:]
-    rows = "\n\n".join(f"#{i} ({c['end'] - c['start']:.0f} dtk) judul: {c['title']}\n{txt(c)}" for i, c in enumerate(cands))
+        return body if len(body) <= 1500 else body[:1000] + " … " + body[-450:]
+    rows = "\n\n".join(f"#{i} ({c['end'] - c['start']:.0f} dtk) judul: {c['title']}"
+                       + (f"\ninti: {c['point']}" if c.get("point") else "") + f"\nucapan: {txt(c)}"
+                       for i, c in enumerate(cands))
     arah = f"\nARAHAN KREATOR: {direction.strip()}" if direction.strip() else ""
-    system = "Kamu kurator Shorts/TikTok yang sangat selektif. Bandingkan kandidat secara berdampingan dan jujur."
+    system = ("Kamu kurator Shorts/TikTok yang sangat selektif. Bandingkan kandidat secara berdampingan dan jujur. "
+              f"Tulis semua alasan dalam {LANG_NAME.get(lang, lang)}.")
     user = f"""Video sumber: "{title}".
 {video_context(context)}
-Berikut {len(cands)} kandidat klip (#nomor, durasi, judul, isi ucapan):
+Berikut {len(cands)} kandidat klip (#nomor, durasi, judul, inti, isi ucapan):
 
 {rows}
 {arah}
-Beri tiap kandidat skor 0-100: seberapa besar peluangnya ditonton sampai habis & dibagikan, DIBANDINGKAN kandidat lain
-(hook 3 detik pertama, cerita utuh & tuntas, emosi/humor/insight, bisa dipahami tanpa menonton video aslinya).
-Sebar skornya (yang terbaik 85+, yang biasa < 50). Bahasa alasan: {LANG_NAME.get(lang, lang)}.
+Nilai tiap kandidat 0-100 = peluang ditonton sampai habis & dibagikan oleh orang yang TIDAK kenal video aslinya.
+Periksa dari ISI UCAPAN (bukan judul): apakah intinya benar-benar ada di ucapan? apakah kalimat pertama menarik,
+akhirnya tuntas, dan isinya spesifik (cerita/angka/opini/humor nyata), bukan obrolan umum atau sekadar menyebut sesuatu?
+Patokan: 90 = orang akan mengirimkannya ke teman; 70 = menarik untuk penggemar topik; 50 = obrolan biasa;
+30 = membingungkan / menggantung / transkrip kacau / promo-sponsor. Sebar skornya. Bahasa alasan: {LANG_NAME.get(lang, lang)}.
 Balas JSON: {{"ranking": [{{"n": 0, "score": 80, "why": "alasan singkat"}}]}}"""
     return system, user
 
