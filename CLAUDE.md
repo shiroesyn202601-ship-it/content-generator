@@ -359,9 +359,11 @@ untuk kreator **Shiroe Syn**. Poin-poinnya:
       video yang sudah terunggah dilewati. ±3 mnt per klip.
     - B-roll (`enhance`): dulu kata umum/salah dengar ("anggaran"→uang, "Jiwita singer") + foto Pixabay pertama langsung dipakai.
       Kini prompt ketat (maks 2, hanya hal spesifik & dikenali yang dibahas, bukan kata umum/nama aneh/pengalaman pribadi,
-      query dengan konteks lokasi, `confidence` ≥ `BROLL_CONF` 0.7), kata harus ada di kalimat (`_has_word`), kandidat Commons +
-      Pixabay (tag harus nyambung) dinilai `vision.pick` dengan kalimat yang diucapkan — hanya "cocok" yang dipakai, kalau tidak
-      tanpa B-roll.
+      `confidence` ≥ `BROLL_CONF` 0.7, kata sambil lalu dilarang), wajib `visual` = deskripsi gambar + suasana topik (lampu sorot
+      → "stage spotlights over a dangdut concert stage", bukan lampu jalan), kata harus ada di kalimat (`_has_word`).
+      Pemeriksaan: lembar kontak 160 px (`vision.pick`) terlalu longgar (meloloskan lampu jalan / stand partitur sebagai
+      teleprompter) → kini tiap kandidat (maks 3 stok + 1 gambar AI dari `visual`) dinilai SENDIRI 640 px oleh
+      `_broll_ok` (sebut dulu yang terlihat, lalu object & setting harus true). Tidak lolos / vision tak tersedia → tanpa B-roll.
 
 ## 5. Status & langkah berikutnya
 - Roadmap riset 13 Nov 2026 (Tahap 1–4) **selesai**. Mode Cerita AI menunggu user membuat POLLINATIONS_KEY

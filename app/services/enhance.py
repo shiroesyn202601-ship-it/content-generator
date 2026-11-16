@@ -189,19 +189,22 @@ Aturan keras:
   (1) sesuatu yang SPESIFIK & dikenali: tempat/landmark bernama, tokoh publik terkenal (ada di Wikipedia), merek,
       karya, benda khusus yang sedang dijelaskan — bukan kata umum (uang, musik, acara, panggung, tangan, bulan,
       orang, rumah, kota, sekolah, pekerjaan, makanan biasa);
-  (2) benar-benar DIBAHAS di kalimat itu (bukan disebut sambil lalu), bukan kiasan/slang/candaan;
+  (2) benar-benar DIBAHAS (jadi pokok obrolan, dijelaskan/diceritakan) — BUKAN disebut sambil lalu atau dalam
+      daftar ("lighting-e urung, alat-alat sewa" = sambil lalu → JANGAN); bukan kiasan/slang/candaan;
   (3) ejaannya jelas benar — transkrip bisa salah dengar: nama/kata yang aneh atau tidak dikenal = JANGAN;
   (4) bukan orang yang sedang bicara di video, bukan cerita pengalaman pribadi (keluarga, pacar, masa kecil);
   (5) tidak sensitif (alat kelamin, kekerasan, dll.).
   word = kata persis dari kalimat itu. query_en = kata kunci foto bahasa Inggris 2-5 kata yang menyertakan konteks
-  budaya/lokasi (mis. "Kediri East Java Indonesia", "dangdut koplo concert Indonesia"). kind = "commons" untuk
-  tokoh/tempat/merek nyata, "photo" untuk benda. why = alasan singkat gambar ini membantu penonton.
+  (mis. "concert stage spotlight", "Kediri East Java"). visual = deskripsi gambar yang SEHARUSNYA tampil, bahasa
+  Inggris 1 kalimat, lengkap dengan suasana sesuai topik video (mis. kata "lampu sorot" di obrolan penyanyi dangdut →
+  "bright stage spotlights shining over a dangdut concert stage in Indonesia at night", BUKAN lampu jalan).
+  kind = "commons" untuk tokoh/tempat/merek nyata, "photo" untuk benda. why = alasan gambar ini membantu penonton.
   confidence = 0-1 seberapa yakin syarat (1)-(5) terpenuhi.
 - emoji: maks 5, satu emoji yang cocok untuk kata penting (word = kata persis dari kalimat itu).
 Balas HANYA JSON:
 {"intro":"","outro":"","people":[{"name":"","role_guess":""}],"topic":"",
  "claims":[{"sent":0,"claim":"","query":""}],
- "broll":[{"sent":0,"word":"","query_en":"","kind":"photo","why":"","confidence":0.0}],
+ "broll":[{"sent":0,"word":"","query_en":"","visual":"","kind":"photo","why":"","confidence":0.0}],
  "emoji":[{"sent":0,"word":"","emoji":""}]}"""
 
 
@@ -266,7 +269,7 @@ def _clean_plan(raw: dict, n_sent: int) -> dict:
                       for x in (raw.get("claims") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("claim"))][:2],
            "broll": [{"sent": int(x["sent"]), "word": s(x.get("word"), 40), "query_en": s(x.get("query_en"), 60),
                       "kind": x.get("kind") if x.get("kind") in ("photo", "commons", "ai") else "photo",
-                      "why": s(x.get("why"), 120)}
+                      "why": s(x.get("why"), 120), "visual": s(x.get("visual"), 220)}
                      for x in (raw.get("broll") or []) if isinstance(x, dict) and sent_ok(x) and s(x.get("query_en"))
                      and _conf(x) >= BROLL_CONF and not _sensitive(f"{x.get('query_en')} {x.get('word')}")][:3],
            "emoji": [{"sent": int(x["sent"]), "word": s(x.get("word"), 40), "emoji": s(x.get("emoji"), 12)}
@@ -352,60 +355,90 @@ def _fact_cards(plan: dict, progress) -> list[dict]:
 
 
 # ---------------------------------------------------------------- aset: B-roll, emoji, SFX
-def _broll_asset(item: dict, d: Path, k: int, fmt: str, topic: str = "", said: str = "") -> dict | None:
-    """Cari kandidat (Commons + Pixabay), lalu AI vision MELIHAT kandidat dan hanya memakai yang benar-benar cocok
-    dengan kalimat yang diucapkan. Dulu foto pertama langsung dipakai → sering tidak nyambung. Tidak ada yang cocok
-    (atau vision tak tersedia & tidak ada foto Commons yang judulnya memuat kata kunci) → tanpa B-roll."""
-    from . import assets, vision
+BROLL_CHECK = """Kamu editor video. Lihat gambar ini baik-baik.
+Narasumber di video (topik: "{topic}") sedang berkata: "{said}"
+Gambar akan ditampilkan saat kata "{word}". Yang SEHARUSNYA terlihat: {visual}
+1) "seen": sebutkan apa yang BENAR-BENAR terlihat di gambar (maks 20 kata, jujur, jangan menebak dari judul).
+2) "object": true hanya bila benda/tempat yang dimaksud terlihat JELAS sebagai fokus gambar.
+3) "setting": true hanya bila suasana/konteksnya sesuai yang seharusnya (mis. lampu sorot PANGGUNG konser, bukan
+   lampu jalan; teleprompter, bukan stand partitur). Budaya/lokasi asing yang mencolok = false.
+Balas JSON: {{"seen": "...", "object": true, "setting": true}}"""
+
+
+def _broll_ok(path: Path, item: dict, topic: str, said: str) -> tuple[bool, str]:
+    """AI vision menilai SATU gambar (maks 640 px — lebih detail dari lembar kontak): benda jelas + suasana sesuai."""
+    import io
+
+    from PIL import Image
+    im = Image.open(path).convert("RGB")
+    im.thumbnail((640, 640))
+    buf = io.BytesIO()
+    im.save(buf, "JPEG", quality=85)
+    res = llm.vision_json(BROLL_CHECK.format(topic=topic[:120], said=said[:300], word=item["word"],
+                                             visual=item.get("visual") or item["query_en"]), buf.getvalue())
+    return bool(res.get("object")) and bool(res.get("setting")), str(res.get("seen") or "")[:120]
+
+
+def _broll_asset(item: dict, d: Path, k: int, fmt: str, topic: str = "", said: str = "", progress=lambda m: None) -> dict | None:
+    """Kandidat stok (Commons + Pixabay dengan tag yang nyambung) diperiksa SATU PER SATU oleh AI vision: harus jelas
+    memperlihatkan bendanya DAN suasananya sesuai (lampu sorot panggung, bukan lampu jalan). Tidak ada yang lolos →
+    gambar AI dibuat persis dari deskripsi visual (lalu diperiksa juga). Masih gagal / vision tak tersedia → tanpa
+    B-roll. Lebih baik tanpa B-roll daripada B-roll yang membingungkan."""
+    from PIL import Image
+
+    from . import assets
     orient = "vertical" if fmt == "short" else "horizontal"
     q = item["query_en"]
-    keys = set(re.findall(r"[a-z]{3,}", q.lower())) - {"the", "and", "with", "indonesia", "indonesian", "photo"}
-    cands = []
+    visual = item.get("visual") or q
+    keys = set(re.findall(r"[a-z]{3,}", q.lower())) - {"the", "and", "with", "indonesia", "indonesian", "photo", "java", "east"}
+    stock = []
     try:
-        cands += assets.search_commons(q, 4)
-        if config.PIXABAY_API_KEY and item["kind"] != "commons":
+        if item["kind"] == "commons":
+            stock += assets.search_commons(q, 3)
+        if config.PIXABAY_API_KEY:
             data = assets._cached_get("https://pixabay.com/api/", {
                 "key": config.PIXABAY_API_KEY, "q": q[:100], "image_type": "photo",
-                "orientation": orient, "per_page": 8, "safesearch": "true"})
+                "orientation": orient, "per_page": 10, "safesearch": "true"})
             for hit in data.get("hits", []):
                 tags = (hit.get("tags") or "").lower()
-                if hit.get("largeImageURL") and (not keys or any(kw in tags for kw in keys)):  # tag harus nyambung
-                    cands.append({"provider": "pixabay", "url": hit["largeImageURL"],
-                                  "thumb": hit.get("webformatURL") or hit["largeImageURL"],
-                                  "page_url": hit.get("pageURL"), "author": hit.get("user"),
-                                  "license": "Pixabay Content License", "title": hit.get("tags") or q})
+                if hit.get("largeImageURL") and keys and sum(kw in tags for kw in keys) >= max(1, (len(keys) + 1) // 2):
+                    stock.append({"provider": "pixabay", "url": hit["largeImageURL"], "page_url": hit.get("pageURL"),
+                                  "author": hit.get("user"), "license": "Pixabay Content License",
+                                  "title": hit.get("tags") or q})
     except Exception:  # noqa: BLE001
         pass
-    cands = cands[:vision.COLS * 2]
-    if not cands:
-        return None
+    ai = [dict(c, title=visual) for c in assets.search_ai(visual, "portrait" if fmt == "short" else "landscape", 1)]
+    dest, tmp = d / "assets" / f"broll_{k}.jpg", d / "assets" / f"broll_{k}_try.jpg"
     pick = None
-    try:
-        res = vision.pick(topic, f'Pembicara berkata: "{said[:300]}" — gambar untuk kata "{item["word"]}" '
-                                 f'({item.get("why") or q})', [c.get("thumb") or c["url"] for c in cands], [])
-        if res and res.get("fit") == "cocok":
-            pick = cands[res["index"]]
-        elif res is not None:
-            return None  # vision sudah melihat semua kandidat & tidak ada yang cocok
-    except Exception:  # noqa: BLE001 — vision tidak tersedia: hanya Commons yang judulnya jelas memuat kata kunci
-        res = None
+    for c in stock[:3] + ai:
+        is_ai = c["provider"] == "ai"
+        progress(f"B-roll '{item['word']}': {'membuat gambar AI dari deskripsi' if is_ai else 'memeriksa foto ' + c['provider']}…")
+        try:
+            assets._download(c["url"], tmp)
+            if is_ai and not c["url"].startswith("cfimg:"):
+                assets._crop_watermark(tmp)
+            Image.open(tmp).convert("RGB").save(tmp, "JPEG", quality=90)
+        except Exception:  # noqa: BLE001
+            continue
+        try:
+            ok, seen = _broll_ok(tmp, item, topic, said)
+        except Exception:  # noqa: BLE001 — tanpa vision tidak ada pemeriksaan → jangan pasang apa pun
+            tmp.unlink(missing_ok=True)
+            return None
+        if ok:
+            tmp.replace(dest)
+            pick = dict(c, check=seen)
+            break
+        progress(f"B-roll '{item['word']}': ditolak — terlihat {seen}")
+    tmp.unlink(missing_ok=True)
     if pick is None:
-        pick = next((c for c in cands if c["provider"] == "commons"
-                     and sum(kw in (c.get("title") or "").lower() for kw in keys) >= max(1, len(keys) // 2)), None)
-    if pick is None:
+        progress(f"B-roll '{item['word']}' dilewati — tidak ada gambar yang benar-benar cocok")
         return None
-    dest = d / "assets" / f"broll_{k}.jpg"
-    try:
-        assets._download(pick["url"], dest)
-        from PIL import Image
-        Image.open(dest).convert("RGB").save(dest, "JPEG", quality=90)
-    except Exception:  # noqa: BLE001
-        return None
-    usage.ai("Gambar", {"commons": "Wikimedia Commons", "pixabay": "Pixabay", "ai": "Pollinations AI"}.get(
+    usage.ai("Gambar", {"commons": "Wikimedia Commons", "pixabay": "Pixabay", "ai": "Gambar AI"}.get(
         pick.get("provider"), pick.get("provider") or "?"), q, None, "B-roll")
     return {"file": f"assets/broll_{k}.jpg", "provider": pick.get("provider"), "page_url": pick.get("page_url"),
             "author": pick.get("author"), "license": pick.get("license"), "title": pick.get("title"),
-            "requires_attribution": pick.get("requires_attribution", False)}
+            "requires_attribution": pick.get("requires_attribution", False), "check": pick["check"]}
 
 
 def _emoji_png(e: str) -> Path | None:
@@ -677,9 +710,9 @@ def run(pid: str, params: dict, progress) -> dict:
             t = word_time(it["sent"], it["word"])
             if t is None or t + BROLL_DUR > intro_dur + body_dur or any(abs(t - b["start"]) < BROLL_DUR + 1.5 for b in broll):
                 continue
-            progress(f"B-roll {k + 1}: mencari & memeriksa gambar '{it['query_en']}'…")
+            progress(f"B-roll {k + 1}: mencari gambar untuk '{it['word']}'…")
             said = " ".join(words[i]["text"] for i in sents[it["sent"]])
-            a = _broll_asset(it, d, k, p["format"], plan.get("topic") or p.get("title") or "", said)
+            a = _broll_asset(it, d, k, p["format"], plan.get("topic") or p.get("title") or "", said, progress)
             if a:
                 broll.append({**a, "start": round(t, 2), "end": round(t + BROLL_DUR, 2), "query": it["query_en"]})
                 sfx.append(("whoosh", max(0.0, t - 0.12)))
